@@ -13,14 +13,19 @@
  *   ./nightcast oracle     --network preprod --oracle oracle.secret --wallet wallet.secret
  *   ./nightcast request    --network preprod --requester requester.secret --wallet wallet.secret --wait
  *   ./nightcast status     --network preprod --id <request id>
+ *   ./nightcast blockfrost save --network preprod
+ *
+ * Preprod's public node and indexer are run by Blockfrost and need a project
+ * id: `blockfrost save` stores it in ~/nightcast-secrets/blockfrost-preprod.secret,
+ * or pass --blockfrost <file> or set NIGHTCAST_BLOCKFROST_PROJECT_ID.
  *
  * The wallet that pays fees comes from --wallet (a file from `wallet new`) or
  * NIGHTCAST_WALLET_SEED (hex); on the `local` network a genesis wallet is the
  * default.
  */
 import { webcrypto } from 'node:crypto';
-import { mkdirSync, readFileSync, realpathSync, writeFileSync } from 'node:fs';
-import { join } from 'node:path';
+import { chmodSync, mkdirSync, readFileSync, realpathSync, writeFileSync } from 'node:fs';
+import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { parseArgs } from 'node:util';
 import { fromHex, oraclePublicKey, parseOracleSecretKey, pureCircuits, Status, toHex } from '@nightcast/contract';
@@ -30,8 +35,12 @@ import { setNetworkId } from '@midnight-ntwrk/midnight-js/network-id';
 import { compilerInfo, type Fingerprints, localFingerprints } from './fingerprints.js';
 import { isLocked, lockMaintenanceAuthority } from './lock.js';
 import {
+  BLOCKFROST,
+  blockfrostProjectId,
   connect,
   createLogger,
+  defaultBlockfrostFile,
+  redact,
   isNetwork,
   type Network,
   NETWORKS,
@@ -61,10 +70,65 @@ const USAGE = `usage:
   ./nightcast oracle       --network <network> --oracle <oracle secret file> --wallet <file> [--requesters <hex,...>] [--poll 5] [--proof-server-port <port>]
   ./nightcast request      --network <network> --requester <requester secret file> --wallet <file> [--tag <text>] [--deadline-mins 30] [--wait] [--proof-server-port <port>]
   ./nightcast status       --network <network> --id <request id>
+  ./nightcast blockfrost save --network <network> [--out <file>]
 
 --oracle, --operator and --requester take files from \`./nightcast keygen\`. --wallet takes a
 file from \`./nightcast wallet new\` (or set NIGHTCAST_WALLET_SEED). Deploy uses only the
-public parts of key files, except with --accept, which needs the oracle secret.`;
+public parts of key files, except with --accept, which needs the oracle secret.
+
+Preprod needs a Blockfrost project id (https://blockfrost.io): save it once with
+\`./nightcast blockfrost save --network preprod\`, or pass --blockfrost <file> to any
+command, or set NIGHTCAST_BLOCKFROST_PROJECT_ID.`;
+
+/** --blockfrost <file>, if given. */
+let blockfrostFileArg: string | undefined;
+
+/** The Blockfrost project id for a network that needs one, else undefined. */
+const projectIdFor = (network: Network): string | undefined =>
+  BLOCKFROST[network] ? blockfrostProjectId(network, blockfrostFileArg) : undefined;
+
+/**
+ * Read a line without echoing it (for pasting a project id). Falls back to
+ * reading all of stdin when it isn't a terminal.
+ */
+const askHidden = (question: string): Promise<string> =>
+  new Promise((resolve, reject) => {
+    const stdin = process.stdin;
+    if (!stdin.isTTY) {
+      let data = '';
+      stdin.setEncoding('utf8');
+      stdin.on('data', (c: string) => (data += c));
+      stdin.on('end', () => resolve(data));
+      stdin.on('error', reject);
+      return;
+    }
+    process.stdout.write(question);
+    let input = '';
+    const finish = () => {
+      stdin.setRawMode(false);
+      stdin.pause();
+      stdin.off('data', onData);
+      process.stdout.write('\n');
+    };
+    const onData = (chunk: string) => {
+      for (const ch of chunk) {
+        if (ch === '\r' || ch === '\n') {
+          finish();
+          return resolve(input);
+        }
+        if (ch === '\u0003') {
+          finish();
+          return reject(new Error('cancelled'));
+        }
+        if (ch === '\u007f' || ch === '\b') input = input.slice(0, -1);
+        else input += ch;
+      }
+    };
+    stdin.setRawMode(true);
+    stdin.setEncoding('utf8');
+    stdin.resume();
+    stdin.on('data', onData);
+  });
 
 type KeyFile = { role: string; secret?: string; public: unknown };
 
@@ -98,7 +162,14 @@ const walletSeed = (file: string | undefined): string | undefined => {
 const walletOptions = (network: Network, seed: string | undefined, showAddress = false): WalletOptions => ({
   seed,
   onAddress: (address) => {
-    if (showAddress) process.stdout.write(`\nWallet address: ${address}\n\nSyncing the wallet (the first sync can take a few minutes)...\n`);
+    if (!showAddress) return;
+    const faucet = FAUCETS[network];
+    process.stdout.write(
+      `\nWallet address: ${address}\n\n` +
+        (faucet ? `New wallet? You can request test NIGHT now, while it syncs: open ${faucet}\nand paste the address above.\n\n` : '') +
+        `Syncing the wallet. A new wallet reads the whole chain, which can take a while;\n` +
+        `progress is shown every 30 seconds...\n`,
+    );
   },
   onNoFunds: (address) =>
     process.stdout.write(
@@ -138,7 +209,7 @@ const saveMaintenanceKeyForRetry = (network: Network, address: string, key: stri
 };
 
 const withSession = async <T>(network: Network, proofServerPort: number | undefined, run: (s: Session) => Promise<T>) => {
-  const session = await connect(network, { proofServerPort });
+  const session = await connect(network, { proofServerPort, projectId: projectIdFor(network) });
   try {
     return await run(session);
   } finally {
@@ -152,7 +223,7 @@ const runVerify = async (session: Session | undefined, network: Network, address
   const publicConfig = () => {
     if (network === 'local') throw new Error('verify on `local` must run inside the same session as the deploy');
     const logger = createLogger('warn');
-    const c = publicEndpoints(network, logger);
+    const c = publicEndpoints(network, logger, projectIdFor(network));
     setNetworkId(c.networkId);
     return c;
   };
@@ -193,9 +264,11 @@ const main = async (argv: string[]): Promise<number> => {
       address: { type: 'string' },
       'maintenance-key-file': { type: 'string' },
       'proof-server-port': { type: 'string' },
+      blockfrost: { type: 'string' },
     },
     strict: true,
   });
+  blockfrostFileArg = values.blockfrost;
 
   switch (command) {
     case 'fingerprints': {
@@ -346,13 +419,52 @@ const main = async (argv: string[]): Promise<number> => {
       return withSession(network, portArg(values['proof-server-port']), async (session) => {
         const c = session.config;
         process.stdout.write(
-          `\nNetwork:      ${network} (${c.networkId})\nNode:         ${c.node}\nIndexer:      ${c.indexer}\nProof server: ${c.proofServer}\n\n` +
+          redact(
+            `\nNetwork:      ${network} (${c.networkId})\nNode:         ${c.node}\nIndexer:      ${c.indexer}\nProof server: ${c.proofServer}\n\n`,
+          ) +
             (session.problems.length === 0
               ? 'Everything answered. You are ready to go.\n'
               : `Problems:\n${session.problems.map((p) => `  - ${p}`).join('\n')}\n`),
         );
         return session.problems.length === 0 ? 0 : 1;
       });
+    }
+
+    case 'blockfrost': {
+      if (positionals[0] !== 'save') throw new Error('usage: ./nightcast blockfrost save --network <network> [--out <file>]');
+      const network = networkArg(values.network);
+      const endpoints = BLOCKFROST[network];
+      if (!endpoints) throw new Error(`${network} doesn't use Blockfrost; no project id needed`);
+      const out = values.out ?? defaultBlockfrostFile(network);
+      process.stdout.write(
+        `Paste your Blockfrost project id for Midnight ${network} and press Enter.\n` +
+          `(Nothing shows while you paste; that's on purpose.)\n`,
+      );
+      // Project ids are letters and digits; drop anything else a paste may carry.
+      const id = (await askHidden('Project id: ')).replace(/[^A-Za-z0-9]/g, '');
+      if (!id) throw new Error('nothing was pasted; run the command again');
+      const res = await fetch(`${endpoints.indexer}?project_id=${encodeURIComponent(id)}`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: '{"query":"{ __typename }"}',
+        signal: AbortSignal.timeout(30_000),
+      }).catch((err: unknown) => err as Error);
+      if (res instanceof Error) {
+        process.stdout.write(`Couldn't reach Blockfrost to check it (${res.message}); saving it anyway.\n`);
+      } else if (!res.ok) {
+        throw new Error(
+          `Blockfrost refused that project id (HTTP ${res.status}). Check you copied the whole id, and that the project's ` +
+            `network is Midnight ${network}. Nothing was saved.`,
+        );
+      }
+      mkdirSync(dirname(out), { recursive: true });
+      writeFileSync(out, id + '\n', { mode: 0o600 });
+      chmodSync(out, 0o600);
+      process.stdout.write(
+        `${res instanceof Error ? '' : 'Blockfrost accepted it. '}Saved to ${out} (${id.length} characters; keep it private).\n` +
+          `Next: ./nightcast doctor --network ${network}\n`,
+      );
+      return 0;
     }
 
     case 'wallet': {
@@ -461,7 +573,7 @@ const main = async (argv: string[]): Promise<number> => {
       const id = fromHex(values.id);
       if (network === 'local') throw new Error('status on `local` must run inside the same session');
       const logger = createLogger('warn');
-      const config = publicEndpoints(network, logger);
+      const config = publicEndpoints(network, logger, projectIdFor(network));
       setNetworkId(config.networkId);
       const publicDataProvider = indexerPublicDataProvider(config.indexer, config.indexerWS);
       const r = await readRequest({ publicDataProvider }, record.contractAddress, id);
@@ -487,7 +599,7 @@ if (invokedDirectly()) {
   main(process.argv.slice(2)).then(
     (code) => process.exit(code),
     (err) => {
-      process.stderr.write(`${err instanceof Error ? err.message : String(err)}\n`);
+      process.stderr.write(redact(`${err instanceof Error ? err.message : String(err)}`) + '\n');
       process.exit(1);
     },
   );

@@ -4,7 +4,9 @@ This walks you through putting Nightcast on Midnight's Preprod test network, run
 
 Preprod uses test tokens with no real value, so nothing here costs money.
 
-**Time:** about an hour the first time, mostly installing and waiting for test tokens.
+**Preview instead of Preprod:** Midnight's other test network, Preview, needs no Blockfrost account. To use it, skip step 8 and write `--network preview` wherever this guide says `--network preprod`; its faucet is <https://midnight-tmnight-preview.nethermind.dev/>. Preprod is the one meant for final testing before Mainnet.
+
+**Time:** about an hour of hands-on work, plus a few hours (unattended) for the wallets' first sync.
 
 ---
 
@@ -106,7 +108,22 @@ The wallets hold test tokens that pay transaction fees. One is for the oracle, o
 
 **Back up `~/nightcast-secrets`** (for example to a USB stick). If you lose these files you lose the oracle key and the wallets.
 
-### 8. Check the connection, then fund the wallets
+### 8. Get a Blockfrost project ID
+
+Since 9 October 2026, Preprod's public servers are run by **Blockfrost**, and every connection needs a free Blockfrost *project ID* (like an API key).
+
+1. Sign up at <https://blockfrost.io> (the free plan is enough).
+2. In the dashboard, click **Add project**, give it a name (e.g. `nightcast`), and choose the network **Midnight Preprod**.
+3. Copy the project's **project ID**.
+4. In Ubuntu, run:
+   ```bash
+   ./nightcast blockfrost save --network preprod
+   ```
+   Paste the ID (right-click pastes in the Ubuntu window) and press Enter. Nothing shows while you paste; that's on purpose. It checks the ID with Blockfrost and saves it to `~/nightcast-secrets/blockfrost-preprod.secret`.
+
+Every command finds the ID there automatically. Keep it private like your other secrets: don't paste it into chats or commit it.
+
+### 9. Check the connection, then fund the wallets
 
 First check your computer can reach Preprod:
 
@@ -114,7 +131,7 @@ First check your computer can reach Preprod:
 ./nightcast doctor --network preprod
 ```
 
-It starts the proof server and checks the Preprod node and indexer. It should end with `Everything answered. You are ready to go.`
+It starts the proof server and checks the Preprod node and indexer (including the live WebSocket feed the wallet uses). It should end with `Everything answered. You are ready to go.`
 
 Now fund the oracle wallet:
 
@@ -122,11 +139,23 @@ Now fund the oracle wallet:
 ./nightcast wallet show --network preprod --wallet ~/nightcast-secrets/oracle-wallet.secret
 ```
 
-It prints the wallet address (starting `mn_addr_preprod1...`) and, because the wallet is empty, tells you what to do:
+It prints the wallet address (starting `mn_addr_preprod1...`), then starts syncing.
 
 1. Open the Preprod faucet: <https://midnight-tmnight-preprod.nethermind.dev/>
-2. Paste the address, complete the captcha and click **Request tokens**.
-3. Leave the terminal running. Within a few minutes it shows the NIGHT arriving, registers it for DUST, and waits for the first DUST.
+2. Paste the address, complete the captcha and click **Request tokens**. You can do this straight away; you don't need to wait for the sync.
+3. Leave the terminal running.
+
+**The first sync is slow.** A new wallet reads the network's whole history, which takes **a few hours** (Midnight's wallet processes about 20 events a second, and the test networks have hundreds of thousands). Every 30 seconds it prints progress like:
+
+```
+Syncing: shielded 12.3% (33493/271763), unshielded done, dust 14.2% (38670/272206)
+```
+
+Progress is saved every 2 minutes in `~/nightcast-secrets/wallet-state/`, so if you close the window or your computer sleeps, run the same command again and it carries on where it stopped. After the first sync, later commands only catch up on what's new, which takes seconds to minutes.
+
+You can sync both wallets at the same time: open a second Ubuntu terminal for the requester wallet (below).
+
+When the sync finishes it shows the NIGHT arriving, registers it for DUST, and waits for the first DUST.
 
 **NIGHT and DUST:** NIGHT is the token; DUST is what pays fees. Holding registered NIGHT slowly generates DUST, so after funding there's a short wait before the wallet can send transactions. The command finishes by printing both balances.
 
@@ -142,7 +171,7 @@ If the faucet says you're rate-limited, wait a few hours and try again.
 
 ## Part 3: Deploy Nightcast
 
-### 9. Deploy, lock and activate
+### 10. Deploy, lock and activate
 
 ```bash
 ./nightcast deploy --network preprod \
@@ -175,7 +204,7 @@ PASS  request windows match: 60s to 86400s
 
 ## Part 4: Run the oracle
 
-### 10. Start the oracle
+### 11. Start the oracle
 
 ```bash
 cd ~/nightcast
@@ -190,7 +219,7 @@ When it says `Oracle running for ...` and `Press Ctrl+C to stop.`, it's watching
 
 ## Part 5: Test it
 
-### 11. Ask for randomness
+### 12. Ask for randomness
 
 Open a **second** Ubuntu terminal:
 
@@ -221,7 +250,7 @@ You can look up any request later without a wallet:
 ./nightcast status --network preprod --id <request id>
 ```
 
-### 12. Stop the oracle
+### 13. Stop the oracle
 
 Press **Ctrl+C** in the oracle window. Requests made while it's stopped wait until it's back, up to their deadline (30 minutes by default); after that anyone can mark them expired.
 
@@ -246,9 +275,13 @@ git push
 
 | Problem | Fix |
 |---|---|
+| `preprod needs a Blockfrost project id` | Do step 8. |
+| `the Blockfrost project id was refused` (401 or 403) | The ID is wrong or for another network. Check the project's network is **Midnight Preprod**, then run `./nightcast blockfrost save --network preprod` again. |
+| Repeated `Wallet.Sync: [object ErrorEvent]` | Press Ctrl+C and run `./nightcast doctor --network preprod`; it shows which connection fails and why. |
 | `doctor` reports a problem, or a command says `did not answer` | Check your internet connection and run `./nightcast doctor --network preprod` again; Preprod is sometimes briefly down. |
 | `Cannot connect to the Docker daemon` | Open Docker Desktop and check WSL integration is on for Ubuntu (step 2). |
 | `compact: command not found` or `nvm: command not found` | Run `source ~/.bashrc`, or close and reopen the Ubuntu terminal. |
+| Sync progress stops moving for many minutes | Press Ctrl+C, run `./nightcast doctor --network preprod`, then run the command again; it resumes from the last save. |
 | Stuck on "Waiting for the NIGHT to arrive" | Check you pasted the `mn_addr_preprod1...` address into the faucet, with no spaces. |
 | Stuck on "Waiting for the first DUST" | Normal for a few minutes after funding; DUST builds up over time. |
 | `the oracle key is not active yet` | Run `./nightcast accept-key --network preprod --oracle ~/nightcast-secrets/oracle.secret --wallet ~/nightcast-secrets/oracle-wallet.secret`. |

@@ -147,17 +147,24 @@ jobs:
           set -o pipefail
           npx vitest run src/test/e2e.test.ts --reporter=default --reporter=github-actions --reporter=json --outputFile.json=../reports/e2e.json 2>&1 | tee ../e2e.log
 
-      - name: Connect to Preprod
+      - name: Connect to Preview and sync a wallet
         continue-on-error: true
-        shell: bash
+        run: deploy/scripts/ci-network-check.sh preview
+
+      # Preprod's node and indexer are run by Blockfrost and need a project id.
+      # Add one as the repository secret BLOCKFROST_PREPROD_PROJECT_ID to run this.
+      - name: Connect to Preprod (Blockfrost) and sync a wallet
+        continue-on-error: true
+        env:
+          NIGHTCAST_BLOCKFROST_PROJECT_ID: ${{ secrets.BLOCKFROST_PREPROD_PROJECT_ID }}
         run: |
-          set -o pipefail
-          if ./nightcast doctor --network preprod 2>&1 | tee doctor.log; then
-            echo "::notice title=Preprod::reachable (node, indexer, proof server)"
-          else
-            echo "::error title=Preprod doctor::$(sed 's/\x1b\[[0-9;]*m//g' doctor.log | tail -12 | sed 's/%/%25/g' | awk 'BEGIN{ORS="%0A"} {print substr($0,1,300)}')"
-            exit 1
+          if [ -z "$NIGHTCAST_BLOCKFROST_PROJECT_ID" ]; then
+            echo "::notice title=Preprod::skipped: no BLOCKFROST_PREPROD_PROJECT_ID secret"
+            ./nightcast doctor --network preprod > doctor-no-id.log 2>&1 && exit 1
+            grep -q 'blockfrost save' doctor-no-id.log
+            exit 0
           fi
+          deploy/scripts/ci-network-check.sh preprod
 
       - name: Deploy with the CLI on a local network
         shell: bash
