@@ -48,6 +48,14 @@ jobs:
       - name: Typecheck
         run: npm run typecheck
 
+      - name: Verifier key fingerprints
+        run: |
+          node deploy/dist/cli.js fingerprints | tee fingerprints.json
+          node -e '
+            const f = require("./fingerprints.json");
+            for (const [c, h] of Object.entries(f.verifierKeys)) console.log(`::notice title=fingerprint ${c}::${h}`);
+          '
+
       - name: Test contract
         working-directory: contract
         run: npx vitest run --reporter=default --reporter=github-actions --reporter=json --outputFile.json=../reports/contract.json
@@ -56,6 +64,11 @@ jobs:
         if: ${{ !cancelled() && steps.build.outcome == 'success' }}
         working-directory: sdk
         run: npx vitest run --reporter=default --reporter=github-actions --reporter=json --outputFile.json=../reports/sdk.json
+
+      - name: Test deploy tooling
+        if: ${{ !cancelled() && steps.build.outcome == 'success' }}
+        working-directory: deploy
+        run: npx vitest run src/test/offline.test.ts --reporter=default --reporter=github-actions --reporter=json --outputFile.json=../reports/deploy.json
 
       - name: Summarise tests
         if: always()
@@ -66,5 +79,60 @@ jobs:
               const r = require(process.argv[1]);
               const name = process.argv[1].split("/").pop().replace(".json", "");
               console.log(`::notice title=${name} tests::${r.numPassedTests} passed, ${r.numFailedTests} failed, ${r.numTotalTests} total`);
+            ' "$PWD/$f"
+          done
+
+  # Deploys to a throwaway local Midnight network in Docker: deploy, lock the
+  # maintenance authority, activate the oracle key, verify the fingerprints,
+  # then serve a real request with real proofs.
+  e2e:
+    needs: test
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/setup-node@v5
+        with:
+          node-version: 22
+
+      - name: Install Compact toolchain
+        run: |
+          curl --proto '=https' --tlsv1.2 -LsSf https://github.com/midnightntwrk/compact/releases/latest/download/compact-installer.sh | sh
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+
+      - name: Select compiler ${{ env.COMPACT_TOOLCHAIN }}
+        run: compact update "$COMPACT_TOOLCHAIN"
+
+      - name: Install dependencies
+        run: npm install --no-audit --no-fund
+
+      - name: Compile contract (with proving keys)
+        run: npm run compact
+
+      - name: Build
+        run: npm run build
+
+      - name: Pull network images
+        run: docker compose -f deploy/docker/compose.yml pull
+        env:
+          TESTCONTAINERS_UID: pull
+
+      - name: End-to-end test on a local network
+        working-directory: deploy
+        env:
+          NIGHTCAST_E2E: '1'
+        run: npx vitest run src/test/e2e.test.ts --reporter=default --reporter=github-actions --reporter=json --outputFile.json=../reports/e2e.json
+
+      - name: Summarise tests
+        if: always()
+        run: |
+          for f in reports/*.json; do
+            [ -f "$f" ] || continue
+            node -e '
+              const r = require(process.argv[1]);
+              const name = process.argv[1].split("/").pop().replace(".json", "");
+              console.log(`::notice title=${name} tests::${r.numPassedTests} passed, ${r.numFailedTests} failed, ${r.numTotalTests} total`);
+              for (const f of r.testResults) for (const a of f.assertionResults) if (a.status === "failed") console.log(`::error title=${a.title}::${(a.failureMessages[0]||"").slice(0,900).replace(/\n/g,"%0A")}`);
             ' "$PWD/$f"
           done

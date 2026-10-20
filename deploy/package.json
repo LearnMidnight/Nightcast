@@ -1,0 +1,32 @@
+{
+  "name": "@nightcast/deploy",
+  "version": "0.1.0",
+  "description": "Deploy Nightcast, lock its maintenance authority, activate the oracle key and verify a deployment against its published fingerprints.",
+  "license": "MIT",
+  "private": true,
+  "type": "module",
+  "main": "dist/cli.js",
+  "bin": {
+    "nightcast-deploy": "dist/cli.js"
+  },
+  "files": ["dist", "docker"],
+  "scripts": {
+    "build": "rm -rf dist && tsc -p tsconfig.build.json && chmod +x dist/cli.js",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "test": "vitest run src/test/offline.test.ts",
+    "test:e2e": "NIGHTCAST_E2E=1 vitest run src/test/e2e.test.ts"
+  },
+  "dependencies": {
+    "@midnight-ntwrk/compact-js": "2.5.1",
+    "@midnight-ntwrk/compact-runtime": "0.16.0",
+    "@midnight-ntwrk/midnight-js": "4.1.1",
+    "@midnight-ntwrk/midnight-js-http-client-proof-provider": "4.1.1",
+    "@midnight-ntwrk/midnight-js-indexer-public-data-provider": "4.1.1",
+    "@midnight-ntwrk/midnight-js-node-zk-config-provider": "4.1.1",
+    "@midnight-ntwrk/midnight-js-protocol": "4.1.1",
+    "@midnight-ntwrk/testkit-js": "4.1.1",
+    "@nightcast/contract": "0.1.0",
+    "pino": "^10.3.1",
+    "pino-pretty": "^13.1.3"
+  }
+}
