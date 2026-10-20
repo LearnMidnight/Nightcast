@@ -6,7 +6,7 @@ Preprod uses test tokens with no real value, so nothing here costs money.
 
 **Preview instead of Preprod:** Midnight's other test network, Preview, needs no Blockfrost account. To use it, skip step 8 and write `--network preview` wherever this guide says `--network preprod`; its faucet is <https://midnight-tmnight-preview.nethermind.dev/>. Preprod is the one meant for final testing before Mainnet.
 
-**Time:** about an hour the first time, mostly installing and waiting for test tokens.
+**Time:** about an hour of hands-on work, plus a few hours (unattended) for the wallets' first sync.
 
 ---
 
@@ -139,11 +139,23 @@ Now fund the oracle wallet:
 ./nightcast wallet show --network preprod --wallet ~/nightcast-secrets/oracle-wallet.secret
 ```
 
-It prints the wallet address (starting `mn_addr_preprod1...`) and, because the wallet is empty, tells you what to do:
+It prints the wallet address (starting `mn_addr_preprod1...`), then starts syncing.
 
 1. Open the Preprod faucet: <https://midnight-tmnight-preprod.nethermind.dev/>
-2. Paste the address, complete the captcha and click **Request tokens**.
-3. Leave the terminal running. Within a few minutes it shows the NIGHT arriving, registers it for DUST, and waits for the first DUST.
+2. Paste the address, complete the captcha and click **Request tokens**. You can do this straight away; you don't need to wait for the sync.
+3. Leave the terminal running.
+
+**The first sync is slow.** A new wallet reads the network's whole history, which takes **a few hours** (Midnight's wallet processes about 20 events a second, and the test networks have hundreds of thousands). Every 30 seconds it prints progress like:
+
+```
+Syncing: shielded 12.3% (33493/271763), unshielded done, dust 14.2% (38670/272206)
+```
+
+Progress is saved every 2 minutes in `~/nightcast-secrets/wallet-state/`, so if you close the window or your computer sleeps, run the same command again and it carries on where it stopped. After the first sync, later commands only catch up on what's new, which takes seconds to minutes.
+
+You can sync both wallets at the same time: open a second Ubuntu terminal for the requester wallet (below).
+
+When the sync finishes it shows the NIGHT arriving, registers it for DUST, and waits for the first DUST.
 
 **NIGHT and DUST:** NIGHT is the token; DUST is what pays fees. Holding registered NIGHT slowly generates DUST, so after funding there's a short wait before the wallet can send transactions. The command finishes by printing both balances.
 
@@ -269,6 +281,7 @@ git push
 | `doctor` reports a problem, or a command says `did not answer` | Check your internet connection and run `./nightcast doctor --network preprod` again; Preprod is sometimes briefly down. |
 | `Cannot connect to the Docker daemon` | Open Docker Desktop and check WSL integration is on for Ubuntu (step 2). |
 | `compact: command not found` or `nvm: command not found` | Run `source ~/.bashrc`, or close and reopen the Ubuntu terminal. |
+| Sync progress stops moving for many minutes | Press Ctrl+C, run `./nightcast doctor --network preprod`, then run the command again; it resumes from the last save. |
 | Stuck on "Waiting for the NIGHT to arrive" | Check you pasted the `mn_addr_preprod1...` address into the faucet, with no spaces. |
 | Stuck on "Waiting for the first DUST" | Normal for a few minutes after funding; DUST builds up over time. |
 | `the oracle key is not active yet` | Run `./nightcast accept-key --network preprod --oracle ~/nightcast-secrets/oracle.secret --wallet ~/nightcast-secrets/oracle-wallet.secret`. |

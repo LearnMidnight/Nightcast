@@ -28,6 +28,7 @@
     "@midnight-ntwrk/midnight-js-node-zk-config-provider": "4.1.1",
     "@midnight-ntwrk/midnight-js-protocol": "4.1.1",
     "@midnight-ntwrk/testkit-js": "4.1.1",
+    "@midnight-ntwrk/wallet-sdk": "1.1.0",
     "@nightcast/contract": "0.1.0",
     "@nightcast/sdk": "0.1.0",
     "pino": "^10.3.1",

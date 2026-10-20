@@ -28,6 +28,7 @@ import {
 } from '@midnight-ntwrk/testkit-js';
 import { Nightcast, type NightcastPrivateState, witnesses } from '@nightcast/contract';
 import { zkConfigPath } from './fingerprints.js';
+import { buildWallet } from './wallet.js';
 
 export const NETWORKS = ['preprod', 'preview', 'local'] as const;
 export type Network = (typeof NETWORKS)[number];
@@ -341,12 +342,25 @@ export const FAUCETS: Partial<Record<Network, string>> = {
 export const openWallet = async (session: Session, opts: WalletOptions = {}): Promise<MidnightWalletProvider> => {
   const seed = opts.seed ?? (session.network === 'local' ? LOCAL_GENESIS_SEEDS[0] : undefined);
   if (!seed) throw new Error('No wallet: pass --wallet <file from `./nightcast wallet new`> or set NIGHTCAST_WALLET_SEED.');
-  // The testkit logs the wallet seed at info level; give it a quieter logger so
-  // the secret never reaches the terminal.
-  const wallet = await MidnightWalletProvider.build(session.logger.child({}, { level: 'warn' }), session.config, seed);
+  // Remember sync progress between runs on public networks (a first sync takes
+  // hours); `local` networks are throwaway, so start fresh there.
+  const persist = session.network !== 'local' && process.env.NIGHTCAST_NO_WALLET_STATE !== '1';
+  const built = await buildWallet(session.config, session.network, seed, session.logger.child({}, { level: 'warn' }), persist);
+  const wallet = built.provider;
   const address = walletAddress(wallet);
   opts.onAddress?.(address);
+  if (built.restored) session.logger.info('Carrying on from the saved wallet state.');
   await wallet.start(false);
+
+  // Save every 2 minutes and when the wallet stops, so an interrupted sync resumes.
+  const saveQuietly = () => built.save().catch((e) => session.logger.warn(`Could not save wallet state: ${e}`));
+  const autosave = setInterval(saveQuietly, 120_000);
+  const stop = wallet.stop.bind(wallet);
+  wallet.stop = async () => {
+    clearInterval(autosave);
+    await saveQuietly();
+    return stop();
+  };
 
   const synced = () => firstValueFrom(wallet.wallet.state().pipe(filter((s) => s.isSynced)));
   const progress = wallet.wallet
@@ -367,6 +381,7 @@ export const openWallet = async (session: Session, opts: WalletOptions = {}): Pr
     clearTimeout(slow);
     progress.unsubscribe();
   });
+  await saveQuietly();
   if ((state.unshielded.balances[unshieldedToken().raw] ?? 0n) === 0n) {
     opts.onNoFunds?.(address);
     state = await firstValueFrom(
