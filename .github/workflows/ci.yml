@@ -158,7 +158,7 @@ jobs:
           npx nightcast-deploy wallet new --out "$RUNNER_TEMP/wallet.secret"
           test "$(stat -c %a "$RUNNER_TEMP/wallet.secret")" = 600
           export NIGHTCAST_DEPLOYMENTS_DIR="$RUNNER_TEMP/deployments"
-          npx nightcast-deploy deploy --network local --oracle "$RUNNER_TEMP/oracle.secret" --operator "$RUNNER_TEMP/operator.secret" --accept 2>&1 | tee cli.log
+          npx nightcast-deploy deploy --network local --oracle "$RUNNER_TEMP/oracle.secret" --operator "$RUNNER_TEMP/operator.secret" --accept
           node -e '
             const r = require(process.env.NIGHTCAST_DEPLOYMENTS_DIR + "/local.json");
             const ok = r.transactions.deploy && r.transactions.lockAuthority && r.transactions.acceptOracleKey && r.maintenanceAuthority.committeeSize === 0;
