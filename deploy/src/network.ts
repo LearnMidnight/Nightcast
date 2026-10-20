@@ -11,6 +11,7 @@ import { indexerPublicDataProvider } from '@midnight-ntwrk/midnight-js-indexer-p
 import { NodeZkConfigProvider } from '@midnight-ntwrk/midnight-js-node-zk-config-provider';
 import {
   defaultContainersConfiguration,
+  DynamicProofServerContainer,
   type EnvironmentConfiguration,
   inMemoryPrivateStateProvider,
   LocalTestEnvironment,
@@ -19,7 +20,6 @@ import {
   PreviewTestEnvironment,
   setContainersConfiguration,
   StaticProofServerContainer,
-  type TestEnvironment,
   waitForFunds,
 } from '@midnight-ntwrk/testkit-js';
 import { Nightcast, type NightcastPrivateState, witnesses } from '@nightcast/contract';
@@ -52,9 +52,33 @@ export type Session = {
   network: Network;
   logger: Logger;
   config: EnvironmentConfiguration;
-  env: TestEnvironment;
+  /** Services that didn't answer when connecting (empty when all is well). */
+  problems: string[];
   shutdown(): Promise<void>;
 };
+
+/** Public endpoints (node, indexer) for a remote network; the proof server is added by `connect`. */
+export const publicEndpoints = (network: Exclude<Network, 'local'>, logger: Logger): EnvironmentConfiguration => {
+  const env = network === 'preprod' ? new PreprodTestEnvironment(logger) : new PreviewTestEnvironment(logger);
+  // The testkit's faucet API needs no captcha only in CI; use the faucet web page instead.
+  return { ...env.getEnvironmentConfiguration(), faucet: undefined };
+};
+
+/**
+ * Check a service answers, allowing for slow links (the testkit's own checks
+ * give up after 1 second, which is too short from far away). Returns an
+ * error message, or undefined when it's reachable.
+ */
+const reachable = async (name: string, url: string, timeoutMs = 20_000): Promise<string | undefined> => {
+  try {
+    const res = await fetch(url, { signal: AbortSignal.timeout(timeoutMs) });
+    return res.status < 500 ? undefined : `${name} at ${url} answered ${res.status}`;
+  } catch (err) {
+    return `${name} at ${url} did not answer (${err instanceof Error ? err.message : String(err)})`;
+  }
+};
+
+const withPath = (base: string, path: string): string => new URL(path, new URL(base).origin).toString();
 
 /**
  * Connect to a network. For Preprod and Preview a proof server is started in
@@ -69,23 +93,33 @@ export const connect = async (network: Network, opts: { proofServerPort?: number
     standalone: { ...defaultContainersConfiguration.standalone, path: dockerDir, fileName: 'compose.yml' },
   });
 
-  let env: TestEnvironment;
-  switch (network) {
-    case 'preprod':
-      env = new PreprodTestEnvironment(logger);
-      break;
-    case 'preview':
-      env = new PreviewTestEnvironment(logger);
-      break;
-    case 'local':
-      setNetworkId('undeployed');
-      env = new LocalTestEnvironment(logger);
-      break;
+  if (network === 'local') {
+    setNetworkId('undeployed');
+    const env = new LocalTestEnvironment(logger);
+    const config = await env.start();
+    return { network, logger, config, problems: [], shutdown: () => env.shutdown() };
   }
-  const proofServer = opts.proofServerPort ? new StaticProofServerContainer(opts.proofServerPort) : undefined;
-  const config = await env.start(network === 'local' ? undefined : proofServer);
-  setNetworkId(config.networkId);
-  return { network, logger, config, env, shutdown: () => env.shutdown() };
+
+  const base = publicEndpoints(network, logger);
+  setNetworkId(base.networkId);
+  logger.info(opts.proofServerPort ? `Using the proof server on port ${opts.proofServerPort}` : 'Starting a proof server in Docker...');
+  const proofServer = opts.proofServerPort
+    ? new StaticProofServerContainer(opts.proofServerPort)
+    : await DynamicProofServerContainer.start(logger, undefined, base.networkId);
+  const config: EnvironmentConfiguration = { ...base, proofServer: proofServer.getUrl() };
+
+  logger.info(`Checking the ${network} node, indexer and proof server...`);
+  const problems = (
+    await Promise.all([
+      reachable('node', withPath(config.node, '/health')),
+      reachable('indexer', withPath(config.indexer, '/ready')),
+      reachable('proof server', `${config.proofServer}/health`, 60_000),
+    ])
+  ).filter((p): p is string => p !== undefined);
+  for (const p of problems) logger.warn(`${p}; carrying on, but the next steps may fail`);
+  if (problems.length === 0) logger.info('All reachable.');
+
+  return { network, logger, config, problems, shutdown: () => proofServer.stop() };
 };
 
 /** Seeds of the pre-funded wallets on a `local` network. */
