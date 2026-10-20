@@ -45,6 +45,18 @@ jobs:
         id: build
         run: npm run build
 
+      - name: Explain type errors
+        if: failure() && steps.build.outcome == 'failure'
+        run: |
+          for pkg in contract sdk deploy; do
+            npx tsc -p $pkg/tsconfig.json --noEmit --pretty false > tsc-$pkg.txt 2>&1 || true
+            node -e '
+              const text = require("fs").readFileSync(process.argv[1], "utf8");
+              const blocks = text.split(/\n(?=\S)/).filter(Boolean).slice(0, 10);
+              for (const b of blocks) console.log(`::error title=tsc ${process.argv[2]}::${b.slice(0, 1800).replace(/%/g,"%25").replace(/\n/g,"%0A")}`);
+            ' tsc-$pkg.txt $pkg
+          done
+
       - name: Typecheck
         run: npm run typecheck
 

@@ -95,13 +95,15 @@ const withSession = async <T>(network: Network, proofServerPort: number | undefi
 const runVerify = async (session: Session | undefined, network: Network, address?: string): Promise<boolean> => {
   const record = readRecord(network);
   if (address && address !== record.contractAddress) throw new Error(`record is for ${record.contractAddress}, not ${address}`);
-  let config = session?.config;
-  if (!config) {
+  const publicConfig = () => {
     if (network === 'local') throw new Error('verify on `local` must run inside the same session as the deploy');
     const logger = createLogger('warn');
-    config = (network === 'preprod' ? new PreprodTestEnvironment(logger) : new PreviewTestEnvironment(logger)).getEnvironmentConfiguration();
-    setNetworkId(config.networkId);
-  }
+    const env = network === 'preprod' ? new PreprodTestEnvironment(logger) : new PreviewTestEnvironment(logger);
+    const c = env.getEnvironmentConfiguration();
+    setNetworkId(c.networkId);
+    return c;
+  };
+  const config = session ? session.config : publicConfig();
   const state = await indexerPublicDataProvider(config.indexer, config.indexerWS).queryContractState(record.contractAddress);
   let local: Fingerprints | undefined;
   try {

@@ -1,7 +1,8 @@
 import { dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import pino, { type Logger } from 'pino';
-import { CompiledContract } from '@midnight-ntwrk/compact-js';
+import { CompiledContract, type ProvableCircuitId } from '@midnight-ntwrk/compact-js';
+import type { MidnightProviders } from '@midnight-ntwrk/midnight-js/types';
 import { setNetworkId } from '@midnight-ntwrk/midnight-js/network-id';
 import { httpClientProofProvider } from '@midnight-ntwrk/midnight-js-http-client-proof-provider';
 import { indexerPublicDataProvider } from '@midnight-ntwrk/midnight-js-indexer-public-data-provider';
@@ -27,6 +28,10 @@ export type Network = (typeof NETWORKS)[number];
 export const isNetwork = (s: string): s is Network => (NETWORKS as readonly string[]).includes(s);
 
 export const NIGHTCAST_PRIVATE_STATE_ID = 'nightcast';
+
+export type NightcastContract = Nightcast.Contract<NightcastPrivateState>;
+export type NightcastCircuits = ProvableCircuitId<NightcastContract>;
+export type NightcastProviders = MidnightProviders<NightcastCircuits, typeof NIGHTCAST_PRIVATE_STATE_ID, NightcastPrivateState>;
 
 const dockerDir = resolve(dirname(fileURLToPath(import.meta.url)), '..', 'docker');
 
@@ -98,10 +103,14 @@ export const openWallet = async (session: Session, seed?: string): Promise<Midni
  * the deployer's temporary maintenance key and any oracle secret passed in
  * never touch the disk.
  */
-export const nightcastProviders = (session: Session, wallet: MidnightWalletProvider, dir = zkConfigPath()) => {
-  const zkConfigProvider = new NodeZkConfigProvider<string>(dir);
+export const nightcastProviders = (
+  session: Session,
+  wallet: MidnightWalletProvider,
+  dir = zkConfigPath(),
+): NightcastProviders => {
+  const zkConfigProvider = new NodeZkConfigProvider<NightcastCircuits>(dir);
   return {
-    privateStateProvider: inMemoryPrivateStateProvider<string, NightcastPrivateState>(),
+    privateStateProvider: inMemoryPrivateStateProvider<typeof NIGHTCAST_PRIVATE_STATE_ID, NightcastPrivateState>(),
     publicDataProvider: indexerPublicDataProvider(session.config.indexer, session.config.indexerWS),
     zkConfigProvider,
     proofProvider: httpClientProofProvider(session.config.proofServer, zkConfigProvider),
@@ -110,4 +119,3 @@ export const nightcastProviders = (session: Session, wallet: MidnightWalletProvi
   };
 };
 
-export type NightcastProviders = ReturnType<typeof nightcastProviders>;
