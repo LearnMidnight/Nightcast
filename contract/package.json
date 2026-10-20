@@ -1,0 +1,27 @@
+{
+  "name": "@nightcast/contract",
+  "version": "0.1.0",
+  "description": "Nightcast verifiable randomness contract for Midnight (Compact), with key helpers and an in-memory simulator.",
+  "license": "MIT",
+  "private": true,
+  "type": "module",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    }
+  },
+  "files": ["dist"],
+  "scripts": {
+    "compact": "compact compile src/nightcast.compact src/managed/nightcast",
+    "compact:fast": "compact compile --skip-zk src/nightcast.compact src/managed/nightcast",
+    "build": "rm -rf dist && tsc -p tsconfig.build.json && cp -R src/managed dist/managed && cp src/nightcast.compact dist/",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "test": "vitest run"
+  },
+  "dependencies": {
+    "@midnight-ntwrk/compact-runtime": "0.16.0"
+  }
+}

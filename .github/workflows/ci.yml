@@ -1,0 +1,62 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  # Versions from Midnight's support matrix (Preview, Preprod and Mainnet, ledger 8).
+  COMPACT_TOOLCHAIN: 0.31.1
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Install Compact toolchain
+        run: |
+          curl --proto '=https' --tlsv1.2 -LsSf https://github.com/midnightntwrk/compact/releases/latest/download/compact-installer.sh | sh
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+
+      - name: Select compiler ${{ env.COMPACT_TOOLCHAIN }}
+        run: |
+          compact update "$COMPACT_TOOLCHAIN"
+          compact compile --version
+          compact compile --language-version
+
+      - name: Install dependencies
+        run: npm install --no-audit --no-fund
+
+      - name: Compile contract (with proving keys)
+        run: npm run compact
+
+      - name: Build
+        run: npm run build
+
+      - name: Typecheck
+        run: npm run typecheck
+
+      - name: Test
+        run: npm test
+
+      - name: Upload lockfile and contract artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: build-output
+          path: |
+            package-lock.json
+            contract/src/managed/nightcast/compiler
+            contract/src/managed/nightcast/keys
+          if-no-files-found: ignore

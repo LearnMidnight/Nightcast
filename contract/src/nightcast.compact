@@ -1,0 +1,214 @@
+// Nightcast: verifiable randomness for Midnight (v0, experimental).
+//
+// A request fixes a VRF input `alpha`. The oracle answers with
+//
+//     gamma  = hashToCurve(alpha) * sk
+//     output = SHA-256("nightcast:output:v0" || gamma)
+//
+// where `sk` is the oracle's secret Jubjub scalar and `pk = G * sk` was
+// recorded when the request was made. `fulfil` recomputes all of this inside
+// the circuit with `sk` as a private witness, so the transaction's zero-knowledge
+// proof is the VRF proof: the chain accepts an output only if it is the unique
+// value determined by (pk, alpha), and `sk` is never revealed.
+//
+// See docs/SPEC.md for the construction, threat model and limitations.
+
+pragma language_version >= 0.22 && < 0.24;
+
+import CompactStandardLibrary;
+
+// ---------------------------------------------------------------- types
+
+export enum Status { pending, fulfilled, expired }
+
+export struct Request {
+  status: Status;
+  // Consumer-chosen label, e.g. a hash of "midnight-lotto|m6|1001".
+  tag: Bytes<32>;
+  // Oracle key the request is bound to (a key rotation never affects it).
+  oracleKey: JubjubPoint;
+  // Seconds since the epoch; fulfil must land before this, expire after.
+  deadline: Uint<64>;
+  // The random value; all zeros until fulfilled.
+  output: Bytes<32>;
+}
+
+struct AlphaPreimage {
+  domain: Bytes<32>;
+  deployment: ContractAddress;
+  tag: Bytes<32>;
+  seed: Bytes<32>;
+}
+
+struct OutputPreimage {
+  domain: Bytes<32>;
+  gamma: JubjubPoint;
+}
+
+struct WordPreimage {
+  domain: Bytes<32>;
+  output: Bytes<32>;
+  index: Uint<32>;
+}
+
+// --------------------------------------------------------------- ledger
+
+// Requests by id. The id is also the VRF input (`alpha`).
+export ledger requests: Map<Bytes<32>, Request>;
+// Total requests ever made (increment-only, so concurrent requests don't clash).
+export ledger requestCount: Counter;
+// Key used for new requests.
+export ledger oracleKey: JubjubPoint;
+// SHA-256 commitment to the operator's secret; authorises admin circuits.
+export ledger operator: Bytes<32>;
+// Allowed distance between "now" and a request's deadline, in seconds.
+export sealed ledger minWindow: Uint<64>;
+export sealed ledger maxWindow: Uint<64>;
+
+// -------------------------------------------------------------- witnesses
+
+// The oracle's secret scalar. Only the oracle can supply a value that passes
+// the key check in `fulfil`.
+witness oracleSecretKey(): Field;
+// The operator's secret; hashed and compared with `operator`.
+witness operatorSecret(): Bytes<32>;
+
+// ----------------------------------------------------------- constructor
+
+constructor(key: JubjubPoint, operatorCommitment: Bytes<32>, minSecs: Uint<64>, maxSecs: Uint<64>) {
+  assert(minSecs < maxSecs, "minWindow must be below maxWindow");
+  oracleKey = disclose(key);
+  operator = disclose(operatorCommitment);
+  minWindow = disclose(minSecs);
+  maxWindow = disclose(maxSecs);
+}
+
+// ------------------------------------------------------- pure functions
+// Exported so off-chain code (oracle, consumers, verifiers) computes exactly
+// what the circuits compute, with the same encodings.
+
+// Request id and VRF input for a (tag, seed) pair on a given deployment.
+export pure circuit requestId(deployment: ContractAddress, tag: Bytes<32>, seed: Bytes<32>): Bytes<32> {
+  return persistentHash<AlphaPreimage>(AlphaPreimage {
+    domain: pad(32, "nightcast:alpha:v0"),
+    deployment: deployment,
+    tag: tag,
+    seed: seed
+  });
+}
+
+// Public key for a secret scalar.
+export pure circuit publicKey(sk: Field): JubjubPoint {
+  return ecMulGenerator(sk);
+}
+
+// The VRF itself: output for secret `sk` and input `alpha`.
+export pure circuit evaluate(sk: Field, alpha: Bytes<32>): Bytes<32> {
+  const h = hashToCurve<[Bytes<32>, Bytes<32>]>([pad(32, "nightcast:h2c:v0"), alpha]);
+  return persistentHash<OutputPreimage>(OutputPreimage {
+    domain: pad(32, "nightcast:output:v0"),
+    gamma: ecMul(h, sk)
+  });
+}
+
+// Expands one output into as many independent 32-byte words as needed.
+export pure circuit randomWord(output: Bytes<32>, index: Uint<32>): Bytes<32> {
+  return persistentHash<WordPreimage>(WordPreimage {
+    domain: pad(32, "nightcast:word:v0"),
+    output: output,
+    index: index
+  });
+}
+
+// Commitment stored in `operator` for a given operator secret.
+export pure circuit operatorCommitmentOf(secret: Bytes<32>): Bytes<32> {
+  return persistentHash<[Bytes<32>, Bytes<32>]>([pad(32, "nightcast:operator:v0"), secret]);
+}
+
+pure circuit sameKey(a: JubjubPoint, b: JubjubPoint): Boolean {
+  return jubjubPointX(a) == jubjubPointX(b) && jubjubPointY(a) == jubjubPointY(b);
+}
+
+// --------------------------------------------------------------- requests
+
+// Ask for randomness. `seed` must be fresh for this `tag` (the id must be new).
+// The deadline must leave the oracle at least `minWindow` and at most
+// `maxWindow` seconds. Returns the request id.
+export circuit request(tag: Bytes<32>, seed: Bytes<32>, deadline: Uint<64>): Bytes<32> {
+  const d = disclose(deadline);
+  assert(d >= maxWindow, "deadline is out of range");
+  assert(blockTimeLt(d - minWindow), "deadline is too soon");
+  assert(blockTimeGte(d - maxWindow), "deadline is too far away");
+
+  const id = disclose(requestId(kernel.self(), tag, seed));
+  assert(!requests.member(id), "request already exists");
+
+  requests.insert(id, Request {
+    status: Status.pending,
+    tag: disclose(tag),
+    oracleKey: oracleKey,
+    deadline: d,
+    output: default<Bytes<32>>
+  });
+  requestCount.increment(1);
+  return id;
+}
+
+// Answer a pending request. Only the holder of the request's oracle key can
+// produce a proof that passes; the output is fully determined by that key and
+// the request id, so the oracle has no choice over its value.
+export circuit fulfil(id: Bytes<32>): Bytes<32> {
+  const rid = disclose(id);
+  assert(requests.member(rid), "unknown request");
+  const r = requests.lookup(rid);
+  assert(r.status == Status.pending, "request is not pending");
+  assert(blockTimeLt(r.deadline), "request has expired");
+
+  const sk = oracleSecretKey();
+  assert(disclose(sameKey(publicKey(sk), r.oracleKey)), "not the oracle for this request");
+
+  const out = disclose(evaluate(sk, rid));
+  requests.insert(rid, Request {
+    status: Status.fulfilled,
+    tag: r.tag,
+    oracleKey: r.oracleKey,
+    deadline: r.deadline,
+    output: out
+  });
+  return out;
+}
+
+// Mark a request the oracle failed to answer in time. Anyone may call this;
+// consumers should treat an expired request as void (refund, redraw, ...).
+export circuit expire(id: Bytes<32>): [] {
+  const rid = disclose(id);
+  assert(requests.member(rid), "unknown request");
+  const r = requests.lookup(rid);
+  assert(r.status == Status.pending, "request is not pending");
+  assert(blockTimeGte(r.deadline), "deadline has not passed");
+  requests.insert(rid, Request {
+    status: Status.expired,
+    tag: r.tag,
+    oracleKey: r.oracleKey,
+    deadline: r.deadline,
+    output: r.output
+  });
+}
+
+// ------------------------------------------------------------------ admin
+
+circuit assertOperator(): [] {
+  assert(disclose(operatorCommitmentOf(operatorSecret()) == operator), "not the operator");
+}
+
+// Rotate the oracle key for future requests. Pending requests keep the key
+// they were made with, so a rotation can't be used to pick between outputs.
+export circuit setOracleKey(key: JubjubPoint): [] {
+  assertOperator();
+  oracleKey = disclose(key);
+}
+
+export circuit setOperator(commitment: Bytes<32>): [] {
+  assertOperator();
+  operator = disclose(commitment);
+}
