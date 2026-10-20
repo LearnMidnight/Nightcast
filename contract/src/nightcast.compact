@@ -1,0 +1,288 @@
+// Nightcast: verifiable randomness for Midnight (v0, experimental).
+//
+// A request fixes a VRF input `alpha` and its curve point
+//
+//     H = hashToCurve(alpha)          (computed and stored by `request`)
+//
+// The oracle answers with
+//
+//     gamma  = H * sk
+//     output = SHA-256("nightcast:output:v0" || gamma)
+//
+// where `sk` is the oracle's secret Jubjub scalar and `pk = G * sk` is the key
+// the request was bound to. `fulfil` recomputes this inside the circuit with
+// `sk` as a private witness, so the transaction's zero-knowledge proof is the
+// VRF proof: the chain accepts an output only if it is the unique value fixed
+// by (pk, H), and `sk` is never revealed.
+//
+// H is stored at request time rather than recomputed in `fulfil`, so the
+// oracle never gets to pick among hashToCurve outputs (Compact does not
+// guarantee hashToCurve outputs are unique in-circuit).
+//
+// See docs/SPEC.md for the construction, threat model and limitations.
+
+pragma language_version >= 0.22 && < 0.24;
+
+import CompactStandardLibrary;
+
+// ---------------------------------------------------------------- types
+
+export enum Status { pending, fulfilled, expired }
+
+export struct Request {
+  status: Status;
+  // Commitment of whoever made the request (see requesterCommitmentOf).
+  requester: Bytes<32>;
+  // Requester-chosen label, e.g. a hash of "midnight-lotto|m6|1001".
+  tag: Bytes<32>;
+  // H = hashToCurve(alpha), fixed when the request was made.
+  point: JubjubPoint;
+  // Oracle key the request is bound to (a key rotation never affects it).
+  oracleKey: JubjubPoint;
+  // Seconds since the epoch; fulfil must land before this, expire after.
+  deadline: Uint<64>;
+  // The random value; all zeros until fulfilled.
+  output: Bytes<32>;
+}
+
+struct AlphaPreimage {
+  domain: Bytes<32>;
+  deployment: ContractAddress;
+  requester: Bytes<32>;
+  tag: Bytes<32>;
+  seed: Bytes<32>;
+}
+
+struct OutputPreimage {
+  domain: Bytes<32>;
+  gamma: JubjubPoint;
+}
+
+struct WordPreimage {
+  domain: Bytes<32>;
+  output: Bytes<32>;
+  index: Uint<32>;
+}
+
+// --------------------------------------------------------------- ledger
+
+// Requests by id. The id is also the VRF input (`alpha`).
+export ledger requests: Map<Bytes<32>, Request>;
+// Total requests ever made (increment-only, so concurrent requests don't clash).
+export ledger requestCount: Counter;
+// Key bound to new requests, once the oracle has proved it holds it.
+export ledger oracleKey: JubjubPoint;
+export ledger oracleKeyReady: Boolean;
+// A key the operator has proposed; becomes active when the oracle accepts it.
+export ledger proposedOracleKey: Maybe<JubjubPoint>;
+// SHA-256 commitment to the operator's secret; authorises admin circuits.
+export ledger operator: Bytes<32>;
+export ledger proposedOperator: Maybe<Bytes<32>>;
+// Allowed distance between "now" and a request's deadline, in seconds.
+export sealed ledger minWindow: Uint<64>;
+export sealed ledger maxWindow: Uint<64>;
+
+// -------------------------------------------------------------- witnesses
+
+// The oracle's secret scalar.
+witness oracleSecretKey(): Field;
+// The operator's secret; hashed and compared with `operator`.
+witness operatorSecret(): Bytes<32>;
+// A requester's secret; its commitment goes into the request id.
+witness requesterSecret(): Bytes<32>;
+
+// ----------------------------------------------------------- constructor
+
+// The oracle key starts as a proposal: no requests are accepted until the
+// oracle calls `acceptOracleKey`, proving it holds the matching secret.
+constructor(key: JubjubPoint, operatorCommitment: Bytes<32>, minSecs: Uint<64>, maxSecs: Uint<64>) {
+  assert(minSecs >= 60, "minWindow must be at least 60 seconds");
+  assert(minSecs < maxSecs, "minWindow must be below maxWindow");
+  assert(maxSecs <= 2592000, "maxWindow must be at most 30 days");
+  proposedOracleKey = some<JubjubPoint>(disclose(key));
+  operator = disclose(operatorCommitment);
+  minWindow = disclose(minSecs);
+  maxWindow = disclose(maxSecs);
+}
+
+// ------------------------------------------------------- pure functions
+// Exported so off-chain code (oracle, consumers, verifiers) computes exactly
+// what the circuits compute, with the same encodings.
+
+// Request id and VRF input.
+export pure circuit requestId(deployment: ContractAddress, requester: Bytes<32>, tag: Bytes<32>, seed: Bytes<32>): Bytes<32> {
+  return persistentHash<AlphaPreimage>(AlphaPreimage {
+    domain: pad(32, "nightcast:alpha:v0"),
+    deployment: deployment,
+    requester: requester,
+    tag: tag,
+    seed: seed
+  });
+}
+
+// The curve point a request is evaluated at.
+export pure circuit inputPoint(alpha: Bytes<32>): JubjubPoint {
+  return hashToCurve<[Bytes<32>, Bytes<32>]>([pad(32, "nightcast:h2c:v0"), alpha]);
+}
+
+// Public key for a secret scalar.
+export pure circuit publicKey(sk: Field): JubjubPoint {
+  return ecMulGenerator(sk);
+}
+
+// The VRF at a stored point (what `fulfil` computes).
+export pure circuit evaluateAt(sk: Field, point: JubjubPoint): Bytes<32> {
+  return persistentHash<OutputPreimage>(OutputPreimage {
+    domain: pad(32, "nightcast:output:v0"),
+    gamma: ecMul(point, sk)
+  });
+}
+
+// The VRF from the input: evaluateAt(sk, inputPoint(alpha)).
+export pure circuit evaluate(sk: Field, alpha: Bytes<32>): Bytes<32> {
+  return evaluateAt(sk, inputPoint(alpha));
+}
+
+// Expands one output into as many independent 32-byte words as needed.
+export pure circuit randomWord(output: Bytes<32>, index: Uint<32>): Bytes<32> {
+  return persistentHash<WordPreimage>(WordPreimage {
+    domain: pad(32, "nightcast:word:v0"),
+    output: output,
+    index: index
+  });
+}
+
+// Commitment stored in `operator` for a given operator secret.
+export pure circuit operatorCommitmentOf(secret: Bytes<32>): Bytes<32> {
+  return persistentHash<[Bytes<32>, Bytes<32>]>([pad(32, "nightcast:operator:v0"), secret]);
+}
+
+// Commitment that identifies a requester.
+export pure circuit requesterCommitmentOf(secret: Bytes<32>): Bytes<32> {
+  return persistentHash<[Bytes<32>, Bytes<32>]>([pad(32, "nightcast:requester:v0"), secret]);
+}
+
+pure circuit sameKey(a: JubjubPoint, b: JubjubPoint): Boolean {
+  return jubjubPointX(a) == jubjubPointX(b) && jubjubPointY(a) == jubjubPointY(b);
+}
+
+pure circuit isIdentity(a: JubjubPoint): Boolean {
+  return jubjubPointX(a) == 0 && jubjubPointY(a) == 1;
+}
+
+// --------------------------------------------------------------- requests
+
+// Ask for randomness. The id depends on the caller's requester secret, so
+// nobody else can claim or burn your ids or make requests under your
+// commitment. `seed` must be fresh for this (requester, tag). The deadline
+// must leave the oracle more than `minWindow` and at most `maxWindow` seconds.
+// Returns the request id.
+export circuit request(tag: Bytes<32>, seed: Bytes<32>, deadline: Uint<64>): Bytes<32> {
+  assert(oracleKeyReady, "no active oracle key");
+  const d = disclose(deadline);
+  assert(d >= maxWindow, "deadline is out of range");
+  assert(blockTimeLt(d - minWindow), "deadline is too soon");
+  assert(blockTimeGte(d - maxWindow), "deadline is too far away");
+
+  const requester = disclose(requesterCommitmentOf(requesterSecret()));
+  const id = disclose(requestId(kernel.self(), requester, tag, seed));
+  assert(!requests.member(id), "request already exists");
+
+  requests.insert(id, Request {
+    status: Status.pending,
+    requester: requester,
+    tag: disclose(tag),
+    point: inputPoint(id),
+    oracleKey: oracleKey,
+    deadline: d,
+    output: default<Bytes<32>>
+  });
+  requestCount.increment(1);
+  return id;
+}
+
+// Answer a pending request. Only the holder of the request's oracle key can
+// produce a proof that passes, and the output is fixed by that key and the
+// stored point, so the oracle has no choice over its value.
+export circuit fulfil(id: Bytes<32>): Bytes<32> {
+  const rid = disclose(id);
+  assert(requests.member(rid), "unknown request");
+  const r = requests.lookup(rid);
+  assert(r.status == Status.pending, "request is not pending");
+  assert(blockTimeLt(r.deadline), "request has expired");
+
+  const sk = oracleSecretKey();
+  assert(disclose(sameKey(publicKey(sk), r.oracleKey)), "not the oracle for this request");
+
+  const out = disclose(evaluateAt(sk, r.point));
+  requests.insert(rid, Request {
+    status: Status.fulfilled,
+    requester: r.requester,
+    tag: r.tag,
+    point: r.point,
+    oracleKey: r.oracleKey,
+    deadline: r.deadline,
+    output: out
+  });
+  return out;
+}
+
+// Mark a request the oracle failed to answer in time. Anyone may call this.
+export circuit expire(id: Bytes<32>): [] {
+  const rid = disclose(id);
+  assert(requests.member(rid), "unknown request");
+  const r = requests.lookup(rid);
+  assert(r.status == Status.pending, "request is not pending");
+  assert(blockTimeGte(r.deadline), "deadline has not passed");
+  requests.insert(rid, Request {
+    status: Status.expired,
+    requester: r.requester,
+    tag: r.tag,
+    point: r.point,
+    oracleKey: r.oracleKey,
+    deadline: r.deadline,
+    output: r.output
+  });
+}
+
+// ------------------------------------------------------------------ keys
+
+// The oracle activates a proposed key by proving it holds the secret (proof
+// of possession). This rules out the identity point, off-curve points and
+// keys nobody can use. Pending requests keep the key they were made with.
+export circuit acceptOracleKey(): [] {
+  assert(proposedOracleKey.is_some, "no key proposed");
+  const key = proposedOracleKey.value;
+  assert(!isIdentity(key), "identity key not allowed");
+  const sk = oracleSecretKey();
+  assert(disclose(sameKey(publicKey(sk), key)), "secret does not match the proposed key");
+  oracleKey = key;
+  oracleKeyReady = true;
+  proposedOracleKey = none<JubjubPoint>();
+}
+
+// ------------------------------------------------------------------ admin
+
+circuit assertOperator(): [] {
+  assert(disclose(operatorCommitmentOf(operatorSecret()) == operator), "not the operator");
+}
+
+// Propose a new oracle key; the current key stays active until it's accepted.
+export circuit proposeOracleKey(key: JubjubPoint): [] {
+  assertOperator();
+  proposedOracleKey = some<JubjubPoint>(disclose(key));
+}
+
+// Propose a new operator; the change takes effect when they accept.
+export circuit proposeOperator(commitment: Bytes<32>): [] {
+  assertOperator();
+  proposedOperator = some<Bytes<32>>(disclose(commitment));
+}
+
+export circuit acceptOperator(): [] {
+  assert(proposedOperator.is_some, "no operator proposed");
+  const next = proposedOperator.value;
+  assert(disclose(operatorCommitmentOf(operatorSecret()) == next), "not the proposed operator");
+  operator = next;
+  proposedOperator = none<Bytes<32>>();
+}

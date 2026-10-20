@@ -1,0 +1,29 @@
+{
+  "name": "@nightcast/sdk",
+  "version": "0.1.0",
+  "description": "Nightcast oracle service, chain adapters and helpers for consuming Nightcast randomness.",
+  "license": "MIT",
+  "private": true,
+  "type": "module",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    }
+  },
+  "bin": {
+    "nightcast-keygen": "dist/keygen.js"
+  },
+  "files": ["dist"],
+  "scripts": {
+    "build": "rm -rf dist && tsc -p tsconfig.build.json && chmod +x dist/keygen.js",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "test": "vitest run"
+  },
+  "dependencies": {
+    "@midnight-ntwrk/compact-runtime": "0.16.0",
+    "@nightcast/contract": "0.1.0"
+  }
+}
