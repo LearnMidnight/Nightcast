@@ -120,7 +120,7 @@ export const FAUCETS: Partial<Record<Network, string>> = {
  */
 export const openWallet = async (session: Session, opts: WalletOptions = {}): Promise<MidnightWalletProvider> => {
   const seed = opts.seed ?? (session.network === 'local' ? LOCAL_GENESIS_SEEDS[0] : undefined);
-  if (!seed) throw new Error('No wallet: pass --wallet <file from `nightcast-deploy wallet new`> or set NIGHTCAST_WALLET_SEED.');
+  if (!seed) throw new Error('No wallet: pass --wallet <file from `./nightcast wallet new`> or set NIGHTCAST_WALLET_SEED.');
   const wallet = await MidnightWalletProvider.build(session.logger, session.config, seed);
   const address = walletAddress(wallet);
   opts.onAddress?.(address);

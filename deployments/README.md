@@ -16,7 +16,7 @@ One file per network, written by `nightcast-deploy` and committed so anyone can 
 
 ```sh
 npm install && npm run compact && npm run build
-npx nightcast-deploy verify --network preprod
+./nightcast verify --network preprod
 ```
 
 `verify` reads the contract from the public indexer and checks that:

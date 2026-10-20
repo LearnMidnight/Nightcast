@@ -153,12 +153,12 @@ jobs:
           set -o pipefail
           # Same commands as docs/preprod-guide.md, against a local network.
           exec > >(tee -a cli.log) 2>&1
-          npx nightcast-keygen oracle --out "$RUNNER_TEMP/oracle.secret"
-          npx nightcast-keygen operator --out "$RUNNER_TEMP/operator.secret"
-          npx nightcast-deploy wallet new --out "$RUNNER_TEMP/wallet.secret"
+          ./nightcast keygen oracle --out "$RUNNER_TEMP/oracle.secret"
+          ./nightcast keygen operator --out "$RUNNER_TEMP/operator.secret"
+          ./nightcast wallet new --out "$RUNNER_TEMP/wallet.secret"
           test "$(stat -c %a "$RUNNER_TEMP/wallet.secret")" = 600
           export NIGHTCAST_DEPLOYMENTS_DIR="$RUNNER_TEMP/deployments"
-          npx nightcast-deploy deploy --network local --oracle "$RUNNER_TEMP/oracle.secret" --operator "$RUNNER_TEMP/operator.secret" --accept
+          ./nightcast deploy --network local --oracle "$RUNNER_TEMP/oracle.secret" --operator "$RUNNER_TEMP/operator.secret" --accept
           node -e '
             const r = require(process.env.NIGHTCAST_DEPLOYMENTS_DIR + "/local.json");
             const ok = r.transactions.deploy && r.transactions.lockAuthority && r.transactions.acceptOracleKey && r.maintenanceAuthority.committeeSize === 0;

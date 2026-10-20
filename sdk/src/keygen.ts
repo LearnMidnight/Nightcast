@@ -3,9 +3,9 @@
  * Generate Nightcast secrets. The oracle and the operator are separate roles
  * and should be kept on separate machines, so each gets its own file:
  *
- *   npx nightcast-keygen oracle   --out oracle.secret
- *   npx nightcast-keygen operator --out operator.secret
- *   npx nightcast-keygen requester --out requester.secret
+ *   ./nightcast keygen oracle   --out oracle.secret
+ *   ./nightcast keygen operator --out operator.secret
+ *   ./nightcast keygen requester --out requester.secret
  *
  * Each file is created with mode 600 and never overwritten. Only the public
  * value (oracle public key, operator or requester commitment) is printed.
@@ -50,7 +50,7 @@ export const generateSecret = (role: Role): GeneratedSecret => {
   }
 };
 
-const USAGE = 'usage: nightcast-keygen <oracle|operator|requester> --out <file>';
+const USAGE = 'usage: ./nightcast keygen <oracle|operator|requester> --out <file>';
 
 const main = (argv: string[]): void => {
   const role = argv[0] as Role;

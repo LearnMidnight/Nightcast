@@ -35,7 +35,7 @@ export const startOracleService = async (
   const ledger = Nightcast.ledger(state.data);
   const pk = oraclePublicKey(secretKey);
   if (!ledger.oracleKeyReady) {
-    throw new Error('the oracle key is not active yet: run `nightcast-deploy accept-key` first');
+    throw new Error('the oracle key is not active yet: run `./nightcast accept-key` first');
   }
   if (ledger.oracleKey.x !== pk.x || ledger.oracleKey.y !== pk.y) {
     logger.warn('this key is not the contract\'s current oracle key; only requests bound to it will be answered');

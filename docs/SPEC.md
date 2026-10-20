@@ -122,7 +122,7 @@ Every Midnight contract has a maintenance authority: a committee of signing keys
 2. In the next transaction it replaces the authority with `{ committee: [], threshold: 1 }`. The ledger accepts a maintenance update only with at least `threshold` valid signatures from committee members, and an empty committee can produce none, so no further maintenance update of any kind can ever be applied.
 3. It records the SHA-256 of every circuit's verifier key in `deployments/<network>.json`.
 
-Anyone can check a deployment with `nightcast-deploy verify`: the authority on chain must have `threshold > committee size`, and the on-chain verifier keys must match the published fingerprints (and, if they build the same commit, their own). Consumers should run this check, or rely on someone they trust who has, before trusting outputs. Between the deploy and the lock transaction the one-time key could in principle change the contract, so verification checks the final state rather than trusting the deployer.
+Anyone can check a deployment with `./nightcast verify`: the authority on chain must have `threshold > committee size`, and the on-chain verifier keys must match the published fingerprints (and, if they build the same commit, their own). Consumers should run this check, or rely on someone they trust who has, before trusting outputs. Between the deploy and the lock transaction the one-time key could in principle change the contract, so verification checks the final state rather than trusting the deployer.
 
 ## 5. Consumer integration (v0)
 

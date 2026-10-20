@@ -3,16 +3,16 @@
  * nightcast-deploy: deploy Nightcast, lock it, activate the oracle key and
  * publish fingerprints anyone can check.
  *
- *   nightcast-deploy deploy     --network preprod --oracle oracle.secret --operator operator.secret
- *   nightcast-deploy accept-key --network preprod --oracle oracle.secret
- *   nightcast-deploy lock       --network preprod --maintenance-key-file <file>
- *   nightcast-deploy verify     --network preprod
- *   nightcast-deploy fingerprints
- *   nightcast-deploy wallet new  --out wallet.secret
- *   nightcast-deploy wallet show --network preprod --wallet wallet.secret
- *   nightcast-deploy oracle     --network preprod --oracle oracle.secret --wallet wallet.secret
- *   nightcast-deploy request    --network preprod --requester requester.secret --wallet wallet.secret --wait
- *   nightcast-deploy status     --network preprod --id <request id>
+ *   ./nightcast deploy     --network preprod --oracle oracle.secret --operator operator.secret
+ *   ./nightcast accept-key --network preprod --oracle oracle.secret
+ *   ./nightcast lock       --network preprod --maintenance-key-file <file>
+ *   ./nightcast verify     --network preprod
+ *   ./nightcast fingerprints
+ *   ./nightcast wallet new  --out wallet.secret
+ *   ./nightcast wallet show --network preprod --wallet wallet.secret
+ *   ./nightcast oracle     --network preprod --oracle oracle.secret --wallet wallet.secret
+ *   ./nightcast request    --network preprod --requester requester.secret --wallet wallet.secret --wait
+ *   ./nightcast status     --network preprod --id <request id>
  *
  * The wallet that pays fees comes from --wallet (a file from `wallet new`) or
  * NIGHTCAST_WALLET_SEED (hex); on the `local` network a genesis wallet is the
@@ -50,19 +50,19 @@ import { acceptOracleKey, deployNightcast } from './steps.js';
 import { formatChecks, verifyDeployment } from './verify.js';
 
 const USAGE = `usage:
-  nightcast-deploy deploy       --network <${NETWORKS.join('|')}> --oracle <file> --operator <file> [--min 60] [--max 86400] [--accept] [--proof-server-port <port>]
-  nightcast-deploy accept-key   --network <network> --oracle <oracle secret file> [--proof-server-port <port>]
-  nightcast-deploy lock         --network <network> --maintenance-key-file <file> [--proof-server-port <port>]
-  nightcast-deploy verify       --network <network> [--address <contract address>]
-  nightcast-deploy fingerprints
-  nightcast-deploy wallet new   --out <file>
-  nightcast-deploy wallet show  --network <network> --wallet <file> [--proof-server-port <port>]
-  nightcast-deploy oracle       --network <network> --oracle <oracle secret file> --wallet <file> [--requesters <hex,...>] [--poll 5] [--proof-server-port <port>]
-  nightcast-deploy request      --network <network> --requester <requester secret file> --wallet <file> [--tag <text>] [--deadline-mins 30] [--wait] [--proof-server-port <port>]
-  nightcast-deploy status       --network <network> --id <request id>
+  ./nightcast deploy       --network <${NETWORKS.join('|')}> --oracle <file> --operator <file> [--min 60] [--max 86400] [--accept] [--proof-server-port <port>]
+  ./nightcast accept-key   --network <network> --oracle <oracle secret file> [--proof-server-port <port>]
+  ./nightcast lock         --network <network> --maintenance-key-file <file> [--proof-server-port <port>]
+  ./nightcast verify       --network <network> [--address <contract address>]
+  ./nightcast fingerprints
+  ./nightcast wallet new   --out <file>
+  ./nightcast wallet show  --network <network> --wallet <file> [--proof-server-port <port>]
+  ./nightcast oracle       --network <network> --oracle <oracle secret file> --wallet <file> [--requesters <hex,...>] [--poll 5] [--proof-server-port <port>]
+  ./nightcast request      --network <network> --requester <requester secret file> --wallet <file> [--tag <text>] [--deadline-mins 30] [--wait] [--proof-server-port <port>]
+  ./nightcast status       --network <network> --id <request id>
 
---oracle, --operator and --requester take files from \`nightcast-keygen\`. --wallet takes a
-file from \`nightcast-deploy wallet new\` (or set NIGHTCAST_WALLET_SEED). Deploy uses only the
+--oracle, --operator and --requester take files from \`./nightcast keygen\`. --wallet takes a
+file from \`./nightcast wallet new\` (or set NIGHTCAST_WALLET_SEED). Deploy uses only the
 public parts of key files, except with --accept, which needs the oracle secret.`;
 
 type KeyFile = { role: string; secret?: string; public: unknown };
@@ -87,7 +87,7 @@ const oraclePublicFrom = (file: KeyFile): { x: bigint; y: bigint } => {
 const walletSeed = (file: string | undefined): string | undefined => {
   if (file) {
     const parsed = JSON.parse(readFileSync(file, 'utf8')) as { role?: string; seed?: string };
-    if (parsed.role !== 'wallet' || !parsed.seed) throw new Error(`${file} is not a wallet file from \`nightcast-deploy wallet new\``);
+    if (parsed.role !== 'wallet' || !parsed.seed) throw new Error(`${file} is not a wallet file from \`./nightcast wallet new\``);
     return parsed.seed;
   }
   return process.env.NIGHTCAST_WALLET_SEED;
@@ -263,7 +263,7 @@ const main = async (argv: string[]): Promise<number> => {
             const keyPath = saveMaintenanceKeyForRetry(network, deployed.contractAddress, deployed.maintenanceKey);
             session.logger.error(
               `Locking failed: ${err instanceof Error ? err.message : String(err)}. The one-time maintenance key is in ${keyPath}; ` +
-                `retry with \`nightcast-deploy lock --network ${network} --maintenance-key-file ${keyPath}\` and delete the file afterwards.`,
+                `retry with \`./nightcast lock --network ${network} --maintenance-key-file ${keyPath}\` and delete the file afterwards.`,
             );
             return 1;
           }
@@ -279,7 +279,7 @@ const main = async (argv: string[]): Promise<number> => {
           const ok = await runVerify(session, network);
           if (!values.accept) {
             session.logger.info(
-              `Next: the oracle runs \`nightcast-deploy accept-key --network ${network} --oracle <oracle secret file>\``,
+              `Next: the oracle runs \`./nightcast accept-key --network ${network} --oracle <oracle secret file>\``,
             );
           }
           return ok || !values.accept ? 0 : 1;
@@ -344,16 +344,16 @@ const main = async (argv: string[]): Promise<number> => {
     case 'wallet': {
       const sub = positionals[0];
       if (sub === 'new') {
-        if (!values.out) throw new Error('usage: nightcast-deploy wallet new --out <file>');
+        if (!values.out) throw new Error('usage: ./nightcast wallet new --out <file>');
         const seed = toHex(webcrypto.getRandomValues(new Uint8Array(32)));
         writeFileSync(values.out, JSON.stringify({ role: 'wallet', seed }, null, 2) + '\n', { mode: 0o600, flag: 'wx' });
         process.stdout.write(
           `New wallet seed written to ${values.out} (keep it private; anyone with it can spend from the wallet).\n` +
-            `Next: nightcast-deploy wallet show --network preprod --wallet ${values.out}\n`,
+            `Next: ./nightcast wallet show --network preprod --wallet ${values.out}\n`,
         );
         return 0;
       }
-      if (sub !== 'show') throw new Error('usage: nightcast-deploy wallet <new|show> ...');
+      if (sub !== 'show') throw new Error('usage: ./nightcast wallet <new|show> ...');
       const network = networkArg(values.network);
       const seed = walletSeed(values.wallet);
       return withSession(network, portArg(values['proof-server-port']), async (session) => {
@@ -420,7 +420,7 @@ const main = async (argv: string[]): Promise<number> => {
           });
           process.stdout.write(`\nRequest id: ${toHex(req.id)}\nDeadline:   ${new Date(Number(req.deadline) * 1000).toISOString()}\n\n`);
           if (!values.wait) {
-            process.stdout.write(`Check it with: nightcast-deploy status --network ${network} --id ${toHex(req.id)}\n`);
+            process.stdout.write(`Check it with: ./nightcast status --network ${network} --id ${toHex(req.id)}\n`);
             return 0;
           }
           session.logger.info('Waiting for the oracle to answer...');

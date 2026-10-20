@@ -84,9 +84,9 @@ cd ~/nightcast
 ### 6. Create the secrets
 
 ```bash
-npx nightcast-keygen oracle    --out ~/nightcast-secrets/oracle.secret
-npx nightcast-keygen operator  --out ~/nightcast-secrets/operator.secret
-npx nightcast-keygen requester --out ~/nightcast-secrets/requester.secret
+./nightcast keygen oracle    --out ~/nightcast-secrets/oracle.secret
+./nightcast keygen operator  --out ~/nightcast-secrets/operator.secret
+./nightcast keygen requester --out ~/nightcast-secrets/requester.secret
 ```
 
 | File | What it is |
@@ -100,8 +100,8 @@ npx nightcast-keygen requester --out ~/nightcast-secrets/requester.secret
 The wallets hold test tokens that pay transaction fees. One is for the oracle, one for making test requests (like a separate customer).
 
 ```bash
-npx nightcast-deploy wallet new --out ~/nightcast-secrets/oracle-wallet.secret
-npx nightcast-deploy wallet new --out ~/nightcast-secrets/requester-wallet.secret
+./nightcast wallet new --out ~/nightcast-secrets/oracle-wallet.secret
+./nightcast wallet new --out ~/nightcast-secrets/requester-wallet.secret
 ```
 
 **Back up `~/nightcast-secrets`** (for example to a USB stick). If you lose these files you lose the oracle key and the wallets.
@@ -109,7 +109,7 @@ npx nightcast-deploy wallet new --out ~/nightcast-secrets/requester-wallet.secre
 ### 8. Fund the wallets with test tokens
 
 ```bash
-npx nightcast-deploy wallet show --network preprod --wallet ~/nightcast-secrets/oracle-wallet.secret
+./nightcast wallet show --network preprod --wallet ~/nightcast-secrets/oracle-wallet.secret
 ```
 
 It prints the wallet address (starting `mn_addr_preprod1...`) and, because the wallet is empty, tells you what to do:
@@ -123,7 +123,7 @@ It prints the wallet address (starting `mn_addr_preprod1...`) and, because the w
 Do the same for the requester wallet:
 
 ```bash
-npx nightcast-deploy wallet show --network preprod --wallet ~/nightcast-secrets/requester-wallet.secret
+./nightcast wallet show --network preprod --wallet ~/nightcast-secrets/requester-wallet.secret
 ```
 
 If the faucet says you're rate-limited, wait a few hours and try again.
@@ -135,7 +135,7 @@ If the faucet says you're rate-limited, wait a few hours and try again.
 ### 9. Deploy, lock and activate
 
 ```bash
-npx nightcast-deploy deploy --network preprod \
+./nightcast deploy --network preprod \
   --oracle ~/nightcast-secrets/oracle.secret \
   --operator ~/nightcast-secrets/operator.secret \
   --wallet ~/nightcast-secrets/oracle-wallet.secret \
@@ -169,7 +169,7 @@ PASS  request windows match: 60s to 86400s
 
 ```bash
 cd ~/nightcast
-npx nightcast-deploy oracle --network preprod \
+./nightcast oracle --network preprod \
   --oracle ~/nightcast-secrets/oracle.secret \
   --wallet ~/nightcast-secrets/oracle-wallet.secret
 ```
@@ -186,7 +186,7 @@ Open a **second** Ubuntu terminal:
 
 ```bash
 cd ~/nightcast
-npx nightcast-deploy request --network preprod \
+./nightcast request --network preprod \
   --requester ~/nightcast-secrets/requester.secret \
   --wallet ~/nightcast-secrets/requester-wallet.secret \
   --wait
@@ -208,7 +208,7 @@ That's live, verifiable randomness on Preprod.
 You can look up any request later without a wallet:
 
 ```bash
-npx nightcast-deploy status --network preprod --id <request id>
+./nightcast status --network preprod --id <request id>
 ```
 
 ### 12. Stop the oracle
@@ -222,7 +222,7 @@ Press **Ctrl+C** in the oracle window. Requests made while it's stopped wait unt
 `deployments/preprod.json` holds the contract address and the code fingerprints. Commit it so anyone can check the deployment:
 
 ```bash
-npx nightcast-deploy verify --network preprod
+./nightcast verify --network preprod
 git add deployments/preprod.json
 git commit -m "Publish the Preprod deployment"
 git push
@@ -240,6 +240,6 @@ git push
 | `compact: command not found` or `nvm: command not found` | Run `source ~/.bashrc`, or close and reopen the Ubuntu terminal. |
 | Stuck on "Waiting for the NIGHT to arrive" | Check you pasted the `mn_addr_preprod1...` address into the faucet, with no spaces. |
 | Stuck on "Waiting for the first DUST" | Normal for a few minutes after funding; DUST builds up over time. |
-| `the oracle key is not active yet` | Run `npx nightcast-deploy accept-key --network preprod --oracle ~/nightcast-secrets/oracle.secret --wallet ~/nightcast-secrets/oracle-wallet.secret`. |
+| `the oracle key is not active yet` | Run `./nightcast accept-key --network preprod --oracle ~/nightcast-secrets/oracle.secret --wallet ~/nightcast-secrets/oracle-wallet.secret`. |
 | A request shows `expired` | The oracle wasn't running before its deadline. Start the oracle and make a new request. |
 | `No compiled contract with proving keys found` | Run `npm run compact` then `npm run build` in `~/nightcast`. |
