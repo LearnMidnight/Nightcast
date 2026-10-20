@@ -45,7 +45,7 @@ The pure circuits `requestId`, `requesterCommitmentOf`, `inputPoint`, `publicKey
 
 ### Why the output is unique
 
-- `pk` fixes `sk` modulo `r`, and `G` and `H` lie in the prime-order subgroup, so `gamma = H·sk` depends only on `sk mod r`. Any witness that passes the key check (for example `sk + r`) gives the same `gamma`. In-circuit, the scalar is decomposed canonically; off-circuit, the runtime reduces it mod `r`. A test checks that `sk + r` yields the same output.
+- `pk` fixes `sk` modulo `r`, and `G` and `H` lie in the prime-order subgroup, so `gamma = H·sk` depends only on `sk mod r`. Any witness that passes the key check (for example `sk + r`) gives the same `gamma`. In-circuit, the scalar is decomposed canonically and the multiplication is effectively mod `r`; off-circuit, the JS runtime rejects a scalar `≥ r` outright (a test checks this).
 - `H` is fixed when the request is made, not recomputed by the oracle. Compact documents that `hashToCurve` outputs "are not guaranteed to be unique" in-circuit; storing `H` at request time means that, whatever freedom exists, it belongs to the requester (who can't evaluate the VRF), not the oracle. The requester's proof still guarantees `H` is a valid `hashToCurve` output with unknown discrete logarithm.
 
 ### Why it is unpredictable

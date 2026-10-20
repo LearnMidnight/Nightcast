@@ -187,10 +187,11 @@ describe('fulfil', () => {
     expect(hex(r.output)).toBe(hex(out));
   });
 
-  it('gives the same output for a scalar congruent to the key', () => {
-    // sk + order passes the key check but cannot change the result.
-    const out = sim.fulfil(id, { oracleSecretKey: sk + JUBJUB_ORDER });
-    expect(hex(out)).toBe(hex(pureCircuits.evaluate(sk, id)));
+  it('rejects non-canonical scalars off-circuit', () => {
+    // sk + order would give the same point; the runtime refuses it outright
+    // (in-circuit the scalar is reduced, so the output can't change either way).
+    expect(() => sim.fulfil(id, { oracleSecretKey: sk + JUBJUB_ORDER })).toThrow(/EmbeddedFr/);
+    expect(sim.getLedger().requests.lookup(id).status).toBe(Status.pending);
   });
 
   it('rejects anyone without the oracle key', () => {
