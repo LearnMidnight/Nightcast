@@ -58,7 +58,7 @@ if [ -n "${NIGHTCAST_BLOCKFROST_PROJECT_ID:-}" ] && grep -qF "$NIGHTCAST_BLOCKFR
 fi
 if grep -q 'has no NIGHT yet' "sync-$network.log"; then
   echo "::notice title=$network wallet sync::synced in ${elapsed}s, then asked for faucet tokens as expected"
-elif grep -q 'Syncing: ' "sync-$network.log" && ! grep -q 'Wallet.Sync' "sync-$network.log"; then
+elif grep -q 'Syncing: ' "sync-$network.log" && ! grep -q 'Wallet\.Sync: ' "sync-$network.log"; then
   echo "::notice title=$network wallet sync::still syncing after ${elapsed}s with no errors: $(grep 'Syncing: ' "sync-$network.log" | tail -1 | sed 's/.*Syncing: //')"
 else
   echo "::error title=$network wallet sync::$(annotate "$network" "sync-$network.log" 30)"
