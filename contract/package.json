@@ -11,9 +11,12 @@
     ".": {
       "types": "./dist/index.d.ts",
       "default": "./dist/index.js"
-    }
+    },
+    "./package.json": "./package.json"
   },
-  "files": ["dist"],
+  "files": [
+    "dist"
+  ],
   "scripts": {
     "compact": "compact compile src/nightcast.compact src/managed/nightcast",
     "compact:fast": "compact compile --skip-zk src/nightcast.compact src/managed/nightcast",

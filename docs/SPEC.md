@@ -84,7 +84,7 @@ Circuits:
 | Requester | Choose `tag` and `seed` | Predict the output (needs `sk`); touch another requester's ids |
 | Oracle | Compute any output in advance for an `alpha` it knows; decline to answer | Choose between outputs; answer late; answer with another key |
 | Operator | Propose keys for future requests | Activate a key without the oracle; change a pending request's key; touch outputs |
-| Maintenance authority | **Replace the contract's circuits** (§4.5) | (Nothing, while it holds a usable key) |
+| Maintenance authority | Nothing once locked at deployment (§4.5) | Replace circuits or itself after the lock |
 | Anyone | Read every output; expire missed requests; make requests (free in v0) | Fulfil without `sk` |
 
 ### 4.1 Grinding
@@ -114,13 +114,15 @@ Whoever holds `sk` can predict every output for requests bound to it; rotation (
 
 ### 4.5 Contract maintenance authority (important)
 
-Every Midnight contract has a maintenance authority that can remove and replace its verifier keys. midnight-js `deployContract` gives the deployer a working authority by default. Whoever holds it can install a `fulfil` circuit that skips the key check and stores any output, so **every guarantee above depends on the authority being unusable**. A production deployment must:
+Every Midnight contract has a maintenance authority: a committee of signing keys and a threshold. Enough committee signatures can remove and replace the contract's verifier keys, or replace the authority itself. Whoever controlled it could install a `fulfil` circuit that skips the key check and stores any output, so **every guarantee above depends on the authority being unusable**.
 
-1. Deploy with, or immediately switch to, an authority that can never sign (for example an empty committee or a threshold above the committee size).
-2. Publish the expected verifier key hashes for every circuit, built from a tagged commit with the pinned compiler.
-3. Let consumers check both the authority and the verifier keys on chain before trusting outputs.
+`nightcast-deploy` handles this:
 
-v0 does not automate any of this yet.
+1. It deploys with a fresh one-time key as the sole authority (midnight-js always deploys with one).
+2. In the next transaction it replaces the authority with `{ committee: [], threshold: 1 }`. The ledger accepts a maintenance update only with at least `threshold` valid signatures from committee members, and an empty committee can produce none, so no further maintenance update of any kind can ever be applied.
+3. It records the SHA-256 of every circuit's verifier key in `deployments/<network>.json`.
+
+Anyone can check a deployment with `./nightcast verify`: the authority on chain must have `threshold > committee size`, and the on-chain verifier keys must match the published fingerprints (and, if they build the same commit, their own). Consumers should run this check, or rely on someone they trust who has, before trusting outputs. Between the deploy and the lock transaction the one-time key could in principle change the contract, so verification checks the final state rather than trusting the deployer.
 
 ## 5. Consumer integration (v0)
 
@@ -139,7 +141,6 @@ On-chain consumption (a consumer contract reading the result directly) waits on 
 
 ## 6. Roadmap
 
-- Lock the maintenance authority and publish verifier key hashes as part of deployment tooling.
 - Multiple oracles, with the output defined as the hash of every oracle's output for the same id (any one honest oracle keeps it unpredictable).
 - Block-derived input once Compact exposes one.
 - On-chain consumer callbacks via cross-contract calls.

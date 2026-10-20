@@ -5,19 +5,29 @@
   "description": "Verifiable randomness for Midnight smart contracts, games, lotteries and AI agents.",
   "license": "MIT",
   "type": "module",
-  "workspaces": ["contract", "sdk"],
+  "workspaces": [
+    "contract",
+    "sdk",
+    "deploy"
+  ],
   "engines": {
     "node": ">=22"
   },
   "scripts": {
     "compact": "npm run compact -w @nightcast/contract",
-    "build": "npm run build -w @nightcast/contract && npm run build -w @nightcast/sdk",
-    "typecheck": "npm run typecheck -w @nightcast/contract && npm run typecheck -w @nightcast/sdk",
-    "test": "npm test -w @nightcast/contract && npm test -w @nightcast/sdk"
+    "build": "npm run build -w @nightcast/contract && npm run build -w @nightcast/sdk && npm run build -w @nightcast/deploy",
+    "typecheck": "npm run typecheck -w @nightcast/contract && npm run typecheck -w @nightcast/sdk && npm run typecheck -w @nightcast/deploy",
+    "test": "npm test -w @nightcast/contract && npm test -w @nightcast/sdk && npm test -w @nightcast/deploy",
+    "deploy": "node deploy/dist/cli.js"
   },
   "devDependencies": {
     "@types/node": "^22.0.0",
     "typescript": "^5.9.0",
     "vitest": "^3.2.0"
+  },
+  "overrides": {
+    "@midnight-ntwrk/ledger-v8": "8.1.0",
+    "@midnight-ntwrk/onchain-runtime-v3": "3.0.0",
+    "effect": "3.20.0"
   }
 }

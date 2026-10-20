@@ -73,9 +73,14 @@ export class NightcastSimulator {
     this.now += seconds;
   }
 
-  getLedger(): Ledger {
+  /** The contract's public state, as the chain would hold it. */
+  publicState(): ChargedState {
     const s = this.state as ContractState;
-    return ledger('data' in s ? s.data : (this.state as ChargedState));
+    return 'data' in s ? s.data : (this.state as ChargedState);
+  }
+
+  getLedger(): Ledger {
+    return ledger(this.publicState());
   }
 
   /** The id `request(tag, seed)` will produce for a given requester secret. */

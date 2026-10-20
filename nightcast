@@ -1,0 +1,16 @@
+#!/usr/bin/env bash
+# Run Nightcast's command-line tools from a checkout:
+#   ./nightcast keygen <oracle|operator|requester> --out <file>
+#   ./nightcast <deploy|accept-key|lock|verify|fingerprints|wallet|oracle|request|status> ...
+# Build first: npm install && npm run compact && npm run build
+set -euo pipefail
+DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+if [ ! -f "$DIR/deploy/dist/cli.js" ]; then
+  echo "Nightcast isn't built yet. Run: npm install && npm run compact && npm run build" >&2
+  exit 1
+fi
+if [ "${1:-}" = "keygen" ]; then
+  shift
+  exec node "$DIR/sdk/dist/keygen.js" "$@"
+fi
+exec node "$DIR/deploy/dist/cli.js" "$@"

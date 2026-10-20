@@ -4,7 +4,7 @@ Nightcast is an independent, experimental verifiable randomness protocol for Mid
 
 It works like [Chainlink VRF](https://docs.chain.link/vrf): you request randomness, an oracle answers, and the answer comes with a proof. On Midnight the proof is the transaction itself. The oracle's `fulfil` circuit evaluates the VRF with its secret key as a private input, so the network only accepts the one output that key can produce for that request, and the key is never revealed.
 
-> **Status: v0, experimental and unaudited.** Don't secure real value with it yet. Read the [threat model](docs/SPEC.md#4-threat-model) first, especially [withholding](docs/SPEC.md#42-withholding-and-aborts) and the [maintenance authority](docs/SPEC.md#45-contract-maintenance-authority-important).
+> **Status: v0, experimental and unaudited.** Don't secure real value with it yet. Read the [threat model](docs/SPEC.md#4-threat-model) first, especially [withholding](docs/SPEC.md#42-withholding-and-aborts).
 
 ## How it works
 
@@ -40,7 +40,10 @@ The construction, ledger layout and threat model are in [docs/SPEC.md](docs/SPEC
 | `sdk/src/oracle.ts` | The oracle service: polls, fulfils pending requests bound to its key, retries with backoff, respects deadlines, optional requester allowlist |
 | `sdk/src/chain.ts` | Chain adapters: simulator, and live Midnight via midnight-js |
 | `sdk/src/derive.ts` | Turning an output into numbers: `randomWords`, `uniformInt`, `pickNumbers`, `combineDrawSeed` |
-| `sdk/src/keygen.ts` | `nightcast-keygen` CLI |
+| `sdk/src/keygen.ts` | `./nightcast keygen`: generate oracle, operator and requester secrets |
+| `deploy/` | `./nightcast` commands: deploy, lock, accept the oracle key, verify, wallets, run the oracle, test requests |
+| `nightcast` | Wrapper script that runs the tools from a checkout |
+| `deployments/` | Published records of live deployments |
 
 ## Getting started
 
@@ -64,35 +67,46 @@ npm test
 The oracle, operator and each requester are separate roles; keep their secrets on separate machines.
 
 ```sh
-npx nightcast-keygen oracle    --out oracle.secret     # prints the oracle public key
-npx nightcast-keygen operator  --out operator.secret   # prints the operator commitment
-npx nightcast-keygen requester --out requester.secret  # prints the requester commitment
+./nightcast keygen oracle    --out oracle.secret     # prints the oracle public key
+./nightcast keygen operator  --out operator.secret   # prints the operator commitment
+./nightcast keygen requester --out requester.secret  # prints the requester commitment
 ```
 
 Files are created with mode 600, never overwritten, and `*.secret` is git-ignored.
 
-### Deploy and run an oracle
+### Deploy
 
-1. Deploy with midnight-js as in Midnight's [example-counter](https://github.com/midnightntwrk/example-counter), passing `(oraclePublicKey, operatorCommitment, minWindowSecs, maxWindowSecs)`.
-2. **Lock the contract's maintenance authority** so nobody can replace its circuits, and publish the verifier key hashes ([SPEC §4.5](docs/SPEC.md#45-contract-maintenance-authority-important)). v0 doesn't automate this yet.
-3. The oracle calls `acceptOracleKey()` once, proving it holds the key; requests are accepted from then on.
-4. Start the service with a contract handle joined using a private state that holds the oracle key:
+**New to Midnight?** Follow the step-by-step [Preprod guide](docs/preprod-guide.md) (written for Windows, works on macOS and Linux too). It covers installing everything, wallets and test tokens, deploying, running the oracle and making a test request.
 
-```ts
-import { MidnightChain, NightcastOracle } from '@nightcast/sdk';
-import { parseOracleSecretKey } from '@nightcast/contract';
+You need Docker (for a local proof server) and a funded Preprod wallet seed (hex). The deploy tool handles the rest:
 
-const secretKey = parseOracleSecretKey(process.env.NIGHTCAST_ORACLE_KEY!);
-// `nightcast` comes from findDeployedContract(..., { initialPrivateState: { oracleSecretKey: secretKey } })
-const chain = new MidnightChain(nightcast, providers.publicDataProvider, contractAddress);
-const oracle = new NightcastOracle({
-  chain,
-  secretKey,
-  requesters: ['<requester commitment hex>'], // optional allowlist against spam
-  logger: console,
-});
-oracle.start();
+```sh
+./nightcast wallet new --out wallet.secret      # then fund it: wallet show --network preprod --wallet wallet.secret
+./nightcast deploy --network preprod --oracle oracle.secret --operator operator.secret --wallet wallet.secret --accept
 ```
+
+In one run this:
+
+1. starts a proof server in Docker (or use `--proof-server-port 6300` for one you already run);
+2. deploys the contract with a one-time maintenance key;
+3. **locks the maintenance authority** straight away by replacing it with an empty committee, so nobody, including you, can ever replace the contract's code ([SPEC §4.5](docs/SPEC.md#45-contract-maintenance-authority-important));
+4. with `--accept`, has the oracle prove it holds its key (`acceptOracleKey`). Leave `--accept` out to keep the oracle secret off the deploying machine; the oracle then runs `./nightcast accept-key --network preprod --oracle oracle.secret` itself;
+5. writes `deployments/preprod.json` with the address, transactions and the SHA-256 **fingerprint of every circuit's verifier key**, then verifies all of it on chain.
+
+Commit `deployments/preprod.json` to publish it. Anyone can then check the live contract with `./nightcast verify --network preprod`; see [deployments/README.md](deployments/README.md). The wallet only pays fees. Only the public parts of the key files are used (plus the oracle secret with `--accept`, kept in memory), and the one-time maintenance key is never written to disk (unless locking fails, so it can be retried with `./nightcast lock`).
+
+`--network preview` works the same way. `--network local` starts a throwaway Midnight network in Docker, which is what CI uses for its end-to-end test.
+
+### Run an oracle
+
+```sh
+./nightcast oracle  --network preprod --oracle oracle.secret --wallet wallet.secret
+./nightcast request --network preprod --requester requester.secret --wallet other-wallet.secret --wait
+```
+
+`oracle` joins the deployment in `deployments/preprod.json` and answers every request bound to its key until you press Ctrl+C (`--requesters <hex,...>` limits it to known requesters). `request --wait` makes a test request and prints the result; `status --id <id>` looks one up from public data.
+
+To embed the oracle in your own service, use `NightcastOracle` with a `MidnightChain` from `@nightcast/sdk` (see `deploy/src/service.ts` for how the CLI does it).
 
 ### Use the randomness
 
@@ -110,7 +124,6 @@ const numbers = pickNumbers(drawSeed, 6, 45);
 ## Limitations of v0
 
 - One oracle. It can withhold an answer until the deadline and, if it can influence a request's input, grind for favourable outputs ([SPEC §4.1](docs/SPEC.md#41-grinding)).
-- The maintenance authority must be locked by hand for the guarantees to hold.
 - Results are read off-chain; on-chain consumer callbacks come with cross-contract calls.
 - Requests are free, so an oracle open to everyone can be spammed; use the requester allowlist.
 - Not audited.

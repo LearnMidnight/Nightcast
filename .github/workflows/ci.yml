@@ -45,8 +45,28 @@ jobs:
         id: build
         run: npm run build
 
+      - name: Explain type errors
+        if: failure() && steps.build.outcome == 'failure'
+        run: |
+          for pkg in contract sdk deploy; do
+            npx tsc -p $pkg/tsconfig.json --noEmit --pretty false > tsc-$pkg.txt 2>&1 || true
+            node -e '
+              const text = require("fs").readFileSync(process.argv[1], "utf8");
+              const blocks = text.split(/\n(?=\S)/).filter(Boolean).slice(0, 10);
+              for (const b of blocks) console.log(`::error title=tsc ${process.argv[2]}::${b.slice(0, 1800).replace(/%/g,"%25").replace(/\n/g,"%0A")}`);
+            ' tsc-$pkg.txt $pkg
+          done
+
       - name: Typecheck
         run: npm run typecheck
+
+      - name: Verifier key fingerprints
+        run: |
+          node deploy/dist/cli.js fingerprints | tee fingerprints.json
+          node -e '
+            const f = require("./fingerprints.json");
+            for (const [c, h] of Object.entries(f.verifierKeys)) console.log(`::notice title=fingerprint ${c}::${h}`);
+          '
 
       - name: Test contract
         working-directory: contract
@@ -57,6 +77,11 @@ jobs:
         working-directory: sdk
         run: npx vitest run --reporter=default --reporter=github-actions --reporter=json --outputFile.json=../reports/sdk.json
 
+      - name: Test deploy tooling
+        if: ${{ !cancelled() && steps.build.outcome == 'success' }}
+        working-directory: deploy
+        run: npx vitest run src/test/offline.test.ts --reporter=default --reporter=github-actions --reporter=json --outputFile.json=../reports/deploy.json
+
       - name: Summarise tests
         if: always()
         run: |
@@ -66,5 +91,125 @@ jobs:
               const r = require(process.argv[1]);
               const name = process.argv[1].split("/").pop().replace(".json", "");
               console.log(`::notice title=${name} tests::${r.numPassedTests} passed, ${r.numFailedTests} failed, ${r.numTotalTests} total`);
+            ' "$PWD/$f"
+          done
+
+  # Deploys to a throwaway local Midnight network in Docker: deploy, lock the
+  # maintenance authority, activate the oracle key, verify the fingerprints,
+  # then serve a real request with real proofs.
+  e2e:
+    needs: test
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/setup-node@v5
+        with:
+          node-version: 22
+
+      - name: Install Compact toolchain
+        run: |
+          curl --proto '=https' --tlsv1.2 -LsSf https://github.com/midnightntwrk/compact/releases/latest/download/compact-installer.sh | sh
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+
+      - name: Select compiler ${{ env.COMPACT_TOOLCHAIN }}
+        run: compact update "$COMPACT_TOOLCHAIN"
+
+      - name: Install dependencies
+        run: npm install --no-audit --no-fund
+
+      - name: Compile contract (with proving keys)
+        run: npm run compact
+
+      - name: Build
+        run: npm run build
+
+      - name: Pull network images
+        run: |
+          status=0
+          for img in $(grep -o 'image: "[^"]*"' deploy/docker/compose.yml deploy/docker/proof-server.yml | sed 's/.*image: "//; s/"$//' | sort -u); do
+            if docker pull -q "$img" > /dev/null 2>pull-err.txt; then
+              echo "::notice title=image::$img pulled"
+            else
+              echo "::error title=image::$img: $(head -c 400 pull-err.txt | tr '\n' ' ')"
+              status=1
+            fi
+          done
+          exit $status
+
+      - name: End-to-end test on a local network
+        working-directory: deploy
+        env:
+          NIGHTCAST_E2E: '1'
+        shell: bash
+        run: |
+          set -o pipefail
+          npx vitest run src/test/e2e.test.ts --reporter=default --reporter=github-actions --reporter=json --outputFile.json=../reports/e2e.json 2>&1 | tee ../e2e.log
+
+      - name: Deploy with the CLI on a local network
+        shell: bash
+        run: |
+          set -o pipefail
+          # Same commands as docs/preprod-guide.md, against a local network.
+          exec > >(tee -a cli.log) 2>&1
+          ./nightcast keygen oracle --out "$RUNNER_TEMP/oracle.secret"
+          ./nightcast keygen operator --out "$RUNNER_TEMP/operator.secret"
+          ./nightcast wallet new --out "$RUNNER_TEMP/wallet.secret"
+          test "$(stat -c %a "$RUNNER_TEMP/wallet.secret")" = 600
+          export NIGHTCAST_DEPLOYMENTS_DIR="$RUNNER_TEMP/deployments"
+          ./nightcast deploy --network local --oracle "$RUNNER_TEMP/oracle.secret" --operator "$RUNNER_TEMP/operator.secret" --accept
+          node -e '
+            const r = require(process.env.NIGHTCAST_DEPLOYMENTS_DIR + "/local.json");
+            const ok = r.transactions.deploy && r.transactions.lockAuthority && r.transactions.acceptOracleKey && r.maintenanceAuthority.committeeSize === 0;
+            console.log(`::notice title=CLI deploy::${r.contractAddress} locked=${r.maintenanceAuthority.committeeSize === 0} circuits=${Object.keys(r.verifierKeys).length}`);
+            process.exit(ok ? 0 : 1);
+          '
+
+      - name: CLI output
+        if: failure()
+        run: |
+          [ -f cli.log ] || exit 0
+          sed 's/\x1b\[[0-9;]*m//g' cli.log | grep -v '^\s*$' | tail -45 > cli-tail.txt
+          n=0
+          while [ $n -lt 3 ]; do
+            chunk=$(sed -n "$((n*15+1)),$((n*15+15))p" cli-tail.txt | sed 's/%/%25/g' | awk 'BEGIN{ORS="%0A"} {print substr($0,1,300)}')
+            [ -n "$chunk" ] && echo "::error title=cli output $n::$chunk"
+            n=$((n+1))
+          done
+
+      - name: Test output
+        if: failure()
+        run: |
+          sed 's/\x1b\[[0-9;]*m//g' e2e.log | grep -v '^\s*$' | grep -iE 'error|fail|exception|cause|at |✗|×|timeout|refused|unhealthy|exited' | head -60 > e2e-errors.txt || true
+          n=0
+          while [ $n -lt 4 ]; do
+            chunk=$(sed -n "$((n*15+1)),$((n*15+15))p" e2e-errors.txt | sed 's/%/%25/g' | awk 'BEGIN{ORS="%0A"} {print substr($0,1,300)}')
+            [ -n "$chunk" ] && echo "::error title=e2e output $n::$chunk"
+            n=$((n+1))
+          done
+
+      - name: Container logs
+        if: failure()
+        run: |
+          for c in $(docker ps -a --format '{{.Names}}'); do
+            tail=$(docker logs --tail 25 "$c" 2>&1 | tail -c 2500 | sed 's/%/%25/g' | awk 'BEGIN{ORS="%0A"} {print}')
+            echo "::warning title=logs $c::$tail"
+          done
+
+      - name: Summarise tests
+        if: always()
+        run: |
+          for f in reports/*.json; do
+            [ -f "$f" ] || continue
+            node -e '
+              const r = require(process.argv[1]);
+              const name = process.argv[1].split("/").pop().replace(".json", "");
+              console.log(`::notice title=${name} tests::${r.numPassedTests} passed, ${r.numFailedTests} failed, ${r.numTotalTests} total`);
+              const esc = (t) => String(t || "").slice(0, 3000).replace(/%/g, "%25").replace(/\r?\n/g, "%0A");
+              for (const f of r.testResults) {
+                if (f.message) console.log(`::error title=suite error::${esc(f.message)}`);
+                for (const a of f.assertionResults) if (a.status === "failed") console.log(`::error title=${a.title}::${esc(a.failureMessages[0])}`);
+              }
             ' "$PWD/$f"
           done
