@@ -42,6 +42,7 @@ jobs:
         run: npm run compact
 
       - name: Build
+        id: build
         run: npm run build
 
       - name: Typecheck
@@ -52,6 +53,7 @@ jobs:
         run: npx vitest run --reporter=default --reporter=github-actions --reporter=json --outputFile.json=../reports/contract.json
 
       - name: Test SDK
+        if: ${{ !cancelled() && steps.build.outcome == 'success' }}
         working-directory: sdk
         run: npx vitest run --reporter=default --reporter=github-actions --reporter=json --outputFile.json=../reports/sdk.json
 
