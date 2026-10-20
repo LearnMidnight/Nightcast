@@ -22,6 +22,7 @@ import { isLocked, lockMaintenanceAuthority } from '../lock.js';
 import {
   compiledNightcast,
   connect,
+  LOCAL_GENESIS_SEEDS,
   NIGHTCAST_PRIVATE_STATE_ID,
   nightcastProviders,
   type NightcastProviders,
@@ -30,6 +31,7 @@ import {
 } from '../network.js';
 import type { DeploymentRecord } from '../record.js';
 import { acceptOracleKey, deployNightcast } from '../steps.js';
+import { startOracleService, submitRequest, waitForResult } from '../service.js';
 import { verifyDeployment } from '../verify.js';
 
 const enabled = process.env.NIGHTCAST_E2E === '1';
@@ -143,4 +145,22 @@ describe.runIf(enabled)('Nightcast on a local Midnight network', () => {
     expect(hex(r.output)).toBe(hex(pureCircuits.evaluateAt(sk, r.point)));
     expect(hex(r.output)).toBe(hex(pureCircuits.evaluate(sk, id)));
   }, 15 * 60_000);
+
+  it('runs the oracle service: another wallet requests, the service fulfils', async () => {
+    // A second wallet, as a separate requester would have.
+    const requesterWallet = await openWallet(session, { seed: LOCAL_GENESIS_SEEDS[1] });
+    const requesterProviders = nightcastProviders(session, requesterWallet);
+    const running = await startOracleService(providers, address, sk, session.logger, { pollMs: 2_000, safetyMarginSecs: 60 });
+    try {
+      const requesterSecret = label('service-requester');
+      const req = await submitRequest(requesterProviders, address, requesterSecret, { tag: 'e2e-service', deadlineSecs: 1_800 });
+      const r = await waitForResult(requesterProviders, address, req.id, { pollMs: 2_000, timeoutMs: 10 * 60_000 });
+      expect(r?.status).toBe(Status.fulfilled);
+      expect(hex(r!.requester)).toBe(hex(pureCircuits.requesterCommitmentOf(requesterSecret)));
+      expect(hex(r!.output)).toBe(hex(pureCircuits.evaluate(sk, req.id)));
+    } finally {
+      await running.stop();
+      await requesterWallet.stop().catch(() => undefined);
+    }
+  }, 20 * 60_000);
 });
