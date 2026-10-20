@@ -147,6 +147,18 @@ jobs:
           set -o pipefail
           npx vitest run src/test/e2e.test.ts --reporter=default --reporter=github-actions --reporter=json --outputFile.json=../reports/e2e.json 2>&1 | tee ../e2e.log
 
+      - name: Connect to Preprod
+        continue-on-error: true
+        shell: bash
+        run: |
+          set -o pipefail
+          if ./nightcast doctor --network preprod 2>&1 | tee doctor.log; then
+            echo "::notice title=Preprod::reachable (node, indexer, proof server)"
+          else
+            echo "::error title=Preprod doctor::$(sed 's/\x1b\[[0-9;]*m//g' doctor.log | tail -12 | sed 's/%/%25/g' | awk 'BEGIN{ORS="%0A"} {print substr($0,1,300)}')"
+            exit 1
+          fi
+
       - name: Deploy with the CLI on a local network
         shell: bash
         run: |

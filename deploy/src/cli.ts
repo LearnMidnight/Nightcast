@@ -25,7 +25,6 @@ import { fileURLToPath } from 'node:url';
 import { parseArgs } from 'node:util';
 import { fromHex, oraclePublicKey, parseOracleSecretKey, pureCircuits, Status, toHex } from '@nightcast/contract';
 import { pickNumbers } from '@nightcast/sdk';
-import { PreprodTestEnvironment, PreviewTestEnvironment } from '@midnight-ntwrk/testkit-js';
 import { indexerPublicDataProvider } from '@midnight-ntwrk/midnight-js-indexer-public-data-provider';
 import { setNetworkId } from '@midnight-ntwrk/midnight-js/network-id';
 import { compilerInfo, type Fingerprints, localFingerprints } from './fingerprints.js';
@@ -39,6 +38,7 @@ import {
   nightcastProviders,
   openWallet,
   FAUCETS,
+  publicEndpoints,
   type Session,
   type WalletOptions,
   walletAddress,
@@ -55,6 +55,7 @@ const USAGE = `usage:
   ./nightcast lock         --network <network> --maintenance-key-file <file> [--proof-server-port <port>]
   ./nightcast verify       --network <network> [--address <contract address>]
   ./nightcast fingerprints
+  ./nightcast doctor       --network <network> [--proof-server-port <port>]
   ./nightcast wallet new   --out <file>
   ./nightcast wallet show  --network <network> --wallet <file> [--proof-server-port <port>]
   ./nightcast oracle       --network <network> --oracle <oracle secret file> --wallet <file> [--requesters <hex,...>] [--poll 5] [--proof-server-port <port>]
@@ -151,8 +152,7 @@ const runVerify = async (session: Session | undefined, network: Network, address
   const publicConfig = () => {
     if (network === 'local') throw new Error('verify on `local` must run inside the same session as the deploy');
     const logger = createLogger('warn');
-    const env = network === 'preprod' ? new PreprodTestEnvironment(logger) : new PreviewTestEnvironment(logger);
-    const c = env.getEnvironmentConfiguration();
+    const c = publicEndpoints(network, logger);
     setNetworkId(c.networkId);
     return c;
   };
@@ -341,6 +341,20 @@ const main = async (argv: string[]): Promise<number> => {
       });
     }
 
+    case 'doctor': {
+      const network = networkArg(values.network);
+      return withSession(network, portArg(values['proof-server-port']), async (session) => {
+        const c = session.config;
+        process.stdout.write(
+          `\nNetwork:      ${network} (${c.networkId})\nNode:         ${c.node}\nIndexer:      ${c.indexer}\nProof server: ${c.proofServer}\n\n` +
+            (session.problems.length === 0
+              ? 'Everything answered. You are ready to go.\n'
+              : `Problems:\n${session.problems.map((p) => `  - ${p}`).join('\n')}\n`),
+        );
+        return session.problems.length === 0 ? 0 : 1;
+      });
+    }
+
     case 'wallet': {
       const sub = positionals[0];
       if (sub === 'new') {
@@ -447,7 +461,7 @@ const main = async (argv: string[]): Promise<number> => {
       const id = fromHex(values.id);
       if (network === 'local') throw new Error('status on `local` must run inside the same session');
       const logger = createLogger('warn');
-      const config = (network === 'preprod' ? new PreprodTestEnvironment(logger) : new PreviewTestEnvironment(logger)).getEnvironmentConfiguration();
+      const config = publicEndpoints(network, logger);
       setNetworkId(config.networkId);
       const publicDataProvider = indexerPublicDataProvider(config.indexer, config.indexerWS);
       const r = await readRequest({ publicDataProvider }, record.contractAddress, id);

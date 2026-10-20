@@ -106,7 +106,17 @@ The wallets hold test tokens that pay transaction fees. One is for the oracle, o
 
 **Back up `~/nightcast-secrets`** (for example to a USB stick). If you lose these files you lose the oracle key and the wallets.
 
-### 8. Fund the wallets with test tokens
+### 8. Check the connection, then fund the wallets
+
+First check your computer can reach Preprod:
+
+```bash
+./nightcast doctor --network preprod
+```
+
+It starts the proof server and checks the Preprod node and indexer. It should end with `Everything answered. You are ready to go.`
+
+Now fund the oracle wallet:
 
 ```bash
 ./nightcast wallet show --network preprod --wallet ~/nightcast-secrets/oracle-wallet.secret
@@ -236,6 +246,7 @@ git push
 
 | Problem | Fix |
 |---|---|
+| `doctor` reports a problem, or a command says `did not answer` | Check your internet connection and run `./nightcast doctor --network preprod` again; Preprod is sometimes briefly down. |
 | `Cannot connect to the Docker daemon` | Open Docker Desktop and check WSL integration is on for Ubuntu (step 2). |
 | `compact: command not found` or `nvm: command not found` | Run `source ~/.bashrc`, or close and reopen the Ubuntu terminal. |
 | Stuck on "Waiting for the NIGHT to arrive" | Check you pasted the `mn_addr_preprod1...` address into the faucet, with no spaces. |
