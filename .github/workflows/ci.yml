@@ -152,18 +152,31 @@ jobs:
         run: |
           set -o pipefail
           # Same commands as docs/preprod-guide.md, against a local network.
+          exec > >(tee -a cli.log) 2>&1
           npx nightcast-keygen oracle --out "$RUNNER_TEMP/oracle.secret"
           npx nightcast-keygen operator --out "$RUNNER_TEMP/operator.secret"
           npx nightcast-deploy wallet new --out "$RUNNER_TEMP/wallet.secret"
           test "$(stat -c %a "$RUNNER_TEMP/wallet.secret")" = 600
           export NIGHTCAST_DEPLOYMENTS_DIR="$RUNNER_TEMP/deployments"
-          npx nightcast-deploy deploy --network local --oracle "$RUNNER_TEMP/oracle.secret" --operator "$RUNNER_TEMP/operator.secret" --accept 2>&1 | tee -a e2e.log
+          npx nightcast-deploy deploy --network local --oracle "$RUNNER_TEMP/oracle.secret" --operator "$RUNNER_TEMP/operator.secret" --accept 2>&1 | tee cli.log
           node -e '
             const r = require(process.env.NIGHTCAST_DEPLOYMENTS_DIR + "/local.json");
             const ok = r.transactions.deploy && r.transactions.lockAuthority && r.transactions.acceptOracleKey && r.maintenanceAuthority.committeeSize === 0;
             console.log(`::notice title=CLI deploy::${r.contractAddress} locked=${r.maintenanceAuthority.committeeSize === 0} circuits=${Object.keys(r.verifierKeys).length}`);
             process.exit(ok ? 0 : 1);
           '
+
+      - name: CLI output
+        if: failure()
+        run: |
+          [ -f cli.log ] || exit 0
+          sed 's/\x1b\[[0-9;]*m//g' cli.log | grep -v '^\s*$' | tail -45 > cli-tail.txt
+          n=0
+          while [ $n -lt 3 ]; do
+            chunk=$(sed -n "$((n*15+1)),$((n*15+15))p" cli-tail.txt | sed 's/%/%25/g' | awk 'BEGIN{ORS="%0A"} {print substr($0,1,300)}')
+            [ -n "$chunk" ] && echo "::error title=cli output $n::$chunk"
+            n=$((n+1))
+          done
 
       - name: Test output
         if: failure()
