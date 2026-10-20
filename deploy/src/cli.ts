@@ -38,7 +38,9 @@ import {
   NETWORKS,
   nightcastProviders,
   openWallet,
+  FAUCETS,
   type Session,
+  type WalletOptions,
   walletAddress,
   walletBalances,
 } from './network.js';
@@ -90,6 +92,24 @@ const walletSeed = (file: string | undefined): string | undefined => {
   }
   return process.env.NIGHTCAST_WALLET_SEED;
 };
+
+/** Wallet options that tell the user what's happening while the wallet gets ready. */
+const walletOptions = (network: Network, seed: string | undefined, showAddress = false): WalletOptions => ({
+  seed,
+  onAddress: (address) => {
+    if (showAddress) process.stdout.write(`\nWallet address: ${address}\n\nSyncing the wallet (the first sync can take a few minutes)...\n`);
+  },
+  onNoFunds: (address) =>
+    process.stdout.write(
+      `\nThis wallet has no NIGHT yet. Get some from the ${network} faucet:\n` +
+        `  1. Open ${FAUCETS[network] ?? 'the faucet for this network'}\n` +
+        `  2. Paste this address: ${address}\n` +
+        `  3. Complete the captcha and request tokens.\n` +
+        `Waiting for the NIGHT to arrive (leave this running)...\n\n`,
+    ),
+  onWaitingForDust: () =>
+    process.stdout.write('Registered the NIGHT for DUST (the fee token). Waiting for the first DUST...\n'),
+});
 
 const formatNight = (atoms: bigint): string => {
   const whole = atoms / 1_000_000n;
@@ -204,7 +224,7 @@ const main = async (argv: string[]): Promise<number> => {
       const fingerprints = localFingerprints();
 
       return withSession(network, portArg(values['proof-server-port']), async (session) => {
-        const wallet = await openWallet(session, { seed: walletSeed(values.wallet) });
+        const wallet = await openWallet(session, walletOptions(network, walletSeed(values.wallet)));
         try {
           const providers = nightcastProviders(session, wallet);
           session.logger.info('Deploying Nightcast...');
@@ -276,7 +296,7 @@ const main = async (argv: string[]): Promise<number> => {
       if (!oracleFile.secret) throw new Error(`${values.oracle} has no secret`);
       const record = readRecord(network);
       return withSession(network, portArg(values['proof-server-port']), async (session) => {
-        const wallet = await openWallet(session, { seed: walletSeed(values.wallet) });
+        const wallet = await openWallet(session, walletOptions(network, walletSeed(values.wallet)));
         try {
           const providers = nightcastProviders(session, wallet);
           const accepted = await acceptOracleKey(providers, record.contractAddress, parseOracleSecretKey(oracleFile.secret!));
@@ -297,7 +317,7 @@ const main = async (argv: string[]): Promise<number> => {
       const record = readRecord(network);
       if (saved.contractAddress !== record.contractAddress) throw new Error('key file is for a different deployment');
       return withSession(network, portArg(values['proof-server-port']), async (session) => {
-        const wallet = await openWallet(session, { seed: walletSeed(values.wallet) });
+        const wallet = await openWallet(session, walletOptions(network, walletSeed(values.wallet)));
         try {
           const providers = nightcastProviders(session, wallet);
           const state = await providers.publicDataProvider.queryContractState(record.contractAddress);
@@ -337,15 +357,7 @@ const main = async (argv: string[]): Promise<number> => {
       const network = networkArg(values.network);
       const seed = walletSeed(values.wallet);
       return withSession(network, portArg(values['proof-server-port']), async (session) => {
-        const wallet = await openWallet(session, {
-          seed,
-          onAddress: (address) =>
-            process.stdout.write(
-              `\nWallet address: ${address}\n` +
-                (network === 'local' ? '' : `If it is empty, get test NIGHT from the ${network} faucet for this address.\n`) +
-                'Waiting for the wallet to sync and receive funds (this can take a few minutes)...\n\n',
-            ),
-        });
+        const wallet = await openWallet(session, walletOptions(network, seed, true));
         try {
           const { night, dust } = await walletBalances(wallet);
           process.stdout.write(`NIGHT: ${formatNight(night)} (${night} STAR)\nDUST:  ${dust} (pays transaction fees; it builds up over time)\n`);
@@ -365,7 +377,7 @@ const main = async (argv: string[]): Promise<number> => {
       const record = readRecord(network);
       const requesters = values.requesters?.split(',').map((r) => r.trim()).filter(Boolean);
       return withSession(network, portArg(values['proof-server-port']), async (session) => {
-        const wallet = await openWallet(session, { seed: walletSeed(values.wallet) });
+        const wallet = await openWallet(session, walletOptions(network, walletSeed(values.wallet)));
         try {
           const { night, dust } = await walletBalances(wallet);
           session.logger.info(`Wallet ${walletAddress(wallet)}: ${formatNight(night)} NIGHT, ${dust} DUST`);
@@ -398,7 +410,7 @@ const main = async (argv: string[]): Promise<number> => {
       const maxMins = Number(record.parameters.maxWindow) / 60;
       const mins = Math.min(Number(values['deadline-mins']), maxMins);
       return withSession(network, portArg(values['proof-server-port']), async (session) => {
-        const wallet = await openWallet(session, { seed: walletSeed(values.wallet) });
+        const wallet = await openWallet(session, walletOptions(network, walletSeed(values.wallet)));
         try {
           const providers = nightcastProviders(session, wallet);
           session.logger.info('Submitting a request...');

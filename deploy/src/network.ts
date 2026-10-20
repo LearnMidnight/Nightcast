@@ -1,7 +1,7 @@
 import { dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import pino, { type Logger } from 'pino';
-import { filter, firstValueFrom } from 'rxjs';
+import { filter, firstValueFrom, throttleTime } from 'rxjs';
 import { unshieldedToken } from '@midnight-ntwrk/midnight-js-protocol/ledger';
 import { CompiledContract, type ProvableCircuitId } from '@midnight-ntwrk/compact-js';
 import type { MidnightProviders } from '@midnight-ntwrk/midnight-js/types';
@@ -20,6 +20,7 @@ import {
   setContainersConfiguration,
   StaticProofServerContainer,
   type TestEnvironment,
+  waitForFunds,
 } from '@midnight-ntwrk/testkit-js';
 import { Nightcast, type NightcastPrivateState, witnesses } from '@nightcast/contract';
 import { zkConfigPath } from './fingerprints.js';
@@ -100,19 +101,52 @@ export type WalletOptions = {
   seed?: string;
   /** Called with the wallet's unshielded address before waiting for funds. */
   onAddress?: (address: string) => void;
+  /** Called once if the wallet has no NIGHT yet (it then waits for some to arrive). */
+  onNoFunds?: (address: string) => void;
+  /** Called once while waiting for the first DUST after registration. */
+  onWaitingForDust?: () => void;
+};
+
+/** Faucet pages for test NIGHT (from Midnight's "Acquire tokens" guide). */
+export const FAUCETS: Partial<Record<Network, string>> = {
+  preprod: 'https://midnight-tmnight-preprod.nethermind.dev/',
 };
 
 /**
- * Open and sync a wallet. On Preprod and Preview, if it holds no NIGHT the
- * testkit asks the faucet for some and waits; once funded it registers the
- * NIGHT for DUST generation (DUST pays transaction fees).
+ * Open and sync a wallet, ready to pay fees. If it holds no NIGHT it waits
+ * for some to arrive (send it from the faucet); then it registers the NIGHT
+ * for DUST generation if needed and waits for the first DUST (DUST pays
+ * transaction fees and builds up over time).
  */
 export const openWallet = async (session: Session, opts: WalletOptions = {}): Promise<MidnightWalletProvider> => {
   const seed = opts.seed ?? (session.network === 'local' ? LOCAL_GENESIS_SEEDS[0] : undefined);
   if (!seed) throw new Error('No wallet: pass --wallet <file from `nightcast-deploy wallet new`> or set NIGHTCAST_WALLET_SEED.');
   const wallet = await MidnightWalletProvider.build(session.logger, session.config, seed);
-  opts.onAddress?.(walletAddress(wallet));
-  await wallet.start();
+  const address = walletAddress(wallet);
+  opts.onAddress?.(address);
+  await wallet.start(false);
+
+  const synced = () => firstValueFrom(wallet.wallet.state().pipe(filter((s) => s.isSynced)));
+  let state = await synced();
+  if ((state.unshielded.balances[unshieldedToken().raw] ?? 0n) === 0n) {
+    opts.onNoFunds?.(address);
+    state = await firstValueFrom(
+      wallet.wallet
+        .state()
+        .pipe(filter((s) => s.isSynced && (s.unshielded.balances[unshieldedToken().raw] ?? 0n) > 0n)),
+    );
+  }
+  if (state.dust.balance(new Date()) === 0n) {
+    // Registers any unregistered NIGHT for DUST generation (no faucet calls).
+    await waitForFunds(wallet.wallet, { ...session.config, faucet: undefined }, false, wallet.unshieldedKeystore);
+    opts.onWaitingForDust?.();
+    await firstValueFrom(
+      wallet.wallet.state().pipe(
+        throttleTime(5_000),
+        filter((s) => s.isSynced && s.dust.balance(new Date()) > 0n),
+      ),
+    );
+  }
   return wallet;
 };
 
