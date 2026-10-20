@@ -1,4 +1,6 @@
-import { dirname, resolve } from 'node:path';
+import { existsSync, readFileSync } from 'node:fs';
+import { homedir } from 'node:os';
+import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import pino, { type Logger } from 'pino';
 import { filter, firstValueFrom, throttleTime } from 'rxjs';
@@ -16,6 +18,7 @@ import {
   type EnvironmentConfiguration,
   inMemoryPrivateStateProvider,
   LocalTestEnvironment,
+  logger as testkitLogger,
   MidnightWalletProvider,
   PreprodTestEnvironment,
   PreviewTestEnvironment,
@@ -39,8 +42,23 @@ export type NightcastProviders = MidnightProviders<NightcastCircuits, typeof NIG
 
 const dockerDir = resolve(dirname(fileURLToPath(import.meta.url)), '..', 'docker');
 
+/** Hide Blockfrost project ids, which travel in URLs as `?project_id=...`. */
+export const redact = (text: string): string => text.replace(/(project_id=)[^&\s"'`)]+/g, '$1***');
+
 export const createLogger = (level = process.env.NIGHTCAST_LOG_LEVEL ?? 'info'): Logger =>
-  pino({ level, transport: { target: 'pino-pretty', options: { colorize: true, ignore: 'pid,hostname' } } });
+  pino({
+    level,
+    hooks: {
+      logMethod(args, method) {
+        method.apply(this, args.map((a) => (typeof a === 'string' ? redact(a) : a)) as typeof args);
+      },
+    },
+    transport: { target: 'pino-pretty', options: { colorize: true, ignore: 'pid,hostname' } },
+  });
+
+// The testkit's own logger prints wallet settings (including indexer URLs, so
+// any project id) at info level, to the terminal and to ./logs/tests. Quiet it.
+testkitLogger.level = process.env.NIGHTCAST_LOG_LEVEL === 'debug' ? 'debug' : 'warn';
 
 /** The compiled Nightcast contract with its witnesses and proving keys, as midnight-js expects it. */
 export const compiledNightcast = (dir = zkConfigPath()) =>
@@ -58,24 +76,114 @@ export type Session = {
   shutdown(): Promise<void>;
 };
 
-/** Public endpoints (node, indexer) for a remote network; the proof server is added by `connect`. */
-export const publicEndpoints = (network: Exclude<Network, 'local'>, logger: Logger): EnvironmentConfiguration => {
-  const env = network === 'preprod' ? new PreprodTestEnvironment(logger) : new PreviewTestEnvironment(logger);
-  // The testkit's faucet API needs no captcha only in CI; use the faucet web page instead.
-  return { ...env.getEnvironmentConfiguration(), faucet: undefined };
+/**
+ * Networks whose public node and indexer are run by Blockfrost and need a
+ * project id. Midnight retired its own Preprod endpoints on 9 October 2026
+ * (they now answer 410 Gone); see docs.midnight.network/relnotes/network.
+ */
+export const BLOCKFROST: Partial<Record<Network, { indexer: string; indexerWS: string; node: string; nodeWS: string }>> = {
+  preprod: {
+    indexer: 'https://midnight-preprod.blockfrost.io/api/v0',
+    indexerWS: 'wss://midnight-preprod.blockfrost.io/api/v0/ws',
+    node: 'https://rpc.midnight-preprod.blockfrost.io',
+    nodeWS: 'wss://rpc.midnight-preprod.blockfrost.io',
+  },
+};
+
+/** Where `./nightcast blockfrost save` keeps the project id by default. */
+export const defaultBlockfrostFile = (network: Network): string =>
+  join(homedir(), 'nightcast-secrets', `blockfrost-${network}.secret`);
+
+/**
+ * The Blockfrost project id for a network: NIGHTCAST_BLOCKFROST_PROJECT_ID,
+ * else the given file, else the default file. Undefined if none is set.
+ */
+export const blockfrostProjectId = (network: Network, file?: string): string | undefined => {
+  const fromEnv = process.env.NIGHTCAST_BLOCKFROST_PROJECT_ID?.trim();
+  if (fromEnv) return fromEnv;
+  const path = file ?? defaultBlockfrostFile(network);
+  if (!existsSync(path)) {
+    if (file) throw new Error(`${file} does not exist`);
+    return undefined;
+  }
+  const id = readFileSync(path, 'utf8').trim();
+  return id || undefined;
+};
+
+const withProjectId = (url: string, projectId: string): string => {
+  const u = new URL(url);
+  u.searchParams.set('project_id', projectId);
+  return u.toString();
 };
 
 /**
- * Check a service answers, allowing for slow links (the testkit's own checks
- * give up after 1 second, which is too short from far away). Returns an
- * error message, or undefined when it's reachable.
+ * Public endpoints (node, indexer) for a remote network; the proof server is
+ * added by `connect`. Blockfrost-served networks need `projectId`.
  */
-const reachable = async (name: string, url: string, timeoutMs = 20_000): Promise<string | undefined> => {
+export const publicEndpoints = (
+  network: Exclude<Network, 'local'>,
+  logger: Logger,
+  projectId?: string,
+): EnvironmentConfiguration => {
+  const blockfrost = BLOCKFROST[network];
+  if (blockfrost) {
+    if (!projectId) {
+      throw new Error(
+        `${network} needs a Blockfrost project id (Midnight's own ${network} servers were retired on 9 October 2026).\n` +
+          `  1. Sign up at https://blockfrost.io and create a project for Midnight ${network}.\n` +
+          `  2. Run: ./nightcast blockfrost save --network ${network}\n` +
+          `     and paste the project id when asked.`,
+      );
+    }
+    // Network ids from the testkit; endpoints replaced with Blockfrost's.
+    return {
+      ...new PreprodTestEnvironment(logger).getEnvironmentConfiguration(),
+      indexer: withProjectId(blockfrost.indexer, projectId),
+      indexerWS: withProjectId(blockfrost.indexerWS, projectId),
+      node: withProjectId(blockfrost.node, projectId),
+      nodeWS: withProjectId(blockfrost.nodeWS, projectId),
+      faucet: undefined,
+    };
+  }
+  // The testkit's faucet API needs no captcha only in CI; use the faucet web page instead.
+  return { ...new PreviewTestEnvironment(logger).getEnvironmentConfiguration(), faucet: undefined };
+};
+
+const errorText = (err: unknown): string => {
+  const e = err as { message?: string; cause?: { message?: string; code?: string } };
+  return [e?.message ?? String(err), e?.cause?.code ?? e?.cause?.message].filter(Boolean).join(': ');
+};
+
+/**
+ * POST a small request and expect a 2xx answer, allowing for slow links (the
+ * testkit's own checks give up after 1 second, which is too short from far
+ * away). Returns an error message, or undefined when it works.
+ */
+const answers = async (
+  name: string,
+  url: string,
+  init: { method?: string; body?: string } = {},
+  timeoutMs = 20_000,
+): Promise<string | undefined> => {
+  const shown = redact(url);
   try {
-    const res = await fetch(url, { signal: AbortSignal.timeout(timeoutMs) });
-    return res.status < 500 ? undefined : `${name} at ${url} answered ${res.status}`;
+    const res = await fetch(url, {
+      method: init.method ?? 'GET',
+      body: init.body,
+      headers: init.body ? { 'content-type': 'application/json' } : undefined,
+      signal: AbortSignal.timeout(timeoutMs),
+    });
+    if (res.ok) return undefined;
+    const body = (await res.text().catch(() => '')).replace(/\s+/g, ' ').slice(0, 160);
+    const hint =
+      res.status === 401 || res.status === 403
+        ? ' (the Blockfrost project id was refused: check it is for this network)'
+        : res.status === 410
+          ? ' (this endpoint has been retired)'
+          : '';
+    return redact(`${name} at ${shown} answered ${res.status}${hint}${body ? `: ${body}` : ''}`);
   } catch (err) {
-    return `${name} at ${url} did not answer (${err instanceof Error ? err.message : String(err)})`;
+    return redact(`${name} at ${shown} did not answer (${errorText(err)})`);
   }
 };
 
@@ -129,7 +237,7 @@ export const probeIndexerWebSocket = (url: string, timeoutMs = 20_000): Promise<
       } catch {
         // already closed
       }
-      resolvePromise(result === undefined ? undefined : `indexer WebSocket at ${url}: ${result}`);
+      resolvePromise(result === undefined ? undefined : redact(`indexer WebSocket at ${url}: ${result}`));
     };
     const timer = setTimeout(() => done(`no answer within ${timeoutMs / 1000}s`), timeoutMs);
     try {
@@ -156,7 +264,10 @@ export const probeIndexerWebSocket = (url: string, timeoutMs = 20_000): Promise<
  * Docker unless `proofServerPort` points at one already running; `local`
  * starts a whole throwaway network (node, indexer, proof server) in Docker.
  */
-export const connect = async (network: Network, opts: { proofServerPort?: number; logger?: Logger } = {}): Promise<Session> => {
+export const connect = async (
+  network: Network,
+  opts: { proofServerPort?: number; logger?: Logger; projectId?: string } = {},
+): Promise<Session> => {
   const logger = opts.logger ?? createLogger();
   const webSocket = installWebSocket();
   setContainersConfiguration({
@@ -172,7 +283,7 @@ export const connect = async (network: Network, opts: { proofServerPort?: number
     return { network, logger, config, problems: [], shutdown: () => env.shutdown() };
   }
 
-  const base = publicEndpoints(network, logger);
+  const base = publicEndpoints(network, logger, opts.projectId);
   setNetworkId(base.networkId);
   logger.info(opts.proofServerPort ? `Using the proof server on port ${opts.proofServerPort}` : 'Starting a proof server in Docker...');
   const proofServer = opts.proofServerPort
@@ -184,10 +295,10 @@ export const connect = async (network: Network, opts: { proofServerPort?: number
   logger.debug(`WebSocket implementation: ${webSocket}`);
   const problems = (
     await Promise.all([
-      reachable('node', withPath(config.node, '/health')),
-      reachable('indexer', withPath(config.indexer, '/ready')),
+      answers('node', config.node, { method: 'POST', body: '{"id":1,"jsonrpc":"2.0","method":"system_chain","params":[]}' }),
+      answers('indexer', config.indexer, { method: 'POST', body: '{"query":"{ __typename }"}' }),
       probeIndexerWebSocket(config.indexerWS),
-      reachable('proof server', `${config.proofServer}/health`, 60_000),
+      answers('proof server', withPath(config.proofServer, '/health'), {}, 60_000),
     ])
   ).filter((p): p is string => p !== undefined);
   for (const p of problems) logger.warn(`${p}; carrying on, but the next steps may fail`);
@@ -218,6 +329,7 @@ export type WalletOptions = {
 /** Faucet pages for test NIGHT (from Midnight's "Acquire tokens" guide). */
 export const FAUCETS: Partial<Record<Network, string>> = {
   preprod: 'https://midnight-tmnight-preprod.nethermind.dev/',
+  preview: 'https://midnight-tmnight-preview.nethermind.dev/',
 };
 
 /**

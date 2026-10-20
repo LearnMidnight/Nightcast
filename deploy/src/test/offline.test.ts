@@ -2,6 +2,7 @@ import { describe, it, expect } from 'vitest';
 import { generateOperatorSecret, generateOracleSecretKey, NightcastSimulator, oraclePublicKey } from '@nightcast/contract';
 import { compareFingerprints, onChainFingerprints } from '../fingerprints.js';
 import { isLocked } from '../lock.js';
+import { blockfrostProjectId, createLogger, publicEndpoints, redact } from '../network.js';
 import type { DeploymentRecord } from '../record.js';
 import { type ContractStateView, verifyDeployment } from '../verify.js';
 
@@ -100,5 +101,42 @@ describe('verifyDeployment', () => {
     expect(verifyDeployment(recordFor(1n, fps), null)).toEqual([
       { name: 'contract exists', ok: false, detail: 'nothing at addr' },
     ]);
+  });
+});
+
+describe('Blockfrost endpoints', () => {
+  const logger = createLogger('silent');
+
+  it('adds the project id to every Preprod endpoint', () => {
+    const c = publicEndpoints('preprod', logger, 'preprodABC123');
+    for (const url of [c.indexer, c.indexerWS, c.node, c.nodeWS]) {
+      expect(url).toContain('blockfrost.io');
+      expect(new URL(url).searchParams.get('project_id')).toBe('preprodABC123');
+    }
+    expect(new URL(c.indexerWS).pathname).toBe('/api/v0/ws');
+    expect(c.networkId).toBe('preprod');
+  });
+
+  it('explains how to get a project id when there is none', () => {
+    expect(() => publicEndpoints('preprod', logger)).toThrow(/blockfrost save/);
+  });
+
+  it('needs no project id for Preview', () => {
+    expect(publicEndpoints('preview', logger).indexer).toContain('indexer.preview.midnight.network');
+  });
+
+  it('hides project ids in text', () => {
+    expect(redact('wss://x/api/v0/ws?project_id=preprodSECRET&a=1 failed')).toBe('wss://x/api/v0/ws?project_id=***&a=1 failed');
+    expect(redact('see https://x?project_id=abc)')).toBe('see https://x?project_id=***)');
+  });
+
+  it('reads the project id from the environment first', () => {
+    process.env.NIGHTCAST_BLOCKFROST_PROJECT_ID = ' fromEnv ';
+    try {
+      expect(blockfrostProjectId('preprod', '/does/not/exist')).toBe('fromEnv');
+    } finally {
+      delete process.env.NIGHTCAST_BLOCKFROST_PROJECT_ID;
+    }
+    expect(() => blockfrostProjectId('preprod', '/does/not/exist')).toThrow(/does not exist/);
   });
 });
