@@ -75,11 +75,13 @@ Files are created with mode 600, never overwritten, and `*.secret` is git-ignore
 
 ### Deploy
 
+**New to Midnight?** Follow the step-by-step [Preprod guide](docs/preprod-guide.md) (written for Windows, works on macOS and Linux too). It covers installing everything, wallets and test tokens, deploying, running the oracle and making a test request.
+
 You need Docker (for a local proof server) and a funded Preprod wallet seed (hex). The deploy tool handles the rest:
 
 ```sh
-export NIGHTCAST_WALLET_SEED=<hex seed of a wallet with tNIGHT>
-npx nightcast-deploy deploy --network preprod --oracle oracle.secret --operator operator.secret --accept
+npx nightcast-deploy wallet new --out wallet.secret      # then fund it: wallet show --network preprod --wallet wallet.secret
+npx nightcast-deploy deploy --network preprod --oracle oracle.secret --operator operator.secret --wallet wallet.secret --accept
 ```
 
 In one run this:
@@ -96,23 +98,14 @@ Commit `deployments/preprod.json` to publish it. Anyone can then check the live 
 
 ### Run an oracle
 
-Start the service with a contract handle joined using a private state that holds the oracle key:
-
-```ts
-import { MidnightChain, NightcastOracle } from '@nightcast/sdk';
-import { parseOracleSecretKey } from '@nightcast/contract';
-
-const secretKey = parseOracleSecretKey(process.env.NIGHTCAST_ORACLE_KEY!);
-// `nightcast` comes from findDeployedContract(..., { initialPrivateState: { oracleSecretKey: secretKey } })
-const chain = new MidnightChain(nightcast, providers.publicDataProvider, contractAddress);
-const oracle = new NightcastOracle({
-  chain,
-  secretKey,
-  requesters: ['<requester commitment hex>'], // optional allowlist against spam
-  logger: console,
-});
-oracle.start();
+```sh
+npx nightcast-deploy oracle  --network preprod --oracle oracle.secret --wallet wallet.secret
+npx nightcast-deploy request --network preprod --requester requester.secret --wallet other-wallet.secret --wait
 ```
+
+`oracle` joins the deployment in `deployments/preprod.json` and answers every request bound to its key until you press Ctrl+C (`--requesters <hex,...>` limits it to known requesters). `request --wait` makes a test request and prints the result; `status --id <id>` looks one up from public data.
+
+To embed the oracle in your own service, use `NightcastOracle` with a `MidnightChain` from `@nightcast/sdk` (see `deploy/src/service.ts` for how the CLI does it).
 
 ### Use the randomness
 
