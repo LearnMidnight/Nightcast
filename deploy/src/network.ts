@@ -2,6 +2,7 @@ import { dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import pino, { type Logger } from 'pino';
 import { filter, firstValueFrom, throttleTime } from 'rxjs';
+import { WebSocket as WsWebSocket } from 'ws';
 import { unshieldedToken } from '@midnight-ntwrk/midnight-js-protocol/ledger';
 import { CompiledContract, type ProvableCircuitId } from '@midnight-ntwrk/compact-js';
 import type { MidnightProviders } from '@midnight-ntwrk/midnight-js/types';
@@ -80,6 +81,76 @@ const reachable = async (name: string, url: string, timeoutMs = 20_000): Promise
 
 const withPath = (base: string, path: string): string => new URL(path, new URL(base).origin).toString();
 
+type WsLike = {
+  onopen: ((ev: unknown) => void) | null;
+  onmessage: ((ev: { data: unknown }) => void) | null;
+  onerror: ((ev: unknown) => void) | null;
+  onclose: ((ev: { code?: number; reason?: string }) => void) | null;
+  send(data: string): void;
+  close(): void;
+};
+type WsConstructor = new (url: string, protocols?: string[]) => WsLike;
+
+/**
+ * The wallet syncs over WebSockets to the indexer and uses whatever global
+ * `WebSocket` exists. Like Midnight's own examples, Nightcast installs the
+ * `ws` package's implementation; NIGHTCAST_WEBSOCKET=builtin keeps Node's own.
+ */
+export const installWebSocket = (): string => {
+  if (process.env.NIGHTCAST_WEBSOCKET === 'builtin' && (globalThis as { WebSocket?: unknown }).WebSocket) return 'builtin';
+  (globalThis as { WebSocket?: unknown }).WebSocket = WsWebSocket;
+  return 'ws';
+};
+
+const describeWsError = (ev: unknown): string => {
+  const e = ev as { message?: string; error?: { message?: string; code?: string; cause?: { message?: string; code?: string } } };
+  const parts = [e.message, e.error?.message, e.error?.code, e.error?.cause?.message, e.error?.cause?.code].filter(
+    (p, i, all): p is string => !!p && all.indexOf(p) === i,
+  );
+  return parts.length ? parts.join(': ') : 'connection error (no details given)';
+};
+
+/**
+ * Open the indexer's GraphQL WebSocket the way the wallet does and wait for
+ * the server to acknowledge. Returns an error message, or undefined when it works.
+ */
+export const probeIndexerWebSocket = (url: string, timeoutMs = 20_000): Promise<string | undefined> =>
+  new Promise((resolvePromise) => {
+    const Impl = (globalThis as { WebSocket?: unknown }).WebSocket as WsConstructor | undefined;
+    if (!Impl) return resolvePromise('no WebSocket implementation available');
+    let socket: WsLike | undefined;
+    let settled = false;
+    const done = (result?: string) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      try {
+        socket?.close();
+      } catch {
+        // already closed
+      }
+      resolvePromise(result === undefined ? undefined : `indexer WebSocket at ${url}: ${result}`);
+    };
+    const timer = setTimeout(() => done(`no answer within ${timeoutMs / 1000}s`), timeoutMs);
+    try {
+      socket = new Impl(url, ['graphql-transport-ws']);
+    } catch (err) {
+      return done(err instanceof Error ? err.message : String(err));
+    }
+    socket.onopen = () => socket!.send(JSON.stringify({ type: 'connection_init' }));
+    socket.onmessage = (ev) => {
+      let type: string | undefined;
+      try {
+        type = (JSON.parse(String(ev.data)) as { type?: string }).type;
+      } catch {
+        type = undefined;
+      }
+      done(type === 'connection_ack' ? undefined : `unexpected first message (${String(ev.data).slice(0, 120)})`);
+    };
+    socket.onerror = (ev) => done(describeWsError(ev));
+    socket.onclose = (ev) => done(`closed before answering (code ${ev.code ?? '?'}${ev.reason ? `, ${ev.reason}` : ''})`);
+  });
+
 /**
  * Connect to a network. For Preprod and Preview a proof server is started in
  * Docker unless `proofServerPort` points at one already running; `local`
@@ -87,6 +158,7 @@ const withPath = (base: string, path: string): string => new URL(path, new URL(b
  */
 export const connect = async (network: Network, opts: { proofServerPort?: number; logger?: Logger } = {}): Promise<Session> => {
   const logger = opts.logger ?? createLogger();
+  const webSocket = installWebSocket();
   setContainersConfiguration({
     ...defaultContainersConfiguration,
     proofServer: { ...defaultContainersConfiguration.proofServer, path: dockerDir, fileName: 'proof-server.yml' },
@@ -109,10 +181,12 @@ export const connect = async (network: Network, opts: { proofServerPort?: number
   const config: EnvironmentConfiguration = { ...base, proofServer: proofServer.getUrl() };
 
   logger.info(`Checking the ${network} node, indexer and proof server...`);
+  logger.debug(`WebSocket implementation: ${webSocket}`);
   const problems = (
     await Promise.all([
       reachable('node', withPath(config.node, '/health')),
       reachable('indexer', withPath(config.indexer, '/ready')),
+      probeIndexerWebSocket(config.indexerWS),
       reachable('proof server', `${config.proofServer}/health`, 60_000),
     ])
   ).filter((p): p is string => p !== undefined);
@@ -155,13 +229,23 @@ export const FAUCETS: Partial<Record<Network, string>> = {
 export const openWallet = async (session: Session, opts: WalletOptions = {}): Promise<MidnightWalletProvider> => {
   const seed = opts.seed ?? (session.network === 'local' ? LOCAL_GENESIS_SEEDS[0] : undefined);
   if (!seed) throw new Error('No wallet: pass --wallet <file from `./nightcast wallet new`> or set NIGHTCAST_WALLET_SEED.');
-  const wallet = await MidnightWalletProvider.build(session.logger, session.config, seed);
+  // The testkit logs the wallet seed at info level; give it a quieter logger so
+  // the secret never reaches the terminal.
+  const wallet = await MidnightWalletProvider.build(session.logger.child({}, { level: 'warn' }), session.config, seed);
   const address = walletAddress(wallet);
   opts.onAddress?.(address);
   await wallet.start(false);
 
   const synced = () => firstValueFrom(wallet.wallet.state().pipe(filter((s) => s.isSynced)));
-  let state = await synced();
+  const slow = setTimeout(
+    () =>
+      session.logger.warn(
+        'Still syncing. If you see repeated "Wallet.Sync" errors, press Ctrl+C and run `./nightcast doctor --network ' +
+          `${session.network}\` to see which connection is failing.`,
+      ),
+    180_000,
+  );
+  let state = await synced().finally(() => clearTimeout(slow));
   if ((state.unshielded.balances[unshieldedToken().raw] ?? 0n) === 0n) {
     opts.onNoFunds?.(address);
     state = await firstValueFrom(

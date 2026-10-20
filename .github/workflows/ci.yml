@@ -152,10 +152,38 @@ jobs:
         shell: bash
         run: |
           set -o pipefail
-          if ./nightcast doctor --network preprod 2>&1 | tee doctor.log; then
-            echo "::notice title=Preprod::reachable (node, indexer, proof server)"
+          status=0
+          for impl in ws builtin; do
+            if NIGHTCAST_WEBSOCKET=$impl ./nightcast doctor --network preprod 2>&1 | tee doctor-$impl.log; then
+              echo "::notice title=Preprod ($impl WebSocket)::reachable (node, indexer HTTP and WebSocket, proof server)"
+            else
+              echo "::error title=Preprod doctor ($impl WebSocket)::$(sed 's/\x1b\[[0-9;]*m//g' doctor-$impl.log | tail -12 | sed 's/%/%25/g' | awk 'BEGIN{ORS="%0A"} {print substr($0,1,300)}')"
+              [ $impl = ws ] && status=1
+            fi
+          done
+          exit $status
+
+      # Same as guide step 8: a fresh wallet should sync and then ask for faucet tokens.
+      - name: Sync a wallet on Preprod
+        continue-on-error: true
+        shell: bash
+        run: |
+          ./nightcast wallet new --out "$RUNNER_TEMP/preprod-wallet.secret"
+          seed=$(node -e 'console.log(require(process.argv[1]).seed)' "$RUNNER_TEMP/preprod-wallet.secret")
+          ./nightcast wallet show --network preprod --wallet "$RUNNER_TEMP/preprod-wallet.secret" > sync.log 2>&1 &
+          pid=$!
+          start=$SECONDS
+          while kill -0 $pid 2>/dev/null && ! grep -q 'has no NIGHT yet' sync.log && [ $((SECONDS - start)) -lt 900 ]; do sleep 5; done
+          kill $pid 2>/dev/null || true
+          clean() { sed 's/\x1b\[[0-9;]*m//g' sync.log | grep -v '^\s*at ' | grep -v '^\s*$' | tail -${1} | sed 's/%/%25/g' | awk 'BEGIN{ORS="%0A"} {print substr($0,1,300)}'; }
+          if grep -q "$seed" sync.log; then
+            echo "::error title=Wallet seed printed::the wallet seed appeared in the output"
+            exit 1
+          fi
+          if grep -q 'has no NIGHT yet' sync.log; then
+            echo "::notice title=Preprod wallet sync::synced in $((SECONDS - start))s, waiting for faucet tokens as expected"
           else
-            echo "::error title=Preprod doctor::$(sed 's/\x1b\[[0-9;]*m//g' doctor.log | tail -12 | sed 's/%/%25/g' | awk 'BEGIN{ORS="%0A"} {print substr($0,1,300)}')"
+            echo "::error title=Preprod wallet sync::$(clean 25)"
             exit 1
           fi
 
