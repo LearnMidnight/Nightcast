@@ -126,9 +126,30 @@ jobs:
         run: npm run build
 
       - name: Pull network images
-        run: docker compose -f deploy/docker/compose.yml pull
-        env:
-          TESTCONTAINERS_UID: pull
+        run: |
+          status=0
+          for img in $(grep -o 'image: "[^"]*"' deploy/docker/compose.yml deploy/docker/proof-server.yml | sed 's/.*image: "//; s/"$//' | sort -u); do
+            if docker pull -q "$img" > /dev/null 2>pull-err.txt; then
+              echo "::notice title=image::$img pulled"
+            else
+              echo "::error title=image::$img: $(head -c 400 pull-err.txt | tr '\n' ' ')"
+              status=1
+            fi
+          done
+          exit $status
+
+      - name: Probe image tags
+        if: failure()
+        run: |
+          for img in \
+            ghcr.io/midnight-ntwrk/proof-server:8.1.3 ghcr.io/midnight-ntwrk/proof-server:8.1.0 ghcr.io/midnight-ntwrk/proof-server:8.0.3 \
+            midnightntwrk/proof-server:8.1.3 midnightntwrk/proof-server:8.1.0 midnightntwrk/proof-server:8.0.3 \
+            ghcr.io/midnight-ntwrk/indexer-standalone:4.3.5 ghcr.io/midnight-ntwrk/indexer-standalone:4.3.2 ghcr.io/midnight-ntwrk/indexer-standalone:4.0.1 \
+            midnightntwrk/indexer-standalone:4.3.5 midnightntwrk/indexer-standalone:4.3.2 midnightntwrk/indexer-standalone:4.0.1 midnightntwrk/indexer-standalone:4.0.0 \
+            ghcr.io/midnight-ntwrk/midnight-node:1.0.400 ghcr.io/midnight-ntwrk/midnight-node:1.0.0 ghcr.io/midnight-ntwrk/midnight-node:0.22.5 \
+            midnightntwrk/midnight-node:1.0.400 midnightntwrk/midnight-node:1.0.0 midnightntwrk/midnight-node:0.22.5 midnightntwrk/midnight-node:0.22.3; do
+            if docker manifest inspect "$img" > /dev/null 2>&1; then echo "::notice title=exists::$img"; else echo "::warning title=missing::$img"; fi
+          done
 
       - name: End-to-end test on a local network
         working-directory: deploy
