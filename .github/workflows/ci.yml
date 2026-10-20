@@ -144,6 +144,14 @@ jobs:
           NIGHTCAST_E2E: '1'
         run: npx vitest run src/test/e2e.test.ts --reporter=default --reporter=github-actions --reporter=json --outputFile.json=../reports/e2e.json
 
+      - name: Container logs
+        if: failure()
+        run: |
+          for c in $(docker ps -a --format '{{.Names}}'); do
+            tail=$(docker logs --tail 25 "$c" 2>&1 | tail -c 2500 | sed 's/%/%25/g' | awk 'BEGIN{ORS="%0A"} {print}')
+            echo "::warning title=logs $c::$tail"
+          done
+
       - name: Summarise tests
         if: always()
         run: |
@@ -153,6 +161,10 @@ jobs:
               const r = require(process.argv[1]);
               const name = process.argv[1].split("/").pop().replace(".json", "");
               console.log(`::notice title=${name} tests::${r.numPassedTests} passed, ${r.numFailedTests} failed, ${r.numTotalTests} total`);
-              for (const f of r.testResults) for (const a of f.assertionResults) if (a.status === "failed") console.log(`::error title=${a.title}::${(a.failureMessages[0]||"").slice(0,900).replace(/\n/g,"%0A")}`);
+              const esc = (t) => String(t || "").slice(0, 3000).replace(/%/g, "%25").replace(/\r?\n/g, "%0A");
+              for (const f of r.testResults) {
+                if (f.message) console.log(`::error title=suite error::${esc(f.message)}`);
+                for (const a of f.assertionResults) if (a.status === "failed") console.log(`::error title=${a.title}::${esc(a.failureMessages[0])}`);
+              }
             ' "$PWD/$f"
           done
