@@ -67,7 +67,16 @@ export class MidnightChain implements NightcastChain {
     private readonly contract: NightcastCallTx,
     private readonly publicData: ContractStateSource,
     private readonly contractAddress: string,
-  ) {}
+    /**
+     * Chain time in seconds, e.g. the latest block's timestamp from the indexer.
+     * Without it the oracle uses the local clock, so keep that in sync (NTP).
+     */
+    clock?: () => Promise<number>,
+  ) {
+    if (clock) this.now = clock;
+  }
+
+  now?: () => Promise<number>;
 
   async listRequests(): Promise<RequestEntry[]> {
     const state = await this.publicData.queryContractState(this.contractAddress);

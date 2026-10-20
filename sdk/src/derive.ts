@@ -20,7 +20,7 @@ export const randomWords = (output: Uint8Array, count: number): Uint8Array[] => 
  * successive SHA-256 blocks so there is no modulo bias.
  */
 export const uniformInt = (word: Uint8Array, n: bigint): bigint => {
-  if (n < 1n) throw new RangeError('n must be at least 1');
+  if (n < 1n || n > 1n << 256n) throw new RangeError('n must be in 1..2^256');
   if (n === 1n) return 0n;
   const space = 1n << 256n;
   const limit = space - (space % n);
@@ -75,5 +75,8 @@ export const pickNumbers = (seedHex: string, pick: number, pool: number): number
   return out.sort((a, b) => a - b);
 };
 
-/** Strip anything that isn't hex and lowercase, as the Midnight Lotto site does. */
+/**
+ * Strip anything that isn't hex and lowercase, as the Midnight Lotto site does.
+ * Note this keeps the leading 0 of a "0x" prefix, so always write seeds without one.
+ */
 export const cleanHex = (s: string): string => s.replace(/[^0-9a-f]/gi, '').toLowerCase();

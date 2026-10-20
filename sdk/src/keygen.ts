@@ -1,13 +1,17 @@
 #!/usr/bin/env node
 /**
- * Generate a Nightcast oracle key and operator secret.
+ * Generate Nightcast secrets. The oracle and the operator are separate roles
+ * and should be kept on separate machines, so each gets its own file:
  *
- *   npx nightcast-keygen --out oracle.secret
+ *   npx nightcast-keygen oracle   --out oracle.secret
+ *   npx nightcast-keygen operator --out operator.secret
+ *   npx nightcast-keygen requester --out requester.secret
  *
- * Writes the secrets to the file (mode 600) and prints only the public values
- * needed to deploy: the oracle public key and the operator commitment.
+ * Each file is created with mode 600 and never overwritten. Only the public
+ * value (oracle public key, operator or requester commitment) is printed.
  */
-import { writeFileSync, existsSync, realpathSync } from 'node:fs';
+import { writeFileSync, realpathSync } from 'node:fs';
+import { webcrypto } from 'node:crypto';
 import { fileURLToPath } from 'node:url';
 import {
   formatOracleSecretKey,
@@ -18,42 +22,53 @@ import {
   toHex,
 } from '@nightcast/contract';
 
-export type GeneratedKeys = {
-  oracleSecretKey: string;
-  operatorSecret: string;
-  oraclePublicKey: { x: string; y: string };
-  operatorCommitment: string;
+export type Role = 'oracle' | 'operator' | 'requester';
+
+export type GeneratedSecret = {
+  role: Role;
+  /** Hex. The oracle's is a Jubjub scalar; the others are 32 random bytes. */
+  secret: string;
+  /** What goes on chain or in config: the oracle public key, or a commitment. */
+  public: { x: string; y: string } | string;
 };
 
-export const generateKeys = (): GeneratedKeys => {
-  const sk = generateOracleSecretKey();
-  const op = generateOperatorSecret();
-  const pk = oraclePublicKey(sk);
-  return {
-    oracleSecretKey: formatOracleSecretKey(sk),
-    operatorSecret: toHex(op),
-    oraclePublicKey: { x: pk.x.toString(), y: pk.y.toString() },
-    operatorCommitment: toHex(pureCircuits.operatorCommitmentOf(op)),
-  };
+export const generateSecret = (role: Role): GeneratedSecret => {
+  switch (role) {
+    case 'oracle': {
+      const sk = generateOracleSecretKey();
+      const pk = oraclePublicKey(sk);
+      return { role, secret: formatOracleSecretKey(sk), public: { x: pk.x.toString(), y: pk.y.toString() } };
+    }
+    case 'operator': {
+      const s = generateOperatorSecret();
+      return { role, secret: toHex(s), public: toHex(pureCircuits.operatorCommitmentOf(s)) };
+    }
+    case 'requester': {
+      const s = webcrypto.getRandomValues(new Uint8Array(32));
+      return { role, secret: toHex(s), public: toHex(pureCircuits.requesterCommitmentOf(s)) };
+    }
+  }
 };
+
+const USAGE = 'usage: nightcast-keygen <oracle|operator|requester> --out <file>';
 
 const main = (argv: string[]): void => {
+  const role = argv[0] as Role;
+  if (!['oracle', 'operator', 'requester'].includes(role)) throw new Error(USAGE);
   const outIndex = argv.indexOf('--out');
   const out = outIndex >= 0 ? argv[outIndex + 1] : undefined;
-  if (outIndex >= 0 && !out) throw new Error('--out needs a file name');
+  if (!out) throw new Error(USAGE);
 
-  const keys = generateKeys();
-  const publicPart = { oraclePublicKey: keys.oraclePublicKey, operatorCommitment: keys.operatorCommitment };
-
-  if (out) {
-    if (existsSync(out)) throw new Error(`${out} already exists; refusing to overwrite a key file`);
-    writeFileSync(out, JSON.stringify(keys, null, 2) + '\n', { mode: 0o600 });
-    process.stdout.write(`Secrets written to ${out} (keep it private).\n`);
-    process.stdout.write(JSON.stringify(publicPart, null, 2) + '\n');
-  } else {
-    process.stderr.write('No --out given: printing secrets to stdout. Store them somewhere safe.\n');
-    process.stdout.write(JSON.stringify(keys, null, 2) + '\n');
+  const generated = generateSecret(role);
+  // 'wx' fails if the path exists (including a symlink), so a key file is never overwritten.
+  try {
+    writeFileSync(out, JSON.stringify(generated, null, 2) + '\n', { mode: 0o600, flag: 'wx' });
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException).code === 'EEXIST') throw new Error(`${out} already exists; refusing to overwrite`);
+    throw err;
   }
+  process.stdout.write(`${role} secret written to ${out} (keep it private).\n`);
+  process.stdout.write(JSON.stringify({ role, public: generated.public }, null, 2) + '\n');
 };
 
 const invokedDirectly = (): boolean => {

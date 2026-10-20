@@ -4,38 +4,40 @@ Nightcast is an independent, experimental verifiable randomness protocol for Mid
 
 It works like [Chainlink VRF](https://docs.chain.link/vrf): you request randomness, an oracle answers, and the answer comes with a proof. On Midnight the proof is the transaction itself. The oracle's `fulfil` circuit evaluates the VRF with its secret key as a private input, so the network only accepts the one output that key can produce for that request, and the key is never revealed.
 
-> **Status: v0, experimental and unaudited.** Don't secure real value with it yet. Read the [threat model](docs/SPEC.md#4-threat-model) first, especially the note on grinding.
+> **Status: v0, experimental and unaudited.** Don't secure real value with it yet. Read the [threat model](docs/SPEC.md#4-threat-model) first, especially [withholding](docs/SPEC.md#42-withholding-and-aborts) and the [maintenance authority](docs/SPEC.md#45-contract-maintenance-authority-important).
 
 ## How it works
 
 ```
-requester                     Nightcast contract                       oracle
-    |  request(tag, seed, deadline) |                                        |
-    |------------------------------>|  id = alpha = SHA(addr, tag, seed)     |
-    |                               |  status = pending, key = oracleKey     |
-    |                               |<---------------------------------------|  watches for pending ids
-    |                               |  fulfil(id), proving in ZK that:       |
-    |                               |    G·sk == request key                 |
-    |                               |    output = SHA(hashToCurve(id)·sk)    |
-    |  read requests[id].output     |  status = fulfilled                    |
-    |<------------------------------|                                        |
+requester                        Nightcast contract                          oracle
+    |  request(tag, seed, deadline)   |                                           |
+    |-------------------------------->|  id = SHA(addr, requester, tag, seed)     |
+    |                                 |  H = hashToCurve(id), key = oracleKey     |
+    |                                 |  status = pending                         |
+    |                                 |<------------------------------------------|  watches for pending ids
+    |                                 |  fulfil(id), proving in ZK that:          |
+    |                                 |    G·sk == request key                    |
+    |                                 |    output = SHA(H·sk)                     |
+    |  read requests[id].output       |  status = fulfilled                       |
+    |<--------------------------------|                                           |
 ```
 
-- **Unbiasable:** one key and one request id give exactly one output, so the oracle can't pick a favourable result.
+- **The oracle can't choose:** one key and one request give exactly one output. Its only power is to not answer.
 - **Unpredictable:** computing the output needs the oracle's secret key.
-- **Verifiable:** the chain checks the proof before storing the output, and everything a consumer derives from it can be recomputed from public data.
-- **Bounded withholding:** every request has a deadline; anyone can `expire` a request the oracle missed.
+- **Checked on chain:** the network verifies the proof before storing the output, and everything a consumer derives from it can be recomputed from public data.
+- **Bounded withholding:** every request has a deadline, and anyone can `expire` a request the oracle missed.
+- **Your ids are yours:** request ids include the requester's commitment, so nobody else can claim, burn or spoof them.
 
-The full construction, ledger layout and threat model are in [docs/SPEC.md](docs/SPEC.md).
+The construction, ledger layout and threat model are in [docs/SPEC.md](docs/SPEC.md).
 
 ## Repository
 
 | Path | What it is |
 |---|---|
-| `contract/src/nightcast.compact` | The contract: `request`, `fulfil`, `expire`, `setOracleKey`, `setOperator`, plus pure circuits for ids, keys, evaluation and word expansion |
+| `contract/src/nightcast.compact` | The contract: `request`, `fulfil`, `expire`, key and operator management, and pure circuits for ids, keys and evaluation |
 | `contract/src/keys.ts` | Key generation and parsing |
 | `contract/src/simulator.ts` | Runs the compiled contract in memory with several actors and a controllable clock |
-| `sdk/src/oracle.ts` | The oracle service: polls, fulfils pending requests bound to its key, retries, respects deadlines |
+| `sdk/src/oracle.ts` | The oracle service: polls, fulfils pending requests bound to its key, retries with backoff, respects deadlines, optional requester allowlist |
 | `sdk/src/chain.ts` | Chain adapters: simulator, and live Midnight via midnight-js |
 | `sdk/src/derive.ts` | Turning an output into numbers: `randomWords`, `uniformInt`, `pickNumbers`, `combineDrawSeed` |
 | `sdk/src/keygen.ts` | `nightcast-keygen` CLI |
@@ -57,17 +59,24 @@ npm test
 
 `npm run compact:fast -w @nightcast/contract` skips proving keys for quick edits.
 
-### Generate keys
+### Generate secrets
+
+The oracle, operator and each requester are separate roles; keep their secrets on separate machines.
 
 ```sh
-npx nightcast-keygen --out oracle.secret
+npx nightcast-keygen oracle    --out oracle.secret     # prints the oracle public key
+npx nightcast-keygen operator  --out operator.secret   # prints the operator commitment
+npx nightcast-keygen requester --out requester.secret  # prints the requester commitment
 ```
 
-This writes the oracle secret key and operator secret to `oracle.secret` (mode 600; `*.secret` is git-ignored) and prints what the deployment needs: the oracle public key and the operator commitment.
+Files are created with mode 600, never overwritten, and `*.secret` is git-ignored.
 
 ### Deploy and run an oracle
 
-Deploy with midnight-js as in Midnight's [example-counter](https://github.com/midnightntwrk/example-counter), passing the constructor arguments `(oraclePublicKey, operatorCommitment, minWindowSecs, maxWindowSecs)`. Then join the deployment with a private state holding the oracle key and start the service:
+1. Deploy with midnight-js as in Midnight's [example-counter](https://github.com/midnightntwrk/example-counter), passing `(oraclePublicKey, operatorCommitment, minWindowSecs, maxWindowSecs)`.
+2. **Lock the contract's maintenance authority** so nobody can replace its circuits, and publish the verifier key hashes ([SPEC §4.5](docs/SPEC.md#45-contract-maintenance-authority-important)). v0 doesn't automate this yet.
+3. The oracle calls `acceptOracleKey()` once, proving it holds the key; requests are accepted from then on.
+4. Start the service with a contract handle joined using a private state that holds the oracle key:
 
 ```ts
 import { MidnightChain, NightcastOracle } from '@nightcast/sdk';
@@ -76,7 +85,12 @@ import { parseOracleSecretKey } from '@nightcast/contract';
 const secretKey = parseOracleSecretKey(process.env.NIGHTCAST_ORACLE_KEY!);
 // `nightcast` comes from findDeployedContract(..., { initialPrivateState: { oracleSecretKey: secretKey } })
 const chain = new MidnightChain(nightcast, providers.publicDataProvider, contractAddress);
-const oracle = new NightcastOracle({ chain, secretKey, logger: console });
+const oracle = new NightcastOracle({
+  chain,
+  secretKey,
+  requesters: ['<requester commitment hex>'], // optional allowlist against spam
+  logger: console,
+});
 oracle.start();
 ```
 
@@ -91,13 +105,14 @@ const drawSeed = combineDrawSeed(operatorSeed, request.output);
 const numbers = pickNumbers(drawSeed, 6, 45);
 ```
 
-`pickNumbers` is the same rule as the Midnight Lotto verification page (test vector: 64 zeros, 6 from 45 gives 1 3 7 21 31 35).
+`pickNumbers` is the same rule as the Midnight Lotto verification page (test vector: 64 zeros, 6 from 45 gives 1 3 7 21 31 35). If a request expires or the seed is never revealed, void the round and refund it rather than drawing again ([SPEC §4.2](docs/SPEC.md#42-withholding-and-aborts)).
 
 ## Limitations of v0
 
-- One oracle. It can withhold an answer (until the deadline) and, if it can influence a request's input, grind for favourable outputs. Consumers should close their state before requesting and mix in their own commit-reveal secret ([SPEC §4.1](docs/SPEC.md#41-grinding-main-caveat)).
+- One oracle. It can withhold an answer until the deadline and, if it can influence a request's input, grind for favourable outputs ([SPEC §4.1](docs/SPEC.md#41-grinding)).
+- The maintenance authority must be locked by hand for the guarantees to hold.
 - Results are read off-chain; on-chain consumer callbacks come with cross-contract calls.
-- No fees.
+- Requests are free, so an oracle open to everyone can be spammed; use the requester allowlist.
 - Not audited.
 
 ## Licence

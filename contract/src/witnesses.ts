@@ -5,8 +5,11 @@ import type { Ledger } from './managed/nightcast/contract/index.js';
  * Private state held by whoever runs a Nightcast circuit locally.
  *
  * - The oracle sets `oracleSecretKey` (needed for `fulfil`).
- * - The operator sets `operatorSecret` (needed for `setOracleKey` / `setOperator`).
- * - Requesters and anyone calling `expire` need neither.
+ * - The operator sets `operatorSecret` (needed for `proposeOracleKey`,
+ *   `proposeOperator`, and by the incoming operator for `acceptOperator`).
+ * - Requesters set `requesterSecret` (needed for `request`); its commitment
+ *   identifies them and goes into every request id they create.
+ * - Anyone calling `expire` needs nothing.
  *
  * None of this ever leaves the caller's machine: the circuits only prove facts
  * about it.
@@ -14,6 +17,7 @@ import type { Ledger } from './managed/nightcast/contract/index.js';
 export type NightcastPrivateState = {
   readonly oracleSecretKey?: bigint;
   readonly operatorSecret?: Uint8Array;
+  readonly requesterSecret?: Uint8Array;
 };
 
 export const emptyPrivateState = (): NightcastPrivateState => ({});
@@ -31,5 +35,12 @@ export const witnesses = {
       throw new Error('Nightcast: no operator secret in private state');
     }
     return [privateState, privateState.operatorSecret];
+  },
+
+  requesterSecret({ privateState }: WitnessContext<Ledger, NightcastPrivateState>): [NightcastPrivateState, Uint8Array] {
+    if (privateState.requesterSecret === undefined) {
+      throw new Error('Nightcast: no requester secret in private state');
+    }
+    return [privateState, privateState.requesterSecret];
   },
 };
