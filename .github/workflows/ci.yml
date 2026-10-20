@@ -49,11 +49,11 @@ jobs:
 
       - name: Test contract
         working-directory: contract
-        run: npx vitest run --reporter=default --reporter=json --outputFile.json=../reports/contract.json
+        run: npx vitest run --reporter=default --reporter=github-actions --reporter=json --outputFile.json=../reports/contract.json
 
       - name: Test SDK
         working-directory: sdk
-        run: npx vitest run --reporter=default --reporter=json --outputFile.json=../reports/sdk.json
+        run: npx vitest run --reporter=default --reporter=github-actions --reporter=json --outputFile.json=../reports/sdk.json
 
       - name: Summarise tests
         if: always()
