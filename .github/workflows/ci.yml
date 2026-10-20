@@ -142,7 +142,21 @@ jobs:
         working-directory: deploy
         env:
           NIGHTCAST_E2E: '1'
-        run: npx vitest run src/test/e2e.test.ts --reporter=default --reporter=github-actions --reporter=json --outputFile.json=../reports/e2e.json
+        shell: bash
+        run: |
+          set -o pipefail
+          npx vitest run src/test/e2e.test.ts --reporter=default --reporter=github-actions --reporter=json --outputFile.json=../reports/e2e.json 2>&1 | tee ../e2e.log
+
+      - name: Test output
+        if: failure()
+        run: |
+          sed 's/\x1b\[[0-9;]*m//g' e2e.log | grep -v '^\s*$' | grep -iE 'error|fail|exception|cause|at |✗|×|timeout|refused|unhealthy|exited' | head -60 > e2e-errors.txt || true
+          n=0
+          while [ $n -lt 4 ]; do
+            chunk=$(sed -n "$((n*15+1)),$((n*15+15))p" e2e-errors.txt | sed 's/%/%25/g' | awk 'BEGIN{ORS="%0A"} {print substr($0,1,300)}')
+            [ -n "$chunk" ] && echo "::error title=e2e output $n::$chunk"
+            n=$((n+1))
+          done
 
       - name: Container logs
         if: failure()
