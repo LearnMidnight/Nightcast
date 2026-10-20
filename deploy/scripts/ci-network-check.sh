@@ -18,11 +18,12 @@ fi
 wallet="$RUNNER_TEMP/$network-wallet.secret"
 rm -f "$wallet"
 ./nightcast wallet new --out "$wallet" > /dev/null
-seed=$(node -e 'console.log(require(process.argv[1]).seed)' "$wallet")
+seed=$(node -e 'console.log(JSON.parse(require("fs").readFileSync(process.argv[1], "utf8")).seed)' "$wallet")
+if [ ${#seed} -ne 64 ]; then echo "::error title=$network::could not read the new wallet's seed"; exit 1; fi
 ./nightcast wallet show --network "$network" --wallet "$wallet" > "sync-$network.log" 2>&1 &
 pid=$!
 start=$SECONDS
-while kill -0 $pid 2>/dev/null && ! grep -q 'has no NIGHT yet' "sync-$network.log" && [ $((SECONDS - start)) -lt 900 ]; do sleep 5; done
+while kill -0 $pid 2>/dev/null && ! grep -q 'has no NIGHT yet' "sync-$network.log" && [ $((SECONDS - start)) -lt 1200 ]; do sleep 5; done
 kill $pid 2>/dev/null || true
 sleep 2
 docker ps -q --filter "name=proof-server" | xargs -r docker rm -f > /dev/null 2>&1 || true
@@ -38,7 +39,7 @@ fi
 if grep -q 'has no NIGHT yet' "sync-$network.log"; then
   echo "::notice title=$network wallet sync::synced in $((SECONDS - start))s, then asked for faucet tokens as expected"
 else
-  echo "::error title=$network wallet sync::$(annotate "$network" "sync-$network.log" 25)"
+  echo "::error title=$network wallet sync::$(annotate "$network" "sync-$network.log" 30)"
   status=1
 fi
 exit $status

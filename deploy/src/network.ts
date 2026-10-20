@@ -349,6 +349,12 @@ export const openWallet = async (session: Session, opts: WalletOptions = {}): Pr
   await wallet.start(false);
 
   const synced = () => firstValueFrom(wallet.wallet.state().pipe(filter((s) => s.isSynced)));
+  const progress = wallet.wallet
+    .state()
+    .pipe(throttleTime(30_000))
+    .subscribe((s) => {
+      if (!s.isSynced) session.logger.info(`Syncing: ${describeSync(s)}`);
+    });
   const slow = setTimeout(
     () =>
       session.logger.warn(
@@ -357,7 +363,10 @@ export const openWallet = async (session: Session, opts: WalletOptions = {}): Pr
       ),
     180_000,
   );
-  let state = await synced().finally(() => clearTimeout(slow));
+  let state = await synced().finally(() => {
+    clearTimeout(slow);
+    progress.unsubscribe();
+  });
   if ((state.unshielded.balances[unshieldedToken().raw] ?? 0n) === 0n) {
     opts.onNoFunds?.(address);
     state = await firstValueFrom(
@@ -378,6 +387,41 @@ export const openWallet = async (session: Session, opts: WalletOptions = {}): Pr
     );
   }
   return wallet;
+};
+
+type ProgressLike = {
+  appliedIndex?: bigint;
+  appliedId?: bigint;
+  highestRelevantWalletIndex?: bigint;
+  highestTransactionId?: bigint;
+  highestIndex?: bigint;
+  isConnected?: boolean;
+  isStrictlyComplete?: () => boolean;
+};
+
+const describeProgress = (name: string, p: ProgressLike | undefined): string => {
+  if (!p) return `${name} ?`;
+  if (p.isStrictlyComplete?.()) return `${name} done`;
+  if (p.isConnected === false) return `${name} connecting`;
+  const applied = p.appliedIndex ?? p.appliedId;
+  const target = p.highestRelevantWalletIndex ?? p.highestTransactionId ?? p.highestIndex;
+  if (applied === undefined || target === undefined || target === 0n) return `${name} starting`;
+  const pct = Number((applied * 1000n) / target) / 10;
+  return `${name} ${Math.min(pct, 100).toFixed(1)}% (${applied}/${target})`;
+};
+
+/** One line on how far each part of the wallet has synced. */
+export const describeSync = (state: unknown): string => {
+  const s = state as {
+    shielded?: { state?: { progress?: ProgressLike } };
+    dust?: { state?: { progress?: ProgressLike } };
+    unshielded?: { progress?: ProgressLike };
+  };
+  return [
+    describeProgress('shielded', s.shielded?.state?.progress),
+    describeProgress('unshielded', s.unshielded?.progress),
+    describeProgress('dust', s.dust?.state?.progress),
+  ].join(', ');
 };
 
 /** The address to send test NIGHT to (faucet, transfers). */

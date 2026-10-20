@@ -162,7 +162,14 @@ const walletSeed = (file: string | undefined): string | undefined => {
 const walletOptions = (network: Network, seed: string | undefined, showAddress = false): WalletOptions => ({
   seed,
   onAddress: (address) => {
-    if (showAddress) process.stdout.write(`\nWallet address: ${address}\n\nSyncing the wallet (the first sync can take a few minutes)...\n`);
+    if (!showAddress) return;
+    const faucet = FAUCETS[network];
+    process.stdout.write(
+      `\nWallet address: ${address}\n\n` +
+        (faucet ? `New wallet? You can request test NIGHT now, while it syncs: open ${faucet}\nand paste the address above.\n\n` : '') +
+        `Syncing the wallet. A new wallet reads the whole chain, which can take a while;\n` +
+        `progress is shown every 30 seconds...\n`,
+    );
   },
   onNoFunds: (address) =>
     process.stdout.write(
