@@ -11,7 +11,9 @@ describe('pickNumbers (Midnight Lotto rule)', () => {
   });
 
   it('normalises the seed like the site does', () => {
-    expect(pickNumbers(' 0x' + '0'.repeat(64).toUpperCase() + ' ', 6, 45)).toEqual(pickNumbers('0'.repeat(64), 6, 45));
+    // Non-hex characters are dropped (not just a 0x prefix), matching the site's cleanSeed().
+    const messy = ' ' + 'AB'.repeat(16) + '-' + 'CD'.repeat(16) + ' ';
+    expect(pickNumbers(messy, 6, 45)).toEqual(pickNumbers('ab'.repeat(16) + 'cd'.repeat(16), 6, 45));
     expect(cleanHex('AB-cd 12')).toBe('abcd12');
   });
 

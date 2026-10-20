@@ -18,9 +18,9 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v5
         with:
           node-version: 22
 
@@ -47,16 +47,22 @@ jobs:
       - name: Typecheck
         run: npm run typecheck
 
-      - name: Test
-        run: npm test
+      - name: Test contract
+        working-directory: contract
+        run: npx vitest run --reporter=default --reporter=json --outputFile.json=../reports/contract.json
 
-      - name: Upload lockfile and contract artifacts
+      - name: Test SDK
+        working-directory: sdk
+        run: npx vitest run --reporter=default --reporter=json --outputFile.json=../reports/sdk.json
+
+      - name: Summarise tests
         if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: build-output
-          path: |
-            package-lock.json
-            contract/src/managed/nightcast/compiler
-            contract/src/managed/nightcast/keys
-          if-no-files-found: ignore
+        run: |
+          for f in reports/*.json; do
+            [ -f "$f" ] || continue
+            node -e '
+              const r = require(process.argv[1]);
+              const name = process.argv[1].split("/").pop().replace(".json", "");
+              console.log(`::notice title=${name} tests::${r.numPassedTests} passed, ${r.numFailedTests} failed, ${r.numTotalTests} total`);
+            ' "$PWD/$f"
+          done
