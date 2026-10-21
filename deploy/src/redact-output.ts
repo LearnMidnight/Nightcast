@@ -8,7 +8,7 @@
  */
 
 /** Hide Blockfrost project ids in text. */
-export const redact = (text: string): string => text.replace(/(project_id=)[^&\s"'`)]+/g, '$1***');
+export const redact = (text: string): string => text.replace(/(project_id=)[A-Za-z0-9_-]+/g, '$1***');
 
 type Write = typeof process.stdout.write;
 
