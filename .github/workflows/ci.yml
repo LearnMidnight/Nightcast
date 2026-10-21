@@ -140,7 +140,7 @@ jobs:
           done
           grep -iE "k=|rows|circuit" keys.log | head -20 | sed 's/^/::notice title=compiler::/' || true
 
-: deploy, lock the
+  # Deploys to a throwaway local Midnight network in Docker: deploy, lock the
   # maintenance authority, activate the oracle key, verify the fingerprints,
   # then serve a real request with real proofs.
   e2e:
