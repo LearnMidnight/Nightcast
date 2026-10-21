@@ -448,24 +448,42 @@ export const walletAddress = (wallet: MidnightWalletProvider): string =>
  * can spend again (the fee's change only comes back once the transaction is
  * on chain and synced), so the next transaction can pay its fee.
  */
-export const waitForSpendableDust = async (wallet: MidnightWalletProvider, timeoutMs = 5 * 60_000): Promise<boolean> => {
+export const waitForSpendableDust = async (
+  wallet: MidnightWalletProvider,
+  logger?: Logger,
+  timeoutMs = 5 * 60_000,
+): Promise<boolean> => {
   // Coins spent by a transaction that isn't confirmed yet are "pending"; wait
   // until none are and at least one coin is available to pay with.
+  const states = wallet.wallet.state();
+  const status = states.pipe(throttleTime(30_000)).subscribe((s) => {
+    logger?.info(
+      `Waiting for spendable DUST: ${s.dust.availableCoins.length} coin(s) available, ` +
+        `${s.dust.pendingCoins.length} pending, balance ${s.dust.balance(new Date())}, ` +
+        `${s.isSynced ? 'synced' : `syncing (${describeSync(s)})`}`,
+    );
+  });
   const ready = firstValueFrom(
-    wallet.wallet
-      .state()
-      .pipe(
-        filter(
-          (s) =>
-            s.isSynced &&
-            s.dust.pendingCoins.length === 0 &&
-            s.dust.availableCoins.length > 0 &&
-            s.dust.balance(new Date()) > 0n,
-        ),
+    states.pipe(
+      filter(
+        (s) =>
+          s.isSynced &&
+          s.dust.pendingCoins.length === 0 &&
+          s.dust.availableCoins.length > 0 &&
+          s.dust.balance(new Date()) > 0n,
       ),
+    ),
   ).then(() => true);
-  const timedOut = new Promise<boolean>((resolve) => setTimeout(() => resolve(false), timeoutMs).unref());
-  return Promise.race([ready, timedOut]);
+  let timer: NodeJS.Timeout | undefined;
+  const timedOut = new Promise<boolean>((resolve) => {
+    timer = setTimeout(() => resolve(false), timeoutMs);
+  });
+  try {
+    return await Promise.race([ready, timedOut]);
+  } finally {
+    clearTimeout(timer);
+    status.unsubscribe();
+  }
 };
 
 /** NIGHT and DUST balances of a synced wallet. */

@@ -337,7 +337,7 @@ const main = async (argv: string[]): Promise<number> => {
           writeRecord(record);
 
           session.logger.info('Waiting for the wallet to see the deploy and get its DUST back...');
-          if (!(await waitForSpendableDust(wallet))) session.logger.warn('The wallet still shows no spendable DUST; trying anyway.');
+          if (!(await waitForSpendableDust(wallet, session.logger))) session.logger.warn('The wallet still shows no spendable DUST; trying anyway.');
           session.logger.info('Locking the maintenance authority...');
           try {
             const locked = await lockMaintenanceAuthority(providers, deployed.contractAddress, deployed.maintenanceKey, {
@@ -362,7 +362,7 @@ const main = async (argv: string[]): Promise<number> => {
           }
 
           if (values.accept) {
-            await waitForSpendableDust(wallet);
+            await waitForSpendableDust(wallet, session.logger);
             session.logger.info('Activating the oracle key...');
             const accepted = await acceptOracleKey(providers, deployed.contractAddress, parseOracleSecretKey(oracleFile.secret!));
             record.transactions.acceptOracleKey = accepted.txId;
@@ -621,7 +621,32 @@ const invokedDirectly = (): boolean => {
   }
 };
 
+/**
+ * Ctrl+C: some libraries we use install their own signal handlers, which
+ * stops Node's default exit. The first press asks the command to stop (the
+ * oracle shuts down cleanly) and exits after 20 seconds at most; a second
+ * press exits at once. Wallet progress is saved every 2 minutes regardless.
+ */
+const installStopKeys = (): void => {
+  let presses = 0;
+  const stop = () => {
+    presses += 1;
+    if (presses > 1) {
+      process.stderr.write('\nStopped.\n');
+      process.exit(130);
+    }
+    process.stderr.write('\nStopping... (press Ctrl+C again to stop immediately)\n');
+    setTimeout(() => {
+      process.stderr.write('Stopped.\n');
+      process.exit(130);
+    }, 20_000);
+  };
+  process.on('SIGINT', stop);
+  process.on('SIGTERM', stop);
+};
+
 if (invokedDirectly()) {
+  installStopKeys();
   main(process.argv.slice(2)).then(
     (code) => process.exit(code),
     (err) => {
