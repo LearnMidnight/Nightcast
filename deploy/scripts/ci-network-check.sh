@@ -59,7 +59,9 @@ fi
 if grep -q 'has no NIGHT yet' "sync-$network.log"; then
   echo "::notice title=$network wallet sync::synced in ${elapsed}s, then asked for faucet tokens as expected"
 elif grep -q 'Syncing: ' "sync-$network.log" && ! grep -q 'Wallet\.Sync: ' "sync-$network.log"; then
-  echo "::notice title=$network wallet sync::still syncing after ${elapsed}s with no errors: $(grep 'Syncing: ' "sync-$network.log" | tail -1 | sed 's/.*Syncing: //')"
+  last=$(grep 'Syncing: ' "sync-$network.log" | tail -1 | sed 's/\x1b\[[0-9;]*m//g; s/.*Syncing: //')
+  dust=$(printf '%s' "$last" | grep -o 'dust [0-9.]*% ([0-9]*' | grep -o '([0-9]*' | tr -d '(')
+  echo "::notice title=$network wallet sync::still syncing after ${elapsed}s with no errors (batch ${NIGHTCAST_SYNC_BATCH:-500}, dust ~$(( ${dust:-0} / (elapsed > 0 ? elapsed : 1) )) events/s): $last"
 else
   echo "::error title=$network wallet sync::$(annotate "$network" "sync-$network.log" 30)"
   status=1

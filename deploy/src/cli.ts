@@ -23,6 +23,8 @@
  * NIGHTCAST_WALLET_SEED (hex); on the `local` network a genesis wallet is the
  * default.
  */
+// First, so nothing can print a Blockfrost project id before the filter is in place.
+import './redact-output.js';
 import { webcrypto } from 'node:crypto';
 import { chmodSync, mkdirSync, readFileSync, realpathSync, writeFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';

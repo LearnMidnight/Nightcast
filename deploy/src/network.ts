@@ -43,8 +43,8 @@ export type NightcastProviders = MidnightProviders<NightcastCircuits, typeof NIG
 
 const dockerDir = resolve(dirname(fileURLToPath(import.meta.url)), '..', 'docker');
 
-/** Hide Blockfrost project ids, which travel in URLs as `?project_id=...`. */
-export const redact = (text: string): string => text.replace(/(project_id=)[^&\s"'`)]+/g, '$1***');
+import { redact } from './redact-output.js';
+export { redact };
 
 export const createLogger = (level = process.env.NIGHTCAST_LOG_LEVEL ?? 'info'): Logger =>
   pino({
