@@ -30,7 +30,7 @@ import {
   type Session,
 } from '../network.js';
 import type { DeploymentRecord } from '../record.js';
-import { acceptOracleKey, deployNightcast } from '../steps.js';
+import { acceptOracleKey, deployNightcast, deployNightcastLocked } from '../steps.js';
 import { startOracleService, submitRequest, waitForResult } from '../service.js';
 import { verifyDeployment } from '../verify.js';
 
@@ -49,7 +49,6 @@ describe.runIf(enabled)('Nightcast on a local Midnight network', () => {
   const sk = generateOracleSecretKey();
   const operatorSecret = generateOperatorSecret();
   let address: string;
-  let maintenanceKey: string;
 
   beforeAll(async () => {
     process.env.NIGHTCAST_DEPLOYMENTS_DIR = mkdtempSync(join(tmpdir(), 'nightcast-deployments-'));
@@ -63,36 +62,49 @@ describe.runIf(enabled)('Nightcast on a local Midnight network', () => {
     await session?.shutdown().catch(() => undefined);
   }, 5 * 60_000);
 
-  it('deploys with the proposed oracle key and a single-key authority', async () => {
-    const deployed = await deployNightcast(providers, {
+  it('deploys already locked, with the proposed oracle key', async () => {
+    const deployed = await deployNightcastLocked(providers, {
       oraclePublicKey: oraclePublicKey(sk),
       operatorCommitment: pureCircuits.operatorCommitmentOf(operatorSecret),
       minWindow: 60n,
       maxWindow: 86_400n,
     });
     address = deployed.contractAddress;
-    maintenanceKey = deployed.maintenanceKey;
     const state = await providers.publicDataProvider.queryContractState(address);
     expect(state).toBeTruthy();
-    expect(isLocked(state!.maintenanceAuthority)).toBe(false);
+    expect(isLocked(state!.maintenanceAuthority)).toBe(true);
+    expect(state!.maintenanceAuthority.committee).toHaveLength(0);
+    expect(state!.maintenanceAuthority.threshold).toBe(1);
     expect(Nightcast.ledger(state!.data).oracleKeyReady).toBe(false);
   }, 10 * 60_000);
 
-  it('locks the maintenance authority for good', async () => {
-    const locked = await lockMaintenanceAuthority(providers, address, maintenanceKey);
-    expect(locked.authority.committee).toHaveLength(0);
-    expect(locked.authority.threshold).toBe(1);
-    // The old key can't do anything any more, and nor can any other.
-    await expect(lockMaintenanceAuthority(providers, address, maintenanceKey)).rejects.toThrow(/already locked/);
+  it('cannot be changed by anyone, and the old-style lock is refused', async () => {
+    // Any key: there is no committee member, so no signature can ever count.
+    const someKey = sampleSigningKey();
+    await expect(lockMaintenanceAuthority(providers, address, someKey)).rejects.toThrow(/already locked/);
     const nightcast = await findDeployedContract(providers, {
       contractAddress: address,
       compiledContract: compiledNightcast(),
       privateStateId: NIGHTCAST_PRIVATE_STATE_ID,
       initialPrivateState: {},
-      signingKey: maintenanceKey,
+      signingKey: someKey,
     });
     await expect(nightcast.circuitMaintenanceTx.fulfil.removeVerifierKey()).rejects.toThrow();
     await expect(nightcast.contractMaintenanceTx.replaceAuthority(sampleSigningKey())).rejects.toThrow();
+  }, 10 * 60_000);
+
+  it('still supports the old deploy-then-lock path', async () => {
+    const deployed = await deployNightcast(providers, {
+      oraclePublicKey: oraclePublicKey(sk),
+      operatorCommitment: pureCircuits.operatorCommitmentOf(operatorSecret),
+      minWindow: 60n,
+      maxWindow: 86_400n,
+    });
+    const before = await providers.publicDataProvider.queryContractState(deployed.contractAddress);
+    expect(isLocked(before!.maintenanceAuthority)).toBe(false);
+    const locked = await lockMaintenanceAuthority(providers, deployed.contractAddress, deployed.maintenanceKey);
+    expect(locked.authority.committee).toHaveLength(0);
+    expect(locked.authority.threshold).toBe(1);
   }, 10 * 60_000);
 
   it('activates the oracle key', async () => {

@@ -184,16 +184,15 @@ If the faucet says you're rate-limited, wait a few hours and try again.
 This takes a few minutes. It:
 
 1. starts a proof server in Docker;
-2. deploys the contract;
-3. locks the admin key so nobody can ever change the contract's code;
-4. activates the oracle key;
-5. writes `deployments/preprod.json` and checks everything.
+2. deploys the contract **already locked**: it's created with an admin setting nobody can ever use, so there is no key that could change its code, not even yours;
+3. activates the oracle key;
+4. writes `deployments/preprod.json` and checks everything.
 
 It ends with a checklist. Every line should say **PASS**:
 
 ```
 PASS  contract exists: ...
-PASS  maintenance authority locked: committee of 0, threshold 1, 1 update(s) since deploy
+PASS  maintenance authority locked: committee of 0, threshold 1, 0 update(s) since deploy
 PASS  verifier keys match the published fingerprints: 7 circuits
 PASS  this checkout compiles to the deployed code: identical
 PASS  oracle key accepted: active and matches the record
