@@ -6,7 +6,7 @@ Preprod uses test tokens with no real value, so nothing here costs money.
 
 **Preview instead of Preprod:** Midnight's other test network, Preview, needs no Blockfrost account. To use it, skip step 8 and write `--network preview` wherever this guide says `--network preprod`; its faucet is <https://midnight-tmnight-preview.nethermind.dev/>. Preprod is the one meant for final testing before Mainnet.
 
-**Time:** about an hour of hands-on work, plus a few hours (unattended) for the wallets' first sync.
+**Time:** about an hour of hands-on work, plus up to an hour (unattended) for the wallets' first sync.
 
 ---
 
@@ -145,7 +145,7 @@ It prints the wallet address (starting `mn_addr_preprod1...`), then starts synci
 2. Paste the address, complete the captcha and click **Request tokens**. You can do this straight away; you don't need to wait for the sync.
 3. Leave the terminal running.
 
-**The first sync is slow.** A new wallet reads the network's whole history, which takes **a few hours** (Midnight's wallet processes about 20 events a second, and the test networks have hundreds of thousands). Every 30 seconds it prints progress like:
+**The first sync takes a while.** A new wallet reads the network's whole history: about 10 minutes on Preview and roughly an hour on Preprod (1.7 million events), depending on your computer and connection. Every 30 seconds it prints progress like:
 
 ```
 Syncing: shielded 12.3% (33493/271763), unshielded done, dust 14.2% (38670/272206)
