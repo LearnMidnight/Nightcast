@@ -51,20 +51,14 @@ export const combineDrawSeed = (operatorSeedHex: string, vrfOutput: Uint8Array):
 export const seedCommitment = (operatorSeedHex: string): string =>
   createHash('sha256').update(cleanHex(operatorSeedHex)).digest('hex');
 
-/**
- * Pick `pick` distinct numbers from 1..`pool`, sorted ascending.
- * Same rule as the Midnight Lotto site: for i = 0, 1, …, take
- * d = SHA-256(seed + ":" + i), read 2 bytes at a time (big-endian), skip
- * v ≥ 65536 − (65536 mod pool), n = v mod pool + 1, skip repeats.
- */
-export const pickNumbers = (seedHex: string, pick: number, pool: number): number[] => {
+/** The site's draw loop over SHA-256(prefix + ":" + i), 2-byte rejection sampling, no repeats. */
+const drawFrom = (prefix: string, pick: number, pool: number): number[] => {
   if (!Number.isInteger(pool) || pool < 1 || pool > 65536) throw new RangeError('pool must be 1..65536');
   if (!Number.isInteger(pick) || pick < 1 || pick > pool) throw new RangeError('pick must be 1..pool');
-  const seed = cleanHex(seedHex);
   const limit = 65536 - (65536 % pool);
   const out: number[] = [];
   for (let i = 0; out.length < pick; i++) {
-    const d = createHash('sha256').update(`${seed}:${i}`).digest();
+    const d = createHash('sha256').update(`${prefix}:${i}`).digest();
     for (let j = 0; j + 1 < d.length && out.length < pick; j += 2) {
       const v = (d[j] << 8) | d[j + 1];
       if (v >= limit) continue;
@@ -74,6 +68,31 @@ export const pickNumbers = (seedHex: string, pick: number, pool: number): number
   }
   return out.sort((a, b) => a - b);
 };
+
+/**
+ * Pick `pick` distinct numbers from 1..`pool`, sorted ascending.
+ * Same rule as the Midnight Lotto site: for i = 0, 1, …, take
+ * d = SHA-256(seed + ":" + i), read 2 bytes at a time (big-endian), skip
+ * v ≥ 65536 − (65536 mod pool), n = v mod pool + 1, skip repeats.
+ */
+export const pickNumbers = (seedHex: string, pick: number, pool: number): number[] =>
+  drawFrom(cleanHex(seedHex), pick, pool);
+
+/**
+ * The Moonball (bonus ball): the same rule run on seed + ":mb" for one number
+ * from the bonus pool, as the site's `midnight_lotto_derive_bonus()`. It may
+ * repeat a main number.
+ */
+export const pickMoonball = (seedHex: string, pool: number): number => drawFrom(`${cleanHex(seedHex)}:mb`, 1, pool)[0];
+
+/** Midnight 7 + Moonball: 7 numbers from 35 and a Moonball from 20. */
+export const MIDNIGHT_7 = { pick: 7, pool: 35, moonballPool: 20 } as const;
+
+/** A full Midnight 7 draw from a draw seed. */
+export const drawMidnight7 = (seedHex: string): { numbers: number[]; moonball: number } => ({
+  numbers: pickNumbers(seedHex, MIDNIGHT_7.pick, MIDNIGHT_7.pool),
+  moonball: pickMoonball(seedHex, MIDNIGHT_7.moonballPool),
+});
 
 /**
  * Strip anything that isn't hex and lowercase, as the Midnight Lotto site does.
