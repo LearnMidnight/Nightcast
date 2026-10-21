@@ -443,6 +443,19 @@ export const describeSync = (state: unknown): string => {
 export const walletAddress = (wallet: MidnightWalletProvider): string =>
   wallet.unshieldedKeystore.getBech32Address().asString();
 
+/**
+ * After a transaction, wait until the wallet has caught up and holds DUST it
+ * can spend again (the fee's change only comes back once the transaction is
+ * on chain and synced), so the next transaction can pay its fee.
+ */
+export const waitForSpendableDust = async (wallet: MidnightWalletProvider, timeoutMs = 5 * 60_000): Promise<boolean> => {
+  const ready = firstValueFrom(
+    wallet.wallet.state().pipe(filter((s) => s.isSynced && s.dust.balance(new Date()) > 0n)),
+  ).then(() => true);
+  const timedOut = new Promise<boolean>((resolve) => setTimeout(() => resolve(false), timeoutMs).unref());
+  return Promise.race([ready, timedOut]);
+};
+
 /** NIGHT and DUST balances of a synced wallet. */
 export const walletBalances = async (wallet: MidnightWalletProvider): Promise<{ night: bigint; dust: bigint }> => {
   const state = await firstValueFrom(wallet.wallet.state().pipe(filter((s) => s.isSynced)));

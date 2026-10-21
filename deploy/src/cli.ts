@@ -55,6 +55,7 @@ import {
   type WalletOptions,
   walletAddress,
   walletBalances,
+  waitForSpendableDust,
 } from './network.js';
 import { currentCommit, type DeploymentRecord, readRecord, recordPath, writeRecord } from './record.js';
 import { describeRequest, readRequest, startOracleService, submitRequest, waitForResult } from './service.js';
@@ -335,6 +336,8 @@ const main = async (argv: string[]): Promise<number> => {
           };
           writeRecord(record);
 
+          session.logger.info('Waiting for the wallet to see the deploy and get its DUST back...');
+          if (!(await waitForSpendableDust(wallet))) session.logger.warn('The wallet still shows no spendable DUST; trying anyway.');
           session.logger.info('Locking the maintenance authority...');
           try {
             const locked = await lockMaintenanceAuthority(providers, deployed.contractAddress, deployed.maintenanceKey, {
@@ -359,6 +362,7 @@ const main = async (argv: string[]): Promise<number> => {
           }
 
           if (values.accept) {
+            await waitForSpendableDust(wallet);
             session.logger.info('Activating the oracle key...');
             const accepted = await acceptOracleKey(providers, deployed.contractAddress, parseOracleSecretKey(oracleFile.secret!));
             record.transactions.acceptOracleKey = accepted.txId;
