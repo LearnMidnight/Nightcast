@@ -17,6 +17,9 @@ include "draw";
 import NightcastVrf;
 import MidnightDraw;
 
+// The drawn numbers, as returned by computeNumbers.
+export { Numbers };
+
 // ---------------------------------------------------------------- types
 
 export enum DrawStatus { open, requested, fulfilled, drawn, settled, voided }
