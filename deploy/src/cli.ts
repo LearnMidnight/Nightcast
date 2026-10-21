@@ -62,7 +62,7 @@ import { acceptOracleKey, deployNightcast } from './steps.js';
 import { formatChecks, verifyDeployment } from './verify.js';
 
 const USAGE = `usage:
-  ./nightcast deploy       --network <${NETWORKS.join('|')}> --oracle <file> --operator <file>  --wallet <file> [--min 60] [--max 86400] [--accept] [--proof-server-port <port>]
+  ./nightcast deploy       --network <${NETWORKS.join('|')}> --oracle <file> --operator <file> --wallet <file> [--min 60] [--max 86400] [--accept] [--proof-server-port <port>]
   ./nightcast accept-key   --network <network> --oracle <oracle secret file> --wallet <file> [--proof-server-port <port>]
   ./nightcast lock         --network <network> --maintenance-key-file <file> --wallet <file> [--proof-server-port <port>]
   ./nightcast verify       --network <network> [--address <contract address>]
