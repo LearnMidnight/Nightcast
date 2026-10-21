@@ -26,12 +26,13 @@
 // First, so nothing can print a Blockfrost project id before the filter is in place.
 import './redact-output.js';
 import { webcrypto } from 'node:crypto';
-import { chmodSync, mkdirSync, readFileSync, realpathSync, writeFileSync } from 'node:fs';
+import { chmodSync, mkdirSync, readFileSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { parseArgs } from 'node:util';
 import { fromHex, oraclePublicKey, parseOracleSecretKey, pureCircuits, Status, toHex } from '@nightcast/contract';
 import { pickNumbers } from '@nightcast/sdk';
+import { sampleSigningKey } from '@midnight-ntwrk/midnight-js-protocol/ledger';
 import { indexerPublicDataProvider } from '@midnight-ntwrk/midnight-js-indexer-public-data-provider';
 import { setNetworkId } from '@midnight-ntwrk/midnight-js/network-id';
 import { compilerInfo, type Fingerprints, localFingerprints } from './fingerprints.js';
@@ -54,6 +55,7 @@ import {
   type WalletOptions,
   walletAddress,
   walletBalances,
+  waitForSpendableDust,
 } from './network.js';
 import { currentCommit, type DeploymentRecord, readRecord, recordPath, writeRecord } from './record.js';
 import { describeRequest, readRequest, startOracleService, submitRequest, waitForResult } from './service.js';
@@ -61,9 +63,9 @@ import { acceptOracleKey, deployNightcast } from './steps.js';
 import { formatChecks, verifyDeployment } from './verify.js';
 
 const USAGE = `usage:
-  ./nightcast deploy       --network <${NETWORKS.join('|')}> --oracle <file> --operator <file> [--min 60] [--max 86400] [--accept] [--proof-server-port <port>]
-  ./nightcast accept-key   --network <network> --oracle <oracle secret file> [--proof-server-port <port>]
-  ./nightcast lock         --network <network> --maintenance-key-file <file> [--proof-server-port <port>]
+  ./nightcast deploy       --network <${NETWORKS.join('|')}> --oracle <file> --operator <file> --wallet <file> [--min 60] [--max 86400] [--accept] [--proof-server-port <port>]
+  ./nightcast accept-key   --network <network> --oracle <oracle secret file> --wallet <file> [--proof-server-port <port>]
+  ./nightcast lock         --network <network> --maintenance-key-file <file> --wallet <file> [--proof-server-port <port>]
   ./nightcast verify       --network <network> [--address <contract address>]
   ./nightcast fingerprints
   ./nightcast doctor       --network <network> [--proof-server-port <port>]
@@ -198,16 +200,22 @@ const networkArg = (value: string | undefined): Network => {
 
 const portArg = (value: string | undefined): number | undefined => (value ? Number.parseInt(value, 10) : undefined);
 
-/** Keep the one-time maintenance key only if locking failed, so `lock` can be retried. */
-const saveMaintenanceKeyForRetry = (network: Network, address: string, key: string): string => {
+/**
+ * Keep the one-time maintenance key on disk (mode 600) from before the deploy
+ * until the lock is confirmed, so an interrupted or failed lock can always be
+ * retried with `./nightcast lock`. Deleted once the authority is locked.
+ */
+const maintenanceKeyFile = (network: Network): string => {
   const dir = join(process.cwd(), '.nightcast');
-  mkdirSync(dir, { recursive: true });
-  const path = join(dir, `${network}-${address.slice(0, 12)}-maintenance.key`);
-  writeFileSync(path, JSON.stringify({ network, contractAddress: address, maintenanceKey: key }) + '\n', {
+  mkdirSync(dir, { recursive: true, mode: 0o700 });
+  return join(dir, `${network}-${new Date().toISOString().replace(/[:.]/g, '-')}-maintenance.key`);
+};
+
+const writeMaintenanceKey = (path: string, network: Network, key: string, contractAddress?: string): void => {
+  writeFileSync(path, JSON.stringify({ network, contractAddress: contractAddress ?? null, maintenanceKey: key }) + '\n', {
     mode: 0o600,
-    flag: 'wx',
   });
-  return path;
+  chmodSync(path, 0o600);
 };
 
 const withSession = async <T>(network: Network, proofServerPort: number | undefined, run: (s: Session) => Promise<T>) => {
@@ -302,8 +310,13 @@ const main = async (argv: string[]): Promise<number> => {
         const wallet = await openWallet(session, walletOptions(network, walletSeed(values.wallet)));
         try {
           const providers = nightcastProviders(session, wallet);
+          const maintenanceKey = sampleSigningKey();
+          const keyPath = maintenanceKeyFile(network);
+          writeMaintenanceKey(keyPath, network, maintenanceKey);
+          session.logger.info(`One-time admin key saved to ${keyPath} until the lock is confirmed`);
           session.logger.info('Deploying Nightcast...');
-          const deployed = await deployNightcast(providers, params);
+          const deployed = await deployNightcast(providers, params, maintenanceKey);
+          writeMaintenanceKey(keyPath, network, maintenanceKey, deployed.contractAddress);
           session.logger.info(`Deployed at ${deployed.contractAddress} (tx ${deployed.txId})`);
 
           const record: DeploymentRecord = {
@@ -323,9 +336,13 @@ const main = async (argv: string[]): Promise<number> => {
           };
           writeRecord(record);
 
+          session.logger.info('Waiting for the wallet to see the deploy and get its DUST back...');
+          if (!(await waitForSpendableDust(wallet, session.logger))) session.logger.warn('The wallet still shows no spendable DUST; trying anyway.');
           session.logger.info('Locking the maintenance authority...');
           try {
-            const locked = await lockMaintenanceAuthority(providers, deployed.contractAddress, deployed.maintenanceKey);
+            const locked = await lockMaintenanceAuthority(providers, deployed.contractAddress, deployed.maintenanceKey, {
+              onStage: (m) => session.logger.info(m),
+            });
             record.transactions.lockAuthority = locked.txId;
             record.maintenanceAuthority = {
               committeeSize: locked.authority.committee.length,
@@ -333,17 +350,19 @@ const main = async (argv: string[]): Promise<number> => {
               counter: locked.authority.counter.toString(),
             };
             writeRecord(record);
+            rmSync(keyPath, { force: true });
             session.logger.info(`Locked (tx ${locked.txId}); nobody can change the contract's code any more`);
           } catch (err) {
-            const keyPath = saveMaintenanceKeyForRetry(network, deployed.contractAddress, deployed.maintenanceKey);
             session.logger.error(
               `Locking failed: ${err instanceof Error ? err.message : String(err)}. The one-time maintenance key is in ${keyPath}; ` +
-                `retry with \`./nightcast lock --network ${network} --maintenance-key-file ${keyPath}\` and delete the file afterwards.`,
+                `retry with \`./nightcast lock --network ${network} --maintenance-key-file ${keyPath} --wallet <wallet file>\` ` +
+                `(it deletes the file once locked).`,
             );
             return 1;
           }
 
           if (values.accept) {
+            await waitForSpendableDust(wallet, session.logger);
             session.logger.info('Activating the oracle key...');
             const accepted = await acceptOracleKey(providers, deployed.contractAddress, parseOracleSecretKey(oracleFile.secret!));
             record.transactions.acceptOracleKey = accepted.txId;
@@ -388,9 +407,11 @@ const main = async (argv: string[]): Promise<number> => {
       const network = networkArg(values.network);
       const file = values['maintenance-key-file'];
       if (!file) throw new Error(USAGE);
-      const saved = JSON.parse(readFileSync(file, 'utf8')) as { contractAddress: string; maintenanceKey: string };
+      const saved = JSON.parse(readFileSync(file, 'utf8')) as { contractAddress: string | null; maintenanceKey: string };
       const record = readRecord(network);
-      if (saved.contractAddress !== record.contractAddress) throw new Error('key file is for a different deployment');
+      if (saved.contractAddress && saved.contractAddress !== record.contractAddress) {
+        throw new Error('key file is for a different deployment');
+      }
       return withSession(network, portArg(values['proof-server-port']), async (session) => {
         const wallet = await openWallet(session, walletOptions(network, walletSeed(values.wallet)));
         try {
@@ -399,7 +420,9 @@ const main = async (argv: string[]): Promise<number> => {
           if (state && isLocked(state.maintenanceAuthority)) {
             session.logger.info('Already locked.');
           } else {
-            const locked = await lockMaintenanceAuthority(providers, record.contractAddress, saved.maintenanceKey);
+            const locked = await lockMaintenanceAuthority(providers, record.contractAddress, saved.maintenanceKey, {
+              onStage: (m) => session.logger.info(m),
+            });
             record.transactions.lockAuthority = locked.txId;
             record.maintenanceAuthority = {
               committeeSize: locked.authority.committee.length,
@@ -408,7 +431,8 @@ const main = async (argv: string[]): Promise<number> => {
             };
             writeRecord(record);
           }
-          session.logger.info(`Locked. Delete ${file} now; the key can no longer do anything.`);
+          rmSync(file, { force: true });
+          session.logger.info(`Locked. Deleted ${file}; the key can no longer do anything.`);
           return (await runVerify(session, network)) ? 0 : 1;
         } finally {
           await wallet.stop().catch(() => undefined);
@@ -597,7 +621,32 @@ const invokedDirectly = (): boolean => {
   }
 };
 
+/**
+ * Ctrl+C: some libraries we use install their own signal handlers, which
+ * stops Node's default exit. The first press asks the command to stop (the
+ * oracle shuts down cleanly) and exits after 20 seconds at most; a second
+ * press exits at once. Wallet progress is saved every 2 minutes regardless.
+ */
+const installStopKeys = (): void => {
+  let presses = 0;
+  const stop = () => {
+    presses += 1;
+    if (presses > 1) {
+      process.stderr.write('\nStopped.\n');
+      process.exit(130);
+    }
+    process.stderr.write('\nStopping... (press Ctrl+C again to stop immediately)\n');
+    setTimeout(() => {
+      process.stderr.write('Stopped.\n');
+      process.exit(130);
+    }, 20_000);
+  };
+  process.on('SIGINT', stop);
+  process.on('SIGTERM', stop);
+};
+
 if (invokedDirectly()) {
+  installStopKeys();
   main(process.argv.slice(2)).then(
     (code) => process.exit(code),
     (err) => {

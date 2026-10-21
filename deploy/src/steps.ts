@@ -17,8 +17,8 @@ export type DeployParams = {
 export const deployNightcast = async (
   providers: NightcastProviders,
   params: DeployParams,
+  maintenanceKey: SigningKey = sampleSigningKey(),
 ): Promise<{ contractAddress: string; txId: string; maintenanceKey: SigningKey }> => {
-  const maintenanceKey = sampleSigningKey();
   const deployed = await deployContract(providers, {
     compiledContract: compiledNightcast(),
     privateStateId: NIGHTCAST_PRIVATE_STATE_ID,
