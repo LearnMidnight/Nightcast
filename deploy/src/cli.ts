@@ -32,7 +32,7 @@ import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { parseArgs } from 'node:util';
 import { fromHex, oraclePublicKey, parseOracleSecretKey, pureCircuits, Status, toHex } from '@nightcast/contract';
-import { pickNumbers } from '@nightcast/sdk';
+import { drawMidnight7 } from '@nightcast/sdk';
 import { indexerPublicDataProvider } from '@midnight-ntwrk/midnight-js-indexer-public-data-provider';
 import { setNetworkId } from '@midnight-ntwrk/midnight-js/network-id';
 import { compilerInfo, type Fingerprints, localFingerprints } from './fingerprints.js';
@@ -551,7 +551,10 @@ const main = async (argv: string[]): Promise<number> => {
           process.stdout.write(describeRequest(req.id, result) + '\n');
           if (result?.status === Status.fulfilled) {
             const words = [0n, 1n].map((i) => toHex(pureCircuits.randomWord(result.output, i)));
-            process.stdout.write(`words    ${words.join(' ')}\nlotto    ${pickNumbers(toHex(result.output), 6, 45).join(' ')} (6 from 45, example)\n`);
+            const draw = drawMidnight7(toHex(result.output));
+            process.stdout.write(
+              `words    ${words.join(' ')}\nlotto    ${draw.numbers.join(' ')} + Moonball ${draw.moonball} (Midnight 7 example)\n`,
+            );
             return 0;
           }
           return 1;
