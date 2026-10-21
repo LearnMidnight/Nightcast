@@ -1,0 +1,39 @@
+{
+  "network": "preprod",
+  "contractAddress": "67e02b18db442101bfe3e099eade44033880f0bdb67bf0d84e4a6d87b49d4a1f",
+  "deployedAt": "2026-10-21T12:10:57.593Z",
+  "sourceCommit": "1a820fca7ad92dfdac3335bb7f367c1466825c3a",
+  "compiler": {
+    "compiler": "0.31.1",
+    "language": "0.23.0",
+    "runtime": "0.16.0"
+  },
+  "parameters": {
+    "oraclePublicKey": {
+      "x": "27529532667968748056603372703879612308505926628444998694499750979362460766241",
+      "y": "50661387062445323488102493309705488128982534701400847572781234995192670515198"
+    },
+    "operatorCommitment": "b3c154bc87f682680e310808321833524d9ffc88e6a8f8be732f1ec9de36a696",
+    "minWindow": "60",
+    "maxWindow": "86400"
+  },
+  "transactions": {
+    "deploy": "002455e113310ee49f7a0c932154ffcc0824fe2dde8a270c022046db9470de2d10",
+    "lockAuthority": "002455e113310ee49f7a0c932154ffcc0824fe2dde8a270c022046db9470de2d10",
+    "acceptOracleKey": "00dae1b62b6fc7a2c5b7ca17856244530623406fc106ca5e0d3cb067114f684ce6"
+  },
+  "maintenanceAuthority": {
+    "committeeSize": 0,
+    "threshold": 1,
+    "counter": "0"
+  },
+  "verifierKeys": {
+    "acceptOperator": "13caad7e24d47c7e3100678aaf252a24f6f211423fb454a50c7fba2c9ac36462",
+    "acceptOracleKey": "7f98a721ff50c6ce6a7485446e7bf9d64c140fa2296e8488ee40bc6423e1f781",
+    "expire": "1868be4b8c67e7cca62230828c331d6917aa86a5303a4cca2c24258cea3673eb",
+    "fulfil": "05e1555bb1a2c5ef3a1c3edd4a32cf1ab18a3a3e2b0864ad987dfcfb45f78a6d",
+    "proposeOperator": "f84be6b4bd60f2865ef83f7eb47e98463713bceb269b06196c24ccc1c3e3cb87",
+    "proposeOracleKey": "d92214aecb95e71b6c008358950b53b85c7f65c8018cbfa48bad73cf312ab16b",
+    "request": "970b68161130d528fdc47f0632ce660b94c9b4d92280bc5eb2b9ea272ab64baf"
+  }
+}
