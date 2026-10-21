@@ -18,7 +18,8 @@
     "build": "npm run build -w @nightcast/contract && npm run build -w @nightcast/sdk && npm run build -w @nightcast/deploy",
     "typecheck": "npm run typecheck -w @nightcast/contract && npm run typecheck -w @nightcast/sdk && npm run typecheck -w @nightcast/deploy",
     "test": "npm test -w @nightcast/contract && npm test -w @nightcast/sdk && npm test -w @nightcast/deploy",
-    "deploy": "node deploy/dist/cli.js"
+    "deploy": "node deploy/dist/cli.js",
+    "postinstall": "node deploy/scripts/patch-dust-fee-loop.mjs"
   },
   "devDependencies": {
     "@types/node": "^22.0.0",

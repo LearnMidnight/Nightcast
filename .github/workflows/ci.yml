@@ -38,6 +38,12 @@ jobs:
       - name: Install dependencies
         run: npm install --no-audit --no-fund
 
+      - name: Dust fee-loop fix applied
+        run: |
+          node deploy/scripts/patch-dust-fee-loop.mjs --check 2> patch.log || { echo "::error title=Dust fee-loop fix::$(cat patch.log)"; exit 1; }
+          echo "::notice title=Dust fee-loop fix::$(cat patch.log)"
+          grep -rl "nightcast: dust fee-loop fix" node_modules | head -5 || true
+
       - name: Compile contract (with proving keys)
         run: npm run compact
 
