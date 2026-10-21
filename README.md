@@ -50,6 +50,7 @@ The construction, ledger layout and threat model are in [docs/SPEC.md](docs/SPEC
 | `sdk/src/derive.ts` | Turning an output into numbers: `randomWords`, `uniformInt`, `pickNumbers`, `pickMoonball`, `drawMidnight7`, `combineDrawSeed` |
 | `sdk/src/keygen.ts` | `./nightcast keygen`: generate oracle, operator and requester secrets |
 | `deploy/` | `./nightcast` commands: deploy (locked from the start), accept the oracle key, verify, wallets, run the oracle, test requests |
+| `lotto/` | The Midnight Lotto contract (Midnight 7 + Moonball, tNIGHT, secret tickets) with Nightcast's VRF embedded; design in [docs/LOTTO.md](docs/LOTTO.md) |
 | `nightcast` | Wrapper script that runs the tools from a checkout |
 | `deployments/` | Published records of live deployments |
 

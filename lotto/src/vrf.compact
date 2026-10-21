@@ -1,0 +1,44 @@
+// Nightcast's VRF (docs/SPEC.md §2), for contracts that embed it instead of
+// calling Nightcast (SPEC §5.1: cross-contract calls aren't available on
+// ledger 8). Same construction and domain separators as
+// contract/src/nightcast.compact, so for the same key and input point it gives
+// exactly the output Nightcast would.
+//
+//     H      = hashToCurve(["nightcast:h2c:v0", alpha])
+//     gamma  = H * sk
+//     output = SHA-256("nightcast:output:v0" || gamma)
+
+module NightcastVrf {
+  import CompactStandardLibrary;
+
+  struct OutputPreimage {
+    domain: Bytes<32>;
+    gamma: JubjubPoint;
+  }
+
+  // The curve point an input is evaluated at.
+  export pure circuit inputPoint(alpha: Bytes<32>): JubjubPoint {
+    return hashToCurve<[Bytes<32>, Bytes<32>]>([pad(32, "nightcast:h2c:v0"), alpha]);
+  }
+
+  // Public key for a secret scalar.
+  export pure circuit publicKey(sk: Field): JubjubPoint {
+    return ecMulGenerator(sk);
+  }
+
+  // The VRF at a stored point.
+  export pure circuit evaluateAt(sk: Field, point: JubjubPoint): Bytes<32> {
+    return persistentHash<OutputPreimage>(OutputPreimage {
+      domain: pad(32, "nightcast:output:v0"),
+      gamma: ecMul(point, sk)
+    });
+  }
+
+  export pure circuit sameKey(a: JubjubPoint, b: JubjubPoint): Boolean {
+    return jubjubPointX(a) == jubjubPointX(b) && jubjubPointY(a) == jubjubPointY(b);
+  }
+
+  export pure circuit isIdentity(a: JubjubPoint): Boolean {
+    return jubjubPointX(a) == 0 && jubjubPointY(a) == 1;
+  }
+}

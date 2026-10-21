@@ -8,16 +8,18 @@
   "workspaces": [
     "contract",
     "sdk",
-    "deploy"
+    "deploy",
+    "lotto"
   ],
   "engines": {
     "node": ">=22"
   },
   "scripts": {
-    "compact": "npm run compact -w @nightcast/contract",
-    "build": "npm run build -w @nightcast/contract && npm run build -w @nightcast/sdk && npm run build -w @nightcast/deploy",
-    "typecheck": "npm run typecheck -w @nightcast/contract && npm run typecheck -w @nightcast/sdk && npm run typecheck -w @nightcast/deploy",
-    "test": "npm test -w @nightcast/contract && npm test -w @nightcast/sdk && npm test -w @nightcast/deploy",
+    "compact": "npm run compact -w @nightcast/contract && npm run compact:fast -w @nightcast/lotto",
+    "compact:lotto-keys": "npm run compact -w @nightcast/lotto",
+    "build": "npm run build -w @nightcast/contract && npm run build -w @nightcast/sdk && npm run build -w @nightcast/deploy && npm run build -w @nightcast/lotto",
+    "typecheck": "npm run typecheck -w @nightcast/contract && npm run typecheck -w @nightcast/sdk && npm run typecheck -w @nightcast/deploy && npm run typecheck -w @nightcast/lotto",
+    "test": "npm test -w @nightcast/contract && npm test -w @nightcast/sdk && npm test -w @nightcast/deploy && npm test -w @nightcast/lotto",
     "deploy": "node deploy/dist/cli.js",
     "postinstall": "node deploy/scripts/patch-dust-fee-loop.mjs"
   },

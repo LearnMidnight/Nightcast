@@ -79,7 +79,7 @@ const collectTransacting = (dir, out) => {
 };
 
 const targets = [];
-for (const dir of ['.', 'contract', 'sdk', 'deploy']) walkModules(join(root, dir, 'node_modules'), targets);
+for (const dir of ['.', 'contract', 'sdk', 'deploy', 'lotto']) walkModules(join(root, dir, 'node_modules'), targets);
 let patched = 0;
 let already = 0;
 let unknown = 0;
