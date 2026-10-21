@@ -26,6 +26,7 @@
 // First, so nothing can print a Blockfrost project id before the filter is in place.
 import './redact-output.js';
 import { webcrypto } from 'node:crypto';
+import { totalmem } from 'node:os';
 import { chmodSync, mkdirSync, readFileSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -412,6 +413,14 @@ const main = async (argv: string[]): Promise<number> => {
               ? 'Everything answered. You are ready to go.\n'
               : `Problems:\n${session.problems.map((p) => `  - ${p}`).join('\n')}\n`),
         );
+        const gb = totalmem() / 1024 ** 3;
+        if (gb < 5) {
+          process.stdout.write(
+            `\nWarning: this computer (or Ubuntu on Windows) has only ${gb.toFixed(1)} GB of memory. Paying fees on Preprod\n` +
+              `can need more. On Windows, add 'memory=6GB' under [wsl2] in %UserProfile%\\.wslconfig, run 'wsl --shutdown'\n` +
+              `and restart Docker Desktop (see docs/preprod-guide.md).\n`,
+          );
+        }
         return session.problems.length === 0 ? 0 : 1;
       });
     }

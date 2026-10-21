@@ -26,7 +26,25 @@ Midnight's tools run on Linux, so Windows runs them inside Ubuntu using WSL.
 
 From now on, "the Ubuntu terminal" means: Start → type **Ubuntu** → open it. **Run every command below in the Ubuntu terminal**, not in PowerShell.
 
-### 2. Install Docker Desktop
+### 2. Give Ubuntu enough memory
+
+By default Windows gives Ubuntu only half your RAM, and Docker shares it. Nightcast's wallet needs about 4 GB, so on an 8 GB PC raise the limit. In PowerShell:
+
+```powershell
+notepad $env:USERPROFILE\.wslconfig
+```
+
+Click **Yes** if asked to create the file, and make it read:
+
+```
+[wsl2]
+memory=6GB
+swap=8GB
+```
+
+Save, close Notepad, and run `wsl --shutdown`. (If Ubuntu can't reach github.com later, add the line `networkingMode=mirrored` under `[wsl2]` too.)
+
+### 2b. Install Docker Desktop
 
 Docker runs the Midnight proof server, which creates the zero-knowledge proofs.
 
@@ -276,6 +294,7 @@ git push
 |---|---|
 | `preprod needs a Blockfrost project id` | Do step 8. |
 | `the Blockfrost project id was refused` (401 or 403) | The ID is wrong or for another network. Check the project's network is **Midnight Preprod**, then run `./nightcast blockfrost save --network preprod` again. |
+| A step sits for many minutes with Node at 200–300% CPU, and Ctrl+C does nothing | Ubuntu is short of memory: see step 2. Stop it with Ctrl+\\ and run the command again. |
 | Repeated `Wallet.Sync: [object ErrorEvent]` | Press Ctrl+C and run `./nightcast doctor --network preprod`; it shows which connection fails and why. |
 | `doctor` reports a problem, or a command says `did not answer` | Check your internet connection and run `./nightcast doctor --network preprod` again; Preprod is sometimes briefly down. |
 | `Cannot connect to the Docker daemon` | Open Docker Desktop and check WSL integration is on for Ubuntu (step 2). |
