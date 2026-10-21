@@ -14,12 +14,10 @@ const sha = (...parts: Buffer[]): string => createHash('sha256').update(Buffer.c
 const hex = (u: Uint8Array): string => Buffer.from(u).toString('hex');
 
 describe('persistentHash encoding probe', () => {
-  it('reports how [Bytes<32>, Bytes<32>] is hashed', () => {
+  it('PROBE persistentHash of [Bytes<32>, Bytes<32>] equals plain SHA-256 of the concatenation', () => {
     const secret = new Uint8Array(32).map((_, i) => i + 1);
     const got = hex(pureCircuits.requesterCommitmentOf(secret));
     const plain = sha(pad32('nightcast:requester:v0'), Buffer.from(secret));
-    const summary = `persistentHash([pad,secret]) = ${got}; plain SHA-256(pad||secret) = ${plain}; equal = ${got === plain}`;
-    console.log(`::notice title=persistentHash probe::${summary}`);
-    expect(typeof got).toBe('string');
+    expect(got, `persistentHash([pad,secret]) vs plain SHA-256(pad||secret)`).toBe(plain);
   });
 });
