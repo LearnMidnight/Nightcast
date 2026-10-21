@@ -58,7 +58,6 @@ export const deployNightcastLocked = async (
 ): Promise<{ contractAddress: string; txId: string }> => {
   const built = await createUnprovenDeployTx(providers, {
     compiledContract: compiledNightcast(),
-    privateStateId: NIGHTCAST_PRIVATE_STATE_ID,
     initialPrivateState: {},
     signingKey: sampleSigningKey(), // never used: replaced below before anything is sent
     args: [params.oraclePublicKey, params.operatorCommitment, params.minWindow, params.maxWindow],
