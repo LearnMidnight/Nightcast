@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 /**
- * nightcast-deploy: deploy Nightcast, lock it, activate the oracle key and
- * publish fingerprints anyone can check.
+ * nightcast-deploy: deploy Nightcast already locked (no admin key ever
+ * exists), activate the oracle key and publish fingerprints anyone can check.
  *
  *   ./nightcast deploy     --network preprod --oracle oracle.secret --operator operator.secret
  *   ./nightcast accept-key --network preprod --oracle oracle.secret
@@ -32,7 +32,6 @@ import { fileURLToPath } from 'node:url';
 import { parseArgs } from 'node:util';
 import { fromHex, oraclePublicKey, parseOracleSecretKey, pureCircuits, Status, toHex } from '@nightcast/contract';
 import { pickNumbers } from '@nightcast/sdk';
-import { sampleSigningKey } from '@midnight-ntwrk/midnight-js-protocol/ledger';
 import { indexerPublicDataProvider } from '@midnight-ntwrk/midnight-js-indexer-public-data-provider';
 import { setNetworkId } from '@midnight-ntwrk/midnight-js/network-id';
 import { compilerInfo, type Fingerprints, localFingerprints } from './fingerprints.js';
@@ -59,13 +58,14 @@ import {
 } from './network.js';
 import { currentCommit, type DeploymentRecord, readRecord, recordPath, writeRecord } from './record.js';
 import { describeRequest, readRequest, startOracleService, submitRequest, waitForResult } from './service.js';
-import { acceptOracleKey, deployNightcast } from './steps.js';
+import { acceptOracleKey, deployNightcastLocked } from './steps.js';
 import { formatChecks, verifyDeployment } from './verify.js';
 
 const USAGE = `usage:
   ./nightcast deploy       --network <${NETWORKS.join('|')}> --oracle <file> --operator <file> --wallet <file> [--min 60] [--max 86400] [--accept] [--proof-server-port <port>]
   ./nightcast accept-key   --network <network> --oracle <oracle secret file> --wallet <file> [--proof-server-port <port>]
   ./nightcast lock         --network <network> --maintenance-key-file <file> --wallet <file> [--proof-server-port <port>]
+                           (only for contracts deployed by older versions, which locked in a second transaction)
   ./nightcast verify       --network <network> [--address <contract address>]
   ./nightcast fingerprints
   ./nightcast doctor       --network <network> [--proof-server-port <port>]
@@ -200,24 +200,6 @@ const networkArg = (value: string | undefined): Network => {
 
 const portArg = (value: string | undefined): number | undefined => (value ? Number.parseInt(value, 10) : undefined);
 
-/**
- * Keep the one-time maintenance key on disk (mode 600) from before the deploy
- * until the lock is confirmed, so an interrupted or failed lock can always be
- * retried with `./nightcast lock`. Deleted once the authority is locked.
- */
-const maintenanceKeyFile = (network: Network): string => {
-  const dir = join(process.cwd(), '.nightcast');
-  mkdirSync(dir, { recursive: true, mode: 0o700 });
-  return join(dir, `${network}-${new Date().toISOString().replace(/[:.]/g, '-')}-maintenance.key`);
-};
-
-const writeMaintenanceKey = (path: string, network: Network, key: string, contractAddress?: string): void => {
-  writeFileSync(path, JSON.stringify({ network, contractAddress: contractAddress ?? null, maintenanceKey: key }) + '\n', {
-    mode: 0o600,
-  });
-  chmodSync(path, 0o600);
-};
-
 const withSession = async <T>(network: Network, proofServerPort: number | undefined, run: (s: Session) => Promise<T>) => {
   const session = await connect(network, { proofServerPort, projectId: projectIdFor(network) });
   try {
@@ -310,15 +292,12 @@ const main = async (argv: string[]): Promise<number> => {
         const wallet = await openWallet(session, walletOptions(network, walletSeed(values.wallet)));
         try {
           const providers = nightcastProviders(session, wallet);
-          const maintenanceKey = sampleSigningKey();
-          const keyPath = maintenanceKeyFile(network);
-          writeMaintenanceKey(keyPath, network, maintenanceKey);
-          session.logger.info(`One-time admin key saved to ${keyPath} until the lock is confirmed`);
-          session.logger.info('Deploying Nightcast...');
-          const deployed = await deployNightcast(providers, params, maintenanceKey);
-          writeMaintenanceKey(keyPath, network, maintenanceKey, deployed.contractAddress);
-          session.logger.info(`Deployed at ${deployed.contractAddress} (tx ${deployed.txId})`);
+          session.logger.info('Deploying Nightcast, locked from the start (no admin key ever exists)...');
+          const deployed = await deployNightcastLocked(providers, params);
+          session.logger.info(`Deployed at ${deployed.contractAddress} (tx ${deployed.txId}); nobody can change its code`);
 
+          const onChain = await providers.publicDataProvider.queryContractState(deployed.contractAddress);
+          const authority = onChain!.maintenanceAuthority;
           const record: DeploymentRecord = {
             network,
             contractAddress: deployed.contractAddress,
@@ -331,35 +310,16 @@ const main = async (argv: string[]): Promise<number> => {
               minWindow: params.minWindow.toString(),
               maxWindow: params.maxWindow.toString(),
             },
-            transactions: { deploy: deployed.txId },
+            // Locked in the deploy transaction itself, so there is no separate lock transaction.
+            transactions: { deploy: deployed.txId, lockAuthority: deployed.txId },
+            maintenanceAuthority: {
+              committeeSize: authority.committee.length,
+              threshold: authority.threshold,
+              counter: authority.counter.toString(),
+            },
             verifierKeys: fingerprints,
           };
           writeRecord(record);
-
-          session.logger.info('Waiting for the wallet to see the deploy and get its DUST back...');
-          if (!(await waitForSpendableDust(wallet, session.logger))) session.logger.warn('The wallet still shows no spendable DUST; trying anyway.');
-          session.logger.info('Locking the maintenance authority...');
-          try {
-            const locked = await lockMaintenanceAuthority(providers, deployed.contractAddress, deployed.maintenanceKey, {
-              onStage: (m) => session.logger.info(m),
-            });
-            record.transactions.lockAuthority = locked.txId;
-            record.maintenanceAuthority = {
-              committeeSize: locked.authority.committee.length,
-              threshold: locked.authority.threshold,
-              counter: locked.authority.counter.toString(),
-            };
-            writeRecord(record);
-            rmSync(keyPath, { force: true });
-            session.logger.info(`Locked (tx ${locked.txId}); nobody can change the contract's code any more`);
-          } catch (err) {
-            session.logger.error(
-              `Locking failed: ${err instanceof Error ? err.message : String(err)}. The one-time maintenance key is in ${keyPath}; ` +
-                `retry with \`./nightcast lock --network ${network} --maintenance-key-file ${keyPath} --wallet <wallet file>\` ` +
-                `(it deletes the file once locked).`,
-            );
-            return 1;
-          }
 
           if (values.accept) {
             await waitForSpendableDust(wallet, session.logger);

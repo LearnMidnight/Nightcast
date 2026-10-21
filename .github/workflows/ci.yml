@@ -180,7 +180,7 @@ jobs:
           ./nightcast deploy --network local --oracle "$RUNNER_TEMP/oracle.secret" --operator "$RUNNER_TEMP/operator.secret" --accept
           node -e '
             const r = require(process.env.NIGHTCAST_DEPLOYMENTS_DIR + "/local.json");
-            const ok = r.transactions.deploy && r.transactions.lockAuthority && r.transactions.acceptOracleKey && r.maintenanceAuthority.committeeSize === 0;
+            const ok = r.transactions.deploy && r.transactions.lockAuthority === r.transactions.deploy && r.transactions.acceptOracleKey && r.maintenanceAuthority.committeeSize === 0 && r.maintenanceAuthority.counter === "0";
             console.log(`::notice title=CLI deploy::${r.contractAddress} locked=${r.maintenanceAuthority.committeeSize === 0} circuits=${Object.keys(r.verifierKeys).length}`);
             process.exit(ok ? 0 : 1);
           '

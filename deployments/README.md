@@ -8,8 +8,8 @@ One file per network, written by `nightcast-deploy` and committed so anyone can 
 | `sourceCommit` | The commit it was built from (`-dirty` means uncommitted changes) |
 | `compiler` | Compact compiler, language and runtime versions |
 | `parameters` | Constructor arguments: oracle public key, operator commitment, request windows |
-| `transactions` | Deploy, authority-lock and key-acceptance transaction ids |
-| `maintenanceAuthority` | The authority after locking: an empty committee with threshold 1, which can never sign |
+| `transactions` | Deploy, authority-lock and key-acceptance transaction ids. The contract is deployed already locked, so `lockAuthority` is the deploy transaction itself |
+| `maintenanceAuthority` | An empty committee with threshold 1, which can never sign, set in the deploy transaction (counter 0) |
 | `verifierKeys` | SHA-256 of each circuit's verifier key (the code's fingerprints) |
 
 ## Check a deployment yourself
