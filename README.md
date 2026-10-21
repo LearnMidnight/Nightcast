@@ -6,6 +6,14 @@ It works like [Chainlink VRF](https://docs.chain.link/vrf): you request randomne
 
 > **Status: v0, experimental and unaudited.** Don't secure real value with it yet. Read the [threat model](docs/SPEC.md#4-threat-model) first, especially [withholding](docs/SPEC.md#42-withholding-and-aborts).
 
+## Live deployment
+
+| Network | Contract | Status |
+|---|---|---|
+| Preprod | `67e02b18db442101bfe3e099eade44033880f0bdb67bf0d84e4a6d87b49d4a1f` | Deployed locked (no admin key ever existed), oracle key active, first request fulfilled 22 Oct 2026 |
+
+Check it yourself with `./nightcast verify --network preprod` (record: [deployments/preprod.json](deployments/preprod.json)).
+
 ## How it works
 
 ```
