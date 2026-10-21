@@ -51,8 +51,20 @@ export const walletStateDir = (): string =>
 export const walletStateFile = (network: string, seed: string): string =>
   join(walletStateDir(), `${network}-${createHash('sha256').update(`nightcast:${network}:${seed}`).digest('hex').slice(0, 16)}.json`);
 
-/** Same mapping as the testkit's (not exported there). */
+/**
+ * How many indexer events the shielded and dust wallets apply at once. The SDK
+ * default is 10 with a pause between batches, and each batch has a fixed cost,
+ * which caps a first sync at roughly 20 events a second (over a day for
+ * Preprod's 1.7 million dust events). NIGHTCAST_SYNC_BATCH overrides it.
+ */
+export const syncBatchSize = (): number => {
+  const n = Number.parseInt(process.env.NIGHTCAST_SYNC_BATCH ?? '', 10);
+  return Number.isFinite(n) && n > 0 ? n : 500;
+};
+
+/** Same mapping as the testkit's (not exported there), plus larger sync batches. */
 const walletConfiguration = (env: EnvironmentConfiguration): DefaultConfiguration => ({
+  batchUpdates: { size: syncBatchSize(), timeout: 100, spacing: 0 },
   indexerClientConnection: { indexerHttpUrl: env.indexer, indexerWsUrl: env.indexerWS },
   provingServerUrl: new URL(env.proofServer),
   networkId: env.walletNetworkId,
