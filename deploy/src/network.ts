@@ -449,8 +449,20 @@ export const walletAddress = (wallet: MidnightWalletProvider): string =>
  * on chain and synced), so the next transaction can pay its fee.
  */
 export const waitForSpendableDust = async (wallet: MidnightWalletProvider, timeoutMs = 5 * 60_000): Promise<boolean> => {
+  // Coins spent by a transaction that isn't confirmed yet are "pending"; wait
+  // until none are and at least one coin is available to pay with.
   const ready = firstValueFrom(
-    wallet.wallet.state().pipe(filter((s) => s.isSynced && s.dust.balance(new Date()) > 0n)),
+    wallet.wallet
+      .state()
+      .pipe(
+        filter(
+          (s) =>
+            s.isSynced &&
+            s.dust.pendingCoins.length === 0 &&
+            s.dust.availableCoins.length > 0 &&
+            s.dust.balance(new Date()) > 0n,
+        ),
+      ),
   ).then(() => true);
   const timedOut = new Promise<boolean>((resolve) => setTimeout(() => resolve(false), timeoutMs).unref());
   return Promise.race([ready, timedOut]);
