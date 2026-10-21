@@ -1,5 +1,10 @@
 import { describe, it, expect } from 'vitest';
-import { generateOracleSecretKey, generateOperatorSecret, pureCircuits as nightcast } from '@nightcast/contract';
+import {
+  generateOracleSecretKey,
+  generateOperatorSecret,
+  oraclePublicKey,
+  pureCircuits as nightcast,
+} from '@nightcast/contract';
 import { combineDrawSeed, drawMidnight7, seedCommitment } from '@nightcast/sdk';
 import { DrawStatus, pureCircuits } from '../managed/lotto/contract/index.js';
 import { LottoSimulator } from '../simulator.js';
@@ -14,35 +19,56 @@ const bytes = (label: string): Uint8Array => {
 };
 
 const PRICE = 1_000_000n; // 1 tNIGHT
+const MIN_SALES = 600n;
+const MAX_SALES = 30n * 86_400n;
 const REVEAL = 3_600n;
 const DRAW = 3_600n;
 const CLAIM = 86_400n;
+const SALES = 3_600; // how long the tests' draws sell for
 const PLAYER = bytes('player wallet');
 const OTHER = bytes('someone else');
 
-const setup = (opts: { acceptKey?: boolean } = {}) => {
+const setup = (opts: { acceptKey?: boolean; linePrice?: bigint } = {}) => {
   const oracleSecretKey = generateOracleSecretKey();
   const organiserSecret = generateOperatorSecret();
   const sim = new LottoSimulator({
     oracleSecretKey,
     organiserSecret,
-    linePrice: PRICE,
+    linePrice: opts.linePrice ?? PRICE,
+    minSales: MIN_SALES,
+    maxSales: MAX_SALES,
     revealWindow: REVEAL,
     drawWindow: DRAW,
     claimWindow: CLAIM,
-    ...opts,
+    acceptKey: opts.acceptKey,
   });
   return { sim, oracleSecretKey };
 };
 
-/** Open draw `n` closing in an hour; returns its seed and the numbers it will draw. */
-const openWithSeed = (sim: LottoSimulator, sk: bigint, n = 1n, label = `seed ${n}`) => {
+/** Open the next draw (closing in an hour); returns its number, seed and the numbers it will draw. */
+const openWithSeed = (sim: LottoSimulator, sk: bigint, label = `seed ${sim.getLedger().lastDraw + 1n}`) => {
   const seed = bytes(label);
-  const close = BigInt(sim.now + 3_600);
-  sim.openDraw(n, close, fromHex(seedCommitment(hex(seed))));
+  const close = BigInt(sim.now + SALES);
+  const n = sim.openDraw(close, fromHex(seedCommitment(hex(seed))));
   const output = nightcast.evaluate(sk, sim.alphaOf(n, seed));
   const draw = drawMidnight7(combineDrawSeed(hex(seed), output));
-  return { seed, close, output, draw };
+  return { n, seed, close, output, draw };
+};
+
+const closeSales = (sim: LottoSimulator) => sim.advance(SALES + 1);
+
+/** Run a draw from sales close to numbers. */
+const drawIt = (sim: LottoSimulator, n: bigint, seed: Uint8Array) => {
+  closeSales(sim);
+  sim.requestDraw(n, seed);
+  sim.fulfilDraw(n);
+  return sim.computeNumbers(n);
+};
+
+/** Close the claim window and settle. */
+const settle = (sim: LottoSimulator, n: bigint) => {
+  sim.advance(Number(CLAIM) + 1);
+  sim.settleDraw(n);
 };
 
 /** A line that hits exactly `match` main numbers, with or without the Moonball. */
@@ -52,13 +78,11 @@ const lineHitting = (numbers: number[], moonball: number, match: number, withMoo
   return { numbers: [...hits, ...misses], moonball: withMoonball ? moonball : (moonball % 20) + 1 };
 };
 
-const closeSales = (sim: LottoSimulator) => sim.advance(3_601);
-
 describe('the draw', () => {
-  it('uses the same VRF as Nightcast and the site\'s number rule', () => {
+  it("uses the same VRF as Nightcast and the site's number rule", () => {
     const { sim, oracleSecretKey } = setup();
-    for (let n = 1n; n <= 4n; n++) {
-      const { seed, output, draw } = openWithSeed(sim, oracleSecretKey, n, `vrf check ${n}`);
+    for (let i = 0; i < 4; i++) {
+      const { n, seed, output, draw } = openWithSeed(sim, oracleSecretKey, `vrf check ${i}`);
       closeSales(sim);
       sim.requestDraw(n, seed);
       expect(hex(sim.fulfilDraw(n))).toBe(hex(output));
@@ -68,72 +92,135 @@ describe('the draw', () => {
       const d = sim.getLedger().draws.lookup(n);
       expect(d.status).toBe(DrawStatus.drawn);
       expect(d.numbers.map(Number)).toEqual(draw.numbers);
+      settle(sim, n);
     }
   });
 
-  it('only accepts the committed seed, and only after sales close', () => {
+  it('only accepts the committed seed, from the organiser, after sales close', () => {
     const { sim, oracleSecretKey } = setup();
-    const { seed } = openWithSeed(sim, oracleSecretKey);
-    expect(() => sim.requestDraw(1n, seed)).toThrow(/sales are still open/);
+    const { n, seed } = openWithSeed(sim, oracleSecretKey);
+    expect(() => sim.requestDraw(n, seed)).toThrow(/sales are still open/);
     closeSales(sim);
-    expect(() => sim.requestDraw(1n, bytes('a different seed'))).toThrow(/does not match the commitment/);
-    sim.requestDraw(1n, seed);
-    expect(sim.getLedger().draws.lookup(1n).status).toBe(DrawStatus.requested);
-    expect(() => sim.requestDraw(1n, seed)).toThrow(/not open/);
+    expect(() => sim.requestDraw(n, bytes('a different seed'))).toThrow(/does not match the commitment/);
+    // Not even the oracle may fix the VRF input (SPEC §2: it could pick among hashToCurve outputs).
+    expect(() => sim.requestDraw(n, seed, sim.anyone)).toThrow();
+    expect(() => sim.requestDraw(n, seed, sim.oracle)).toThrow();
+    sim.requestDraw(n, seed);
+    expect(sim.getLedger().draws.lookup(n).status).toBe(DrawStatus.requested);
+    expect(() => sim.requestDraw(n, seed)).toThrow(/not open/);
   });
 
   it('needs an accepted oracle key, and only that oracle can answer', () => {
     const { sim, oracleSecretKey } = setup({ acceptKey: false });
-    const { seed } = openWithSeed(sim, oracleSecretKey);
+    const { n, seed } = openWithSeed(sim, oracleSecretKey);
     closeSales(sim);
-    expect(() => sim.requestDraw(1n, seed)).toThrow(/no active oracle key/);
+    expect(() => sim.requestDraw(n, seed)).toThrow(/no active oracle key/);
     expect(() => sim.acceptOracleKey({ oracleSecretKey: generateOracleSecretKey() })).toThrow(/does not match/);
     sim.acceptOracleKey();
-    sim.requestDraw(1n, seed);
-    expect(() => sim.fulfilDraw(1n, { oracleSecretKey: generateOracleSecretKey() })).toThrow(/not the oracle/);
-    sim.fulfilDraw(1n);
+    sim.requestDraw(n, seed);
+    expect(() => sim.fulfilDraw(n, { oracleSecretKey: generateOracleSecretKey() })).toThrow(/not the oracle/);
+    sim.fulfilDraw(n);
   });
 
-  it('only the organiser opens draws, once each, in the future', () => {
+  it('lets the organiser rotate the oracle key; a requested draw keeps its key', () => {
     const { sim, oracleSecretKey } = setup();
-    const close = BigInt(sim.now + 3_600);
-    expect(() => sim.openDraw(1n, close, bytes('c'), { organiserSecret: generateOperatorSecret() })).toThrow(/not the organiser/);
-    expect(() => sim.openDraw(1n, BigInt(sim.now - 1), bytes('c'))).toThrow(/in the past/);
-    openWithSeed(sim, oracleSecretKey);
-    expect(() => sim.openDraw(1n, close, bytes('c'))).toThrow(/already exists/);
+    const { n, seed } = openWithSeed(sim, oracleSecretKey);
+    closeSales(sim);
+    sim.requestDraw(n, seed);
+    const next = generateOracleSecretKey();
+    expect(() => sim.proposeOracleKey(oraclePublicKey(next), sim.anyone)).toThrow();
+    sim.proposeOracleKey(oraclePublicKey(next));
+    sim.acceptOracleKey({ oracleSecretKey: next });
+    expect(() => sim.fulfilDraw(n, { oracleSecretKey: next })).toThrow(/not the oracle/);
+    sim.fulfilDraw(n);
+  });
+
+  it('starts the claim window when the numbers are computed, within the clock tolerance', () => {
+    const { sim, oracleSecretKey } = setup();
+    const { n, seed, draw } = openWithSeed(sim, oracleSecretKey);
+    const t = makeTicket(n, [lineHitting(draw.numbers, draw.moonball, 3, true)]);
+    sim.buyTicket(t);
+    closeSales(sim);
+    sim.requestDraw(n, seed);
+    sim.fulfilDraw(n);
+    // Computed late, just before the deadline for computing...
+    sim.advance(Number(REVEAL + DRAW + CLAIM) - 10);
+    expect(() => sim.computeNumbers(n, BigInt(sim.now + 1_000))).toThrow(/clock/);
+    expect(() => sim.computeNumbers(n, BigInt(sim.now - 1_000))).toThrow(/clock/);
+    sim.computeNumbers(n);
+    // ...winners still get the whole claim window from then.
+    sim.advance(Number(CLAIM) - 100);
+    expect(sim.registerWin(t, 0n, PLAYER)).toBe(8n);
+    expect(() => sim.settleDraw(n)).toThrow(/still open/);
+    sim.advance(101);
+    sim.settleDraw(n);
+  });
+});
+
+describe('opening draws', () => {
+  it('only the organiser opens draws, numbered in order', () => {
+    const { sim, oracleSecretKey } = setup();
+    const close = BigInt(sim.now + SALES);
+    expect(() => sim.openDraw(close, bytes('c'), { organiserSecret: generateOperatorSecret() })).toThrow(/not the organiser/);
+    const { n } = openWithSeed(sim, oracleSecretKey);
+    expect(n).toBe(1n);
+    expect(sim.getLedger().lastDraw).toBe(1n);
+  });
+
+  it('enforces the minimum and maximum sales period', () => {
+    const { sim } = setup();
+    expect(() => sim.openDraw(BigInt(sim.now - 1), bytes('a'))).toThrow();
+    expect(() => sim.openDraw(BigInt(sim.now) + MIN_SALES - 1n, bytes('a'))).toThrow(/too short/);
+    expect(() => sim.openDraw(BigInt(sim.now) + MAX_SALES + 1n, bytes('a'))).toThrow(/too long/);
+    expect(sim.openDraw(BigInt(sim.now) + MIN_SALES + 1n, bytes('a'))).toBe(1n);
+  });
+
+  it("runs one draw at a time, so the rollover can't be steered", () => {
+    const { sim, oracleSecretKey } = setup();
+    const first = openWithSeed(sim, oracleSecretKey);
+    expect(() => openWithSeed(sim, oracleSecretKey, 'second')).toThrow(/previous draw isn't finished/);
+    drawIt(sim, first.n, first.seed);
+    expect(() => openWithSeed(sim, oracleSecretKey, 'second')).toThrow(/previous draw isn't finished/);
+    settle(sim, first.n);
+    expect(openWithSeed(sim, oracleSecretKey, 'second').n).toBe(2n);
+  });
+
+  it('never reuses a seed commitment', () => {
+    const { sim, oracleSecretKey } = setup();
+    const first = openWithSeed(sim, oracleSecretKey, 'reused');
+    drawIt(sim, first.n, first.seed);
+    settle(sim, first.n);
+    expect(() => openWithSeed(sim, oracleSecretKey, 'reused')).toThrow(/already used/);
   });
 });
 
 describe('tickets', () => {
-  it('sell only while the draw is open, and add to the pool', () => {
+  it('sell only while the draw is open', () => {
     const { sim, oracleSecretKey } = setup();
-    openWithSeed(sim, oracleSecretKey);
-    sim.buyTicket(makeTicket(1, [quickPick(), quickPick(), quickPick()]));
-    sim.buyTicket(makeTicket(1, [quickPick()]));
-    const d = sim.getLedger().draws.lookup(1n);
-    expect(d.lines).toBe(4n);
-    expect(d.sales).toBe(4n * PRICE);
+    const { n } = openWithSeed(sim, oracleSecretKey);
+    sim.buyTicket(makeTicket(n, [quickPick(), quickPick(), quickPick()]));
+    sim.buyTicket(makeTicket(n, [quickPick()]));
+    expect(sim.linesSold(n)).toBe(4n);
     expect(sim.getLedger().tickets.size()).toBe(2n);
     closeSales(sim);
-    expect(() => sim.buyTicket(makeTicket(1, [quickPick()]))).toThrow(/sales have closed/);
-    expect(() => sim.buyTicket(makeTicket(2, [quickPick()]))).toThrow(/unknown draw/);
+    expect(() => sim.buyTicket(makeTicket(n, [quickPick()]))).toThrow(/sales have closed/);
+    expect(() => sim.buyTicket(makeTicket(n + 1n, [quickPick()]))).toThrow(/unknown draw/);
   });
 
   it('keep the numbers secret: only a commitment is stored', () => {
     const { sim, oracleSecretKey } = setup();
-    openWithSeed(sim, oracleSecretKey);
-    const t = makeTicket(1, [{ numbers: [1, 2, 3, 4, 5, 6, 7], moonball: 8 }]);
+    const { n } = openWithSeed(sim, oracleSecretKey);
+    const t = makeTicket(n, [{ numbers: [1, 2, 3, 4, 5, 6, 7], moonball: 8 }]);
     const c = sim.buyTicket(t);
     expect(hex(c)).toBe(hex(sim.commitmentOf(t)));
-    const stored = sim.getLedger().tickets.lookup(c);
-    expect(stored).toEqual({ drawId: 1n, count: 1n, refunded: false });
+    expect(sim.getLedger().tickets.lookup(c)).toEqual({ drawId: n, count: 1n, refunded: false });
     expect(() => sim.buyTicket(t)).toThrow(/already bought/);
   });
 
   it('reject malformed tickets', () => {
     const { sim, oracleSecretKey } = setup();
-    openWithSeed(sim, oracleSecretKey);
-    const good = makeTicket(1, [quickPick()]);
+    const { n } = openWithSeed(sim, oracleSecretKey);
+    const good = makeTicket(n, [quickPick()]);
     const bad = (patch: (t: typeof good) => void) => {
       const t = structuredClone(good);
       patch(t);
@@ -146,31 +233,28 @@ describe('tickets', () => {
     expect(() => sim.buyTicket(bad((t) => (t.lines[0].numbers = [0n, 2n, 3n, 4n, 5n, 6n, 7n])))).toThrow(/invalid ticket/);
     expect(() => sim.buyTicket(bad((t) => (t.lines[0].moonball = 21n)))).toThrow(/invalid ticket/);
     expect(() => sim.buyTicket(bad((t) => (t.lines[1].moonball = 3n)))).toThrow(/invalid ticket/);
-    expect(() => makeTicket(1, [{ numbers: [1, 1, 2, 3, 4, 5, 6], moonball: 1 }])).toThrow(/distinct/);
+    expect(() => makeTicket(n, [{ numbers: [1, 1, 2, 3, 4, 5, 6], moonball: 1 }])).toThrow(/distinct/);
   });
 });
 
 describe('prizes', () => {
   it('pays every division its share, split between its lines, and rolls the rest over', () => {
     const { sim, oracleSecretKey } = setup();
-    const { seed, draw } = openWithSeed(sim, oracleSecretKey);
+    const { n, seed, draw } = openWithSeed(sim, oracleSecretKey);
     const { numbers, moonball } = draw;
 
     // One ticket with a division 1 line and a losing line; two division 9
     // lines on separate tickets; one division 7 line; and filler.
-    const jackpot = makeTicket(1, [lineHitting(numbers, moonball, 7, true), lineHitting(numbers, moonball, 0, false)]);
-    const nineA = makeTicket(1, [lineHitting(numbers, moonball, 2, true)]);
-    const nineB = makeTicket(1, [lineHitting(numbers, moonball, 2, true)]);
-    const seven = makeTicket(1, [lineHitting(numbers, moonball, 5, false)]);
-    const filler = makeTicket(1, [lineHitting(numbers, moonball, 1, false), lineHitting(numbers, moonball, 0, false)]);
+    const jackpot = makeTicket(n, [lineHitting(numbers, moonball, 7, true), lineHitting(numbers, moonball, 0, false)]);
+    const nineA = makeTicket(n, [lineHitting(numbers, moonball, 2, true)]);
+    const nineB = makeTicket(n, [lineHitting(numbers, moonball, 2, true)]);
+    const seven = makeTicket(n, [lineHitting(numbers, moonball, 5, false)]);
+    const filler = makeTicket(n, [lineHitting(numbers, moonball, 1, false), lineHitting(numbers, moonball, 0, false)]);
     for (const t of [jackpot, nineA, nineB, seven, filler]) sim.buyTicket(t);
     const pool = 7n * PRICE;
 
     expect(divisionFor(lineHitting(numbers, moonball, 7, true), numbers, moonball)).toBe(1);
-    closeSales(sim);
-    sim.requestDraw(1n, seed);
-    sim.fulfilDraw(1n);
-    sim.computeNumbers(1n);
+    drawIt(sim, n, seed);
 
     expect(sim.registerWin(jackpot, 0n, PLAYER)).toBe(1n);
     expect(() => sim.registerWin(jackpot, 1n, PLAYER)).toThrow(/did not win/);
@@ -182,15 +266,15 @@ describe('prizes', () => {
     // Without the ticket's preimage nobody can claim it.
     expect(() => sim.registerWin(seven, 0n, OTHER, sim.holder(nineA))).toThrow();
 
-    expect(() => sim.settleDraw(1n)).toThrow(/still open/);
-    sim.advance(Number(REVEAL + DRAW + CLAIM));
+    expect(() => sim.settleDraw(n)).toThrow(/still open/);
+    sim.advance(Number(CLAIM) + 1);
     expect(() => sim.registerWin(filler, 0n, PLAYER)).toThrow(/closed/);
-    sim.settleDraw(1n);
+    sim.settleDraw(n);
 
-    const d = sim.getLedger().draws.lookup(1n);
     const winners = [1n, 0n, 0n, 0n, 0n, 0n, 1n, 0n, 2n];
-    expect(d.winners).toEqual(winners);
+    expect(sim.winners(n)).toEqual(winners);
     const expected = prizesFor(pool, winners);
+    const d = sim.getLedger().draws.lookup(n);
     expect(d.prizes).toEqual(expected);
     expect(d.prizes[0]).toBe((pool * 3000n) / 10_000n);
     expect(d.prizes[8]).toBe((pool * 1750n) / 10_000n / 2n);
@@ -207,37 +291,32 @@ describe('prizes', () => {
 
   it('carries unwon divisions into the next draw', () => {
     const { sim, oracleSecretKey } = setup();
-    const first = openWithSeed(sim, oracleSecretKey, 1n);
-    sim.buyTicket(makeTicket(1, [lineHitting(first.draw.numbers, first.draw.moonball, 0, false)]));
-    closeSales(sim);
-    sim.requestDraw(1n, first.seed);
-    sim.fulfilDraw(1n);
-    sim.computeNumbers(1n);
-    sim.advance(Number(REVEAL + DRAW + CLAIM));
-    sim.settleDraw(1n);
+    const first = openWithSeed(sim, oracleSecretKey);
+    sim.buyTicket(makeTicket(first.n, [lineHitting(first.draw.numbers, first.draw.moonball, 0, false)]));
+    drawIt(sim, first.n, first.seed);
+    settle(sim, first.n);
     expect(sim.getLedger().carry).toBe(PRICE);
 
-    openWithSeed(sim, oracleSecretKey, 2n);
-    expect(sim.getLedger().draws.lookup(2n).carried).toBe(PRICE);
+    const second = openWithSeed(sim, oracleSecretKey);
+    expect(sim.getLedger().draws.lookup(second.n).carried).toBe(PRICE);
     expect(sim.getLedger().carry).toBe(0n);
   });
 
-  it("can't pay before settlement or settle twice", () => {
-    const { sim, oracleSecretKey } = setup();
-    const { seed, draw } = openWithSeed(sim, oracleSecretKey);
-    const t = makeTicket(1, [lineHitting(draw.numbers, draw.moonball, 7, true)]);
+  it("can't pay before settlement or settle twice; a zero prize is marked paid", () => {
+    // 1 STAR a line, so division 9's share of a 1-STAR pool rounds to 0.
+    const { sim, oracleSecretKey } = setup({ linePrice: 1n });
+    const { n, seed, draw } = openWithSeed(sim, oracleSecretKey);
+    const t = makeTicket(n, [lineHitting(draw.numbers, draw.moonball, 2, true)]);
     sim.buyTicket(t);
-    closeSales(sim);
-    sim.requestDraw(1n, seed);
-    sim.fulfilDraw(1n);
-    sim.computeNumbers(1n);
+    drawIt(sim, n, seed);
     sim.registerWin(t, 0n, PLAYER);
     const line = pureCircuits.lineId(sim.commitmentOf(t), 0n);
     expect(() => sim.payWin(line)).toThrow(/not settled/);
-    sim.advance(Number(REVEAL + DRAW + CLAIM));
-    sim.settleDraw(1n);
-    expect(() => sim.settleDraw(1n)).toThrow(/not drawn/);
+    settle(sim, n);
+    expect(() => sim.settleDraw(n)).toThrow(/not drawn/);
+    expect(sim.getLedger().draws.lookup(n).prizes[8]).toBe(0n);
     sim.payWin(line);
+    expect(sim.getLedger().wins.lookup(line).paid).toBe(true);
   });
 });
 
@@ -245,21 +324,21 @@ describe('refunds, never redraws', () => {
   const boughtDraw = () => {
     const ctx = setup();
     const opened = openWithSeed(ctx.sim, ctx.oracleSecretKey);
-    const a = makeTicket(1, [quickPick(), quickPick()]);
-    const b = makeTicket(1, [quickPick()]);
+    const a = makeTicket(opened.n, [quickPick(), quickPick()]);
+    const b = makeTicket(opened.n, [quickPick()]);
     ctx.sim.buyTicket(a);
     ctx.sim.buyTicket(b);
     return { ...ctx, ...opened, a, b };
   };
 
   it('voids a draw whose seed is never revealed, and refunds each ticket once', () => {
-    const { sim, a, b } = boughtDraw();
+    const { sim, n, a, b } = boughtDraw();
     closeSales(sim);
-    expect(() => sim.voidDraw(1n)).toThrow(/can't be voided/);
+    expect(() => sim.voidDraw(n)).toThrow(/can't be voided/);
     expect(() => sim.refundTicket(a, PLAYER)).toThrow(/not void/);
     sim.advance(Number(REVEAL));
-    sim.voidDraw(1n);
-    expect(sim.getLedger().draws.lookup(1n).status).toBe(DrawStatus.voided);
+    sim.voidDraw(n);
+    expect(sim.getLedger().draws.lookup(n).status).toBe(DrawStatus.voided);
     sim.refundTicket(a, PLAYER);
     expect(sim.getLedger().tickets.lookup(sim.commitmentOf(a)).refunded).toBe(true);
     expect(() => sim.refundTicket(a, PLAYER)).toThrow(/already refunded/);
@@ -268,47 +347,52 @@ describe('refunds, never redraws', () => {
   });
 
   it('voids a draw the oracle never answers, and it stays void', () => {
-    const { sim, seed } = boughtDraw();
+    const { sim, n, seed } = boughtDraw();
     closeSales(sim);
-    sim.requestDraw(1n, seed);
+    sim.requestDraw(n, seed);
     sim.advance(Number(REVEAL + DRAW) - 10);
-    expect(() => sim.voidDraw(1n)).toThrow(/can't be voided/);
+    expect(() => sim.voidDraw(n)).toThrow(/can't be voided/);
     sim.advance(10);
-    expect(() => sim.fulfilDraw(1n)).toThrow(/deadline has passed/);
-    sim.voidDraw(1n);
-    expect(() => sim.fulfilDraw(1n)).toThrow(/not requested/);
-    expect(() => sim.requestDraw(1n, seed)).toThrow(/not open/);
+    expect(() => sim.fulfilDraw(n)).toThrow(/deadline has passed/);
+    sim.voidDraw(n);
+    expect(() => sim.fulfilDraw(n)).toThrow(/not requested/);
+    expect(() => sim.requestDraw(n, seed)).toThrow(/not open/);
   });
 
   it("doesn't let anyone void an answered draw while it can still be finished", () => {
-    const { sim, seed } = boughtDraw();
+    const { sim, n, seed } = boughtDraw();
     closeSales(sim);
-    sim.requestDraw(1n, seed);
-    sim.fulfilDraw(1n);
+    sim.requestDraw(n, seed);
+    sim.fulfilDraw(n);
     sim.advance(Number(REVEAL + DRAW) + 10);
-    // Past the draw deadline but inside the claim window: a losing player
-    // can't cancel the draw.
-    expect(() => sim.voidDraw(1n)).toThrow(/can't be voided/);
-    sim.computeNumbers(1n);
-    sim.advance(Number(CLAIM));
-    expect(() => sim.voidDraw(1n)).toThrow(/can't be voided/);
+    // Past the draw deadline, before the deadline for computing: a losing
+    // player can't cancel the draw.
+    expect(() => sim.voidDraw(n)).toThrow(/can't be voided/);
+    sim.computeNumbers(n);
+    sim.advance(Number(CLAIM) + 1);
+    expect(() => sim.voidDraw(n)).toThrow(/can't be voided/);
+  });
+
+  it('never allows computing and voiding at the same time', () => {
+    const { sim, n, seed } = boughtDraw();
+    closeSales(sim);
+    sim.requestDraw(n, seed);
+    sim.fulfilDraw(n);
+    sim.advance(Number(REVEAL + DRAW + CLAIM));
+    expect(() => sim.computeNumbers(n)).toThrow(/too late/);
+    sim.voidDraw(n);
   });
 
   it('gives back the rollover a void draw carried', () => {
     const { sim, oracleSecretKey } = setup();
-    const first = openWithSeed(sim, oracleSecretKey, 1n);
-    sim.buyTicket(makeTicket(1, [lineHitting(first.draw.numbers, first.draw.moonball, 0, false)]));
-    closeSales(sim);
-    sim.requestDraw(1n, first.seed);
-    sim.fulfilDraw(1n);
-    sim.computeNumbers(1n);
-    sim.advance(Number(REVEAL + DRAW + CLAIM));
-    sim.settleDraw(1n);
-    openWithSeed(sim, oracleSecretKey, 2n);
+    const first = openWithSeed(sim, oracleSecretKey);
+    sim.buyTicket(makeTicket(first.n, [lineHitting(first.draw.numbers, first.draw.moonball, 0, false)]));
+    drawIt(sim, first.n, first.seed);
+    settle(sim, first.n);
+    const second = openWithSeed(sim, oracleSecretKey);
     expect(sim.getLedger().carry).toBe(0n);
-    sim.advance(3_601 + Number(REVEAL));
-    sim.voidDraw(2n);
+    sim.advance(SALES + 1 + Number(REVEAL));
+    sim.voidDraw(second.n);
     expect(sim.getLedger().carry).toBe(PRICE);
   });
 });
-

@@ -25,6 +25,8 @@ export type LottoSimulatorOptions = {
   organiserSecret: Uint8Array;
   /** Price of one line in STAR (default 1 tNIGHT). */
   linePrice?: bigint;
+  minSales?: bigint;
+  maxSales?: bigint;
   revealWindow?: bigint;
   drawWindow?: bigint;
   claimWindow?: bigint;
@@ -59,6 +61,8 @@ export class LottoSimulator {
       oraclePublicKey(opts.oracleSecretKey),
       pureCircuits.organiserCommitmentOf(opts.organiserSecret),
       opts.linePrice ?? 1_000_000n,
+      opts.minSales ?? 600n,
+      opts.maxSales ?? 2_592_000n,
       opts.revealWindow ?? 3_600n,
       opts.drawWindow ?? 3_600n,
       opts.claimWindow ?? 86_400n,
@@ -99,6 +103,17 @@ export class LottoSimulator {
     return pureCircuits.ticketCommitment({ bytes: this.addressBytes }, t);
   }
 
+  /** Lines sold for a draw. */
+  linesSold(n: bigint): bigint {
+    return this.getLedger().drawLines.lookup(n).read();
+  }
+
+  /** Registered winning lines per division (division 1 first). */
+  winners(n: bigint): bigint[] {
+    const l = this.getLedger();
+    return [1n, 2n, 3n, 4n, 5n, 6n, 7n, 8n, 9n].map((d) => l.winnerCounts.lookup(pureCircuits.winnerKey(n, d)).read());
+  }
+
   alphaOf(drawId: bigint, seed: Uint8Array): Uint8Array {
     return pureCircuits.drawAlpha({ bytes: this.addressBytes }, drawId, seed);
   }
@@ -122,15 +137,20 @@ export class LottoSimulator {
     this.run(as, (ctx) => this.contract.impureCircuits.acceptOracleKey(ctx));
   }
 
-  openDraw(n: bigint, salesClose: bigint, seedCommitment: Uint8Array, as: LottoPrivateState = this.organiser): void {
-    this.run(as, (ctx) => this.contract.impureCircuits.openDraw(ctx, n, salesClose, seedCommitment));
+  proposeOracleKey(key: { x: bigint; y: bigint }, as: LottoPrivateState = this.organiser): void {
+    this.run(as, (ctx) => this.contract.impureCircuits.proposeOracleKey(ctx, key));
+  }
+
+  /** Open the next draw; returns its number. */
+  openDraw(salesClose: bigint, seedCommitment: Uint8Array, as: LottoPrivateState = this.organiser): bigint {
+    return this.run(as, (ctx) => this.contract.impureCircuits.openDraw(ctx, salesClose, seedCommitment));
   }
 
   buyTicket(t: TicketPreimage, as: LottoPrivateState = { pendingTicket: t }): Uint8Array {
     return this.run(as, (ctx) => this.contract.impureCircuits.buyTicket(ctx));
   }
 
-  requestDraw(n: bigint, seed: Uint8Array, as: LottoPrivateState = this.anyone): void {
+  requestDraw(n: bigint, seed: Uint8Array, as: LottoPrivateState = this.organiser): void {
     this.run(as, (ctx) => this.contract.impureCircuits.requestDraw(ctx, n, seed));
   }
 
@@ -138,8 +158,9 @@ export class LottoSimulator {
     return this.run(as, (ctx) => this.contract.impureCircuits.fulfilDraw(ctx, n));
   }
 
-  computeNumbers(n: bigint, as: LottoPrivateState = this.anyone): Numbers {
-    return this.run(as, (ctx) => this.contract.impureCircuits.computeNumbers(ctx, n));
+  /** Compute a draw's numbers; `now` defaults to the simulator's clock. */
+  computeNumbers(n: bigint, now: bigint = BigInt(this.now), as: LottoPrivateState = this.anyone): Numbers {
+    return this.run(as, (ctx) => this.contract.impureCircuits.computeNumbers(ctx, n, now));
   }
 
   registerWin(t: TicketPreimage, index: bigint, recipient: Uint8Array, as: LottoPrivateState = this.holder(t)): bigint {

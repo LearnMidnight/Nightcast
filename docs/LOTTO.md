@@ -11,7 +11,8 @@ Status: design, 22 Oct 2026 (#7). A Midnight 7 + Moonball lottery on Preprod wit
 | Money | tNIGHT (unshielded), a fixed price per line | Shielded payments once they work on Preprod |
 | Prizes | A shared pool: ticket sales plus any rollover, split across all nine divisions; an unwon division rolls over to the next draw | Fixed, organiser-funded jackpot |
 | Privacy | Only a commitment to the numbers is stored at purchase; a winner reveals one line when claiming | |
-| Who draws | Anyone with the revealed seed, once sales close; the oracle answers | Several oracles (Phase 3) |
+| Who draws | The organiser reveals its seed once sales close; the oracle answers | Several oracles (Phase 3) |
+| Draws | One at a time, numbered 1, 2, 3, …; a sales period between set limits | Draws sold ahead |
 
 Why unshielded: shielded kernel operations (`receiveShielded`, `sendShielded`, `mintShieldedToken`) currently fail on Preprod (open forum reports since April 2026), while `receiveUnshielded` / `sendUnshielded` work. So a purchase shows the buyer's address and how many lines they bought, but not their numbers.
 
@@ -23,13 +24,15 @@ open ── sales close ──▶ requested ── oracle ──▶ drawn ──
   └─ no reveal in time ─────┴─ oracle misses its deadline ──▶ void (refunds)
 ```
 
-1. **Open.** The organiser opens draw *n* with its sales-close time and `seedCommitment = SHA-256(seedHex)`, exactly as the site publishes today. The organiser is identified by a commitment to a secret, as in Nightcast.
+1. **Open.** The organiser opens the next draw with its sales-close time and `seedCommitment = SHA-256(seedHex)`, exactly as the site publishes today. The organiser is identified by a commitment to a secret, as in Nightcast. Draws run one at a time: the previous one must be settled or void. The sales period must be between the contract's minimum and maximum (set at deployment), and a seed commitment can never be used twice.
 2. **Buy.** Before sales close, a player sends `price × lines` tNIGHT with a ticket commitment and the number of lines. The commitment binds the draw number, every line and a random salt, so it reveals nothing and can't be reused for another draw.
-3. **Request.** After sales close, anyone holding the seed calls `requestDraw(n, seed)`. The contract checks the seed against the commitment and fixes the VRF input `alpha = H(contract, n, seed)` and its curve point. From here, nobody can change what the draw will be. The organiser publishes the seed when sales close; if it doesn't by the reveal deadline, the draw is void.
-4. **Draw.** The oracle proves `gamma = H·sk` in-circuit before the draw deadline; the contract stores the output and works out the numbers with the site's rule (below).
+3. **Request.** After sales close, the organiser calls `requestDraw(n, seed)`. The contract checks the seed against the commitment and fixes the VRF input `alpha = H(contract, n, seed)` and its curve point. From here, nobody can change what the draw will be. If the organiser doesn't reveal by the reveal deadline, the draw is void.
+
+   Only the organiser may do this. Compact doesn't guarantee that in-circuit `hashToCurve` has a single valid output (SPEC §2). The organiser can't evaluate the VRF, so that freedom is useless to it; the oracle could use it to pick an outcome. (Issue #7 originally said "anyone can trigger the request"; the security review changed this.)
+4. **Draw.** The oracle proves `gamma = H·sk` in-circuit before the draw deadline; the contract stores the output. Then anyone runs `computeNumbers`, which works out the numbers with the site's rule (below). The claim window starts then, so a late computation never shortens it.
 5. **Claim.** During the claim window, a winner proves one of their lines matches enough numbers, without revealing the others, and names where to pay. Each line can be registered once; the contract counts winners per division.
 6. **Settle.** After the window, the pool is split by division shares and each registered line is paid its division's share. Divisions nobody won, and rounding remainders, roll over to the next draw.
-7. **Void.** If the seed isn't revealed by the reveal deadline, or the oracle misses the draw deadline, anyone can void the draw. Every ticket is then refunded in full, and any rollover the draw carried goes back to the carry for the next one. **A void draw is never redrawn** (SPEC §4.2).
+7. **Void.** If the seed isn't revealed by the reveal deadline, the oracle misses the draw deadline, or nobody computes the numbers before the deadline for that, anyone can void the draw. Computing and voiding are never possible at the same moment, so nobody can choose between "finish the draw" and "cancel it" once the outcome is public. Every ticket is then refunded in full, and any rollover the draw carried goes back to the carry for the next one. **A void draw is never redrawn** (SPEC §4.2).
 
 Neither the organiser (no oracle key) nor the oracle (no seed until sales close) can know the numbers while tickets are on sale. Each can still abort; aborting only triggers refunds.
 
@@ -69,21 +72,32 @@ Divisions 2–9 keep the site's relative shares (10/8/8/9/10/10/20/25), scaled t
 
 ## Contract outline
 
-Ledger: `organiser` (commitment), `oracleKey`/`oracleKeyReady`, `linePrice`, `carry`, `draws: Map<drawId, Draw>`, `tickets: Map<commitment, Ticket>`, `wins: Map<lineId, Win>`.
+Ledger: `organiser` (commitment), `oracleKey`/`oracleKeyReady`/`proposedOracleKey`, `linePrice`, sales limits and windows, `carry`, `lastDraw`, `draws: Map<drawId, Draw>`, `drawLines: Map<drawId, Counter>`, `winnerCounts: Map<drawId·16+division, Counter>`, `tickets: Map<commitment, Ticket>`, `wins: Map<lineId, Win>`, `usedCommitments: Set`.
+
+Purchases and claims only add to counters and insert new entries, so many can land in the same block without conflicting; the `Draw` record changes only when the draw moves to its next stage.
 
 Circuits:
-- `acceptOracleKey()`: the oracle proves it holds the key (as in Nightcast).
-- `openDraw(n, salesClose, seedCommitment)`: organiser only.
+- `acceptOracleKey()`: the oracle proves it holds the key (as in Nightcast); `proposeOracleKey(key)`: the organiser proposes a replacement.
+- `openDraw(salesClose, seedCommitment)`: organiser only; returns the new draw's number.
 - `buyTicket(n, commitment, lines)`: before sales close; takes the tNIGHT.
-- `requestDraw(n, seed)`: anyone, after sales close and before the reveal deadline.
+- `requestDraw(n, seed)`: organiser only, after sales close and before the reveal deadline.
 - `fulfilDraw(n)`: the oracle, before the draw deadline; stores the output.
-- `computeNumbers(n)`: anyone; derives and stores the numbers (separate so each circuit stays a manageable size).
+- `computeNumbers(n, now)`: anyone; derives and stores the numbers and starts the claim window (`now` must be within 10 minutes of block time). It's separate because it's the biggest circuit by far (about 145 MB of proving key).
 - `registerWin(n, line, recipient)`: a ticket holder, during the claim window.
 - `settleDraw(n)`: anyone, after the claim window; fixes each division's prize per line and the rollover.
 - `payWin(lineId)`: anyone, after settlement; pays the recorded recipient.
 - `voidDraw(n)` and `refundTicket(n, recipient)`: the refund path.
 
 Deployed locked like Nightcast (no maintenance authority), with its own published fingerprints.
+
+## Trust that remains (v0)
+
+From the security review (22 Oct 2026). The contract can't fix these by itself:
+
+- **The oracle sees the output first and can stay silent.** The draw is then void and refunded. If the oracle or a friend holds tickets, that's a free option to skip draws it doesn't like. Mitigation: an independent oracle, a public record of its missed draws, and deposits it loses for missing one (Phase 3, #9).
+- **An organiser and oracle working together know the numbers during sales.** Keep them independent.
+- **A lost ticket preimage can't be refunded**, and nothing sweeps the money. Players (and agents) must back up their private state.
+- **A claim reveals which line of the ticket won** and the running winner counts per division.
 
 ## Not in v0
 
