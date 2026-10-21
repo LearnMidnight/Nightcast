@@ -140,3 +140,27 @@ describe('Blockfrost endpoints', () => {
     expect(() => blockfrostProjectId('preprod', '/does/not/exist')).toThrow(/does not exist/);
   });
 });
+
+describe('output redaction', () => {
+  it('hides project ids written straight to a stream, as text or bytes', async () => {
+    const { redactingWrite } = await import('../redact-output.js');
+    const seen: unknown[] = [];
+    const write = redactingWrite(((chunk: unknown) => {
+      seen.push(chunk);
+      return true;
+    }) as typeof process.stdout.write);
+    write('RPC-CORE: disconnected from wss://rpc.x/?project_id=nightpreprodABC: 1000\n');
+    write(Buffer.from('url https://x/api/v0?project_id=nightpreprodXYZ&a=1'));
+    write('nothing secret here');
+    expect(seen).toEqual([
+      'RPC-CORE: disconnected from wss://rpc.x/?project_id=***: 1000\n',
+      'url https://x/api/v0?project_id=***&a=1',
+      'nothing secret here',
+    ]);
+  });
+
+  it('is installed on stdout and stderr by the CLI', async () => {
+    const cli = await import('node:fs').then((fs) => fs.readFileSync(new URL('../cli.ts', import.meta.url), 'utf8'));
+    expect(cli.indexOf("import './redact-output.js'")).toBeLessThan(cli.indexOf("from '@midnight-ntwrk"));
+  });
+});
