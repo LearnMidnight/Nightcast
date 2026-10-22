@@ -11,6 +11,7 @@ import { oraclePublicKey } from '@nightcast/contract';
 import {
   Contract,
   type Ledger,
+  type NextDraw,
   type Numbers,
   type TicketPreimage,
   ledger,
@@ -41,7 +42,7 @@ type Result<R> = { result: R; context: CircuitContext<LottoPrivateState> };
 const hex = (b: Uint8Array): string => Buffer.from(b).toString('hex');
 
 /**
- * Runs the compiled Midnight Lotto contract in memory, with a controllable
+ * Runs the compiled Lunardraw contract in memory, with a controllable
  * clock. Each call picks whose private state the witnesses see; a failed call
  * leaves the state unchanged. Token transfers are not simulated: the ledger's
  * own accounting (sales, carry, prizes) is what the tests check.
@@ -150,8 +151,20 @@ export class LottoSimulator {
     return this.run(as, (ctx) => this.contract.impureCircuits.buyTicket(ctx));
   }
 
+  /** Reveal a draw's seed without opening another draw. */
   requestDraw(n: bigint, seed: Uint8Array, as: LottoPrivateState = this.organiser): void {
-    this.run(as, (ctx) => this.contract.impureCircuits.requestDraw(ctx, n, seed));
+    const none = { is_some: false, value: { salesClose: 0n, seedCommitment: new Uint8Array(32) } };
+    this.run(as, (ctx) => this.contract.impureCircuits.requestDraw(ctx, n, seed, none));
+  }
+
+  /** Reveal a draw's seed and open the next draw in the same transaction (what the keeper does). */
+  requestAndOpenNext(
+    n: bigint,
+    seed: Uint8Array,
+    next: NextDraw,
+    as: LottoPrivateState = this.organiser,
+  ): void {
+    this.run(as, (ctx) => this.contract.impureCircuits.requestDraw(ctx, n, seed, { is_some: true, value: next }));
   }
 
   fulfilDraw(n: bigint, as: LottoPrivateState = this.oracle): Uint8Array {

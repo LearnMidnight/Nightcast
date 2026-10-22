@@ -6,7 +6,7 @@ export const MAIN_PICK = 7;
 export const MAIN_POOL = 35;
 export const MOONBALL_POOL = 20;
 
-/** A Midnight 7 line as plain numbers. */
+/** A Starfall line as plain numbers. */
 export type PlainLine = { numbers: number[]; moonball: number };
 
 /** Division shares in basis points (division 1 first), as in the contract. */

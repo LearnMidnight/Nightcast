@@ -1,7 +1,7 @@
 {
   "name": "@nightcast/lotto",
   "version": "0.1.0",
-  "description": "Midnight Lotto v0: Midnight 7 + Moonball on Midnight, with draws from Nightcast's VRF embedded in the contract.",
+  "description": "Lunardraw v0: Starfall (7 from 35 + a Moonball from 20) on Midnight, with draws from Nightcast's VRF embedded in the contract.",
   "license": "MIT",
   "private": true,
   "type": "module",

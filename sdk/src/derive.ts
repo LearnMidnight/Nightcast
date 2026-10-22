@@ -32,7 +32,7 @@ export const uniformInt = (word: Uint8Array, n: bigint): bigint => {
 };
 
 /**
- * Midnight Lotto commit-reveal combination (scheme "nightcast-lotto-v0").
+ * Lunardraw commit-reveal combination (scheme "nightcast-lotto-v0").
  *
  * The operator publishes SHA-256(operatorSeedHex) before ticket sales close,
  * requests Nightcast randomness after they close, then reveals the seed. The
@@ -71,7 +71,7 @@ const drawFrom = (prefix: string, pick: number, pool: number): number[] => {
 
 /**
  * Pick `pick` distinct numbers from 1..`pool`, sorted ascending.
- * Same rule as the Midnight Lotto site: for i = 0, 1, …, take
+ * Same rule as the Lunardraw site: for i = 0, 1, …, take
  * d = SHA-256(seed + ":" + i), read 2 bytes at a time (big-endian), skip
  * v ≥ 65536 − (65536 mod pool), n = v mod pool + 1, skip repeats.
  */
@@ -85,17 +85,22 @@ export const pickNumbers = (seedHex: string, pick: number, pool: number): number
  */
 export const pickMoonball = (seedHex: string, pool: number): number => drawFrom(`${cleanHex(seedHex)}:mb`, 1, pool)[0];
 
-/** Midnight 7 + Moonball: 7 numbers from 35 and a Moonball from 20. */
-export const MIDNIGHT_7 = { pick: 7, pool: 35, moonballPool: 20 } as const;
+/** Starfall: 7 numbers from 35 and a Moonball from 20. */
+export const STARFALL = { pick: 7, pool: 35, moonballPool: 20 } as const;
 
-/** A full Midnight 7 draw from a draw seed. */
-export const drawMidnight7 = (seedHex: string): { numbers: number[]; moonball: number } => ({
-  numbers: pickNumbers(seedHex, MIDNIGHT_7.pick, MIDNIGHT_7.pool),
-  moonball: pickMoonball(seedHex, MIDNIGHT_7.moonballPool),
+/** A full Starfall draw from a draw seed. */
+export const drawStarfall = (seedHex: string): { numbers: number[]; moonball: number } => ({
+  numbers: pickNumbers(seedHex, STARFALL.pick, STARFALL.pool),
+  moonball: pickMoonball(seedHex, STARFALL.moonballPool),
 });
 
+/** @deprecated Starfall's earlier name; use {@link STARFALL}. */
+export const MIDNIGHT_7 = STARFALL;
+/** @deprecated Starfall's earlier name; use {@link drawStarfall}. */
+export const drawMidnight7 = drawStarfall;
+
 /**
- * Strip anything that isn't hex and lowercase, as the Midnight Lotto site does.
+ * Strip anything that isn't hex and lowercase, as the Lunardraw site does.
  * Note this keeps the leading 0 of a "0x" prefix, so always write seeds without one.
  */
 export const cleanHex = (s: string): string => s.replace(/[^0-9a-f]/gi, '').toLowerCase();

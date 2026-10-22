@@ -1,10 +1,12 @@
-// Midnight Lotto v0: Midnight 7 + Moonball on Midnight, with draws from
+// Lunardraw v0: Starfall (7 from 35 + a Moonball from 20) on Midnight, with draws from
 // Nightcast's VRF embedded in the contract (docs/LOTTO.md, SPEC §5.1).
 //
-// Draws run one at a time, numbered 1, 2, 3, ... Each goes open -> requested
-// -> fulfilled -> drawn -> settled, or ends voided (everyone refunded, never
-// redrawn) if the organiser doesn't reveal its seed or the oracle doesn't
-// answer in time.
+// Draws are numbered 1, 2, 3, ... Each goes open -> requested -> fulfilled
+// -> drawn -> settled, or ends voided (everyone refunded, never redrawn) if
+// the organiser doesn't reveal its seed or the oracle doesn't answer in time.
+// One draw sells at a time; revealing a draw's seed can open the next one, so
+// a keeper bot holding the organiser secret keeps the draws rolling. Draws
+// settle in order, and each takes the rollover when it settles.
 //
 // Tickets are paid in tNIGHT (unshielded; shielded operations don't work on
 // Preprod yet). Only a commitment to a ticket's numbers is stored; a winner
@@ -19,7 +21,7 @@ import CompactStandardLibrary;
 include "vrf";
 include "draw";
 import NightcastVrf;
-import MidnightDraw;
+import StarfallDraw;
 
 // The drawn numbers, as returned by computeNumbers.
 export { Numbers };
@@ -28,7 +30,7 @@ export { Numbers };
 
 export enum DrawStatus { open, requested, fulfilled, drawn, settled, voided }
 
-// One Midnight 7 line: 7 numbers from 1..35 in increasing order, and a
+// One Starfall line: 7 numbers from 1..35 in increasing order, and a
 // Moonball from 1..20.
 export struct Line {
   numbers: Vector<7, Uint<8>>;
@@ -82,7 +84,7 @@ export struct Draw {
   output: Bytes<32>;
   numbers: Vector<7, Uint<8>>;
   moonball: Uint<8>;
-  // Rollover brought in when the draw was opened, in STAR.
+  // Rollover from earlier draws added to this draw's pool when it settled, in STAR.
   carried: Uint<128>;
   // Each division's prize per winning line, once settled.
   prizes: Vector<9, Uint<128>>;
@@ -92,6 +94,12 @@ export struct Ticket {
   drawId: Uint<32>;
   count: Uint<8>;
   refunded: Boolean;
+}
+
+// The next draw to open when a draw's seed is revealed.
+export struct NextDraw {
+  salesClose: Uint<64>;
+  seedCommitment: Bytes<32>;
 }
 
 export struct Win {
@@ -115,7 +123,7 @@ export ledger tickets: Map<Bytes<32>, Ticket>;
 export ledger wins: Map<Bytes<32>, Win>;
 // Seed commitments already used, so a revealed seed can't be reused.
 export ledger usedCommitments: Set<Bytes<32>>;
-// Rollover waiting for the next draw.
+// Rollover waiting for the next draw to settle.
 export ledger carry: Uint<128>;
 export ledger oracleKey: JubjubPoint;
 export ledger oracleKeyReady: Boolean;
@@ -165,12 +173,12 @@ constructor(key: JubjubPoint, organiserCommitment: Bytes<32>, price: Uint<128>,
 // ------------------------------------------------------- pure functions
 
 export pure circuit organiserCommitmentOf(secret: Bytes<32>): Bytes<32> {
-  return persistentHash<[Bytes<32>, Bytes<32>]>([pad(32, "midnight-lotto:organiser:v0"), secret]);
+  return persistentHash<[Bytes<32>, Bytes<32>]>([pad(32, "lunardraw:organiser:v0"), secret]);
 }
 
 export pure circuit ticketCommitment(deployment: ContractAddress, t: TicketPreimage): Bytes<32> {
   return persistentHash<TicketHashInput>(TicketHashInput {
-    domain: pad(32, "midnight-lotto:ticket:v0"),
+    domain: pad(32, "lunardraw:ticket:v0"),
     deployment: deployment,
     ticket: t
   });
@@ -178,7 +186,7 @@ export pure circuit ticketCommitment(deployment: ContractAddress, t: TicketPreim
 
 export pure circuit lineId(ticket: Bytes<32>, index: Uint<8>): Bytes<32> {
   return persistentHash<LineIdPreimage>(LineIdPreimage {
-    domain: pad(32, "midnight-lotto:line:v0"),
+    domain: pad(32, "lunardraw:line:v0"),
     ticket: ticket,
     index: index
   });
@@ -187,7 +195,7 @@ export pure circuit lineId(ticket: Bytes<32>, index: Uint<8>): Bytes<32> {
 // The draw's VRF input.
 export pure circuit drawAlpha(deployment: ContractAddress, drawId: Uint<32>, seed: Bytes<32>): Bytes<32> {
   return persistentHash<AlphaPreimage>(AlphaPreimage {
-    domain: pad(32, "midnight-lotto:alpha:v0"),
+    domain: pad(32, "lunardraw:alpha:v0"),
     deployment: deployment,
     drawId: drawId,
     seed: seed
@@ -288,16 +296,12 @@ export circuit proposeOracleKey(key: JubjubPoint): [] {
 
 // ----------------------------------------------------------------- draws
 
-// Open the next draw, selling tickets until `salesClose`. Draws run one at a
-// time: the previous one must be settled or void, so the rollover always goes
-// to the draw that follows. Returns the new draw's number.
-export circuit openDraw(salesClose: Uint<64>, seedCommitment: Bytes<32>): Uint<32> {
-  assertOrganiser();
-  const close = disclose(salesClose);
-  const commitment = disclose(seedCommitment);
+// Open draw lastDraw + 1, selling tickets until `close`. Only one draw sells
+// at a time, and the sales period must be between minSales and maxSales from
+// now, so nobody can slip in a short draw at a quiet moment.
+circuit openNext(close: Uint<64>, commitment: Bytes<32>): Uint<32> {
   if (lastDraw != 0) {
-    const prev = draws.lookup(lastDraw).status;
-    assert(prev == DrawStatus.settled || prev == DrawStatus.voided, "the previous draw isn't finished");
+    assert(draws.lookup(lastDraw).status != DrawStatus.open, "the previous draw is still selling");
   }
   assert(close > maxSales, "sales close is out of range");
   assert(blockTimeLt(close - minSales), "sales period is too short");
@@ -319,7 +323,7 @@ export circuit openDraw(salesClose: Uint<64>, seedCommitment: Bytes<32>): Uint<3
     output: default<Bytes<32>>,
     numbers: [0, 0, 0, 0, 0, 0, 0],
     moonball: 0,
-    carried: carry,
+    carried: 0,
     prizes: [0, 0, 0, 0, 0, 0, 0, 0, 0]
   });
   drawLines.insert(id, default<Counter>);
@@ -327,9 +331,16 @@ export circuit openDraw(salesClose: Uint<64>, seedCommitment: Bytes<32>): Uint<3
     winnerCounts.insert(winnerKey(id, division), default<Counter>);
   }
   usedCommitments.insert(commitment);
-  carry = 0;
   lastDraw = id;
   return id;
+}
+
+// The organiser opens the next draw: the first one, or after a draw that
+// wasn't followed (its seed was revealed without a next draw, or it was void).
+// Returns the new draw's number.
+export circuit openDraw(salesClose: Uint<64>, seedCommitment: Bytes<32>): Uint<32> {
+  assertOrganiser();
+  return openNext(disclose(salesClose), disclose(seedCommitment));
 }
 
 // Buy a ticket (1 to 5 lines) for an open draw, paying price x lines in tNIGHT.
@@ -351,10 +362,11 @@ export circuit buyTicket(): Bytes<32> {
 }
 
 // After sales close, the organiser reveals its seed, fixing the draw's VRF
-// input. Only the organiser may do this: it can't evaluate the VRF, so it
-// gains nothing from the freedom Compact's in-circuit hashToCurve may allow
-// (SPEC §2), whereas the oracle could use that freedom to pick an outcome.
-export circuit requestDraw(n: Uint<32>, seed: Bytes<32>): [] {
+// input, and can open the next draw in the same transaction. Only the
+// organiser may reveal: it can't evaluate the VRF, so it gains nothing from
+// the freedom Compact's in-circuit hashToCurve may allow (SPEC §2), whereas
+// the oracle could use that freedom to pick an outcome.
+export circuit requestDraw(n: Uint<32>, seed: Bytes<32>, next: Maybe<NextDraw>): [] {
   assertOrganiser();
   assert(oracleKeyReady, "no active oracle key");
   const id = disclose(n);
@@ -371,6 +383,10 @@ export circuit requestDraw(n: Uint<32>, seed: Bytes<32>): [] {
     point: inputPoint(drawAlpha(kernel.self(), id, s)),
     oracleKey: oracleKey
   });
+  const nx = disclose(next);
+  if (nx.is_some) {
+    openNext(nx.value.salesClose, nx.value.seedCommitment);
+  }
 }
 
 // The oracle answers: the output is fixed by its key and the stored point.
@@ -434,15 +450,22 @@ export circuit registerWin(commitment: Bytes<32>, index: Uint<8>, recipient: Use
   return div;
 }
 
-// After the claim window, fix each division's prize per line. Divisions
-// nobody won, and rounding remainders, roll over to the next draw.
+// After the claim window, fix each division's prize per line. Draws settle in
+// order: the previous draw must be settled or void, and then all the
+// rollover so far joins this draw's pool. Divisions nobody won, and rounding
+// remainders, roll over to the next draw that settles.
 export circuit settleDraw(n: Uint<32>): [] {
   const id = disclose(n);
   const d = drawFor(id);
   assert(d.status == DrawStatus.drawn, "draw is not drawn");
   assert(blockTimeGte(d.claimDeadline), "claim window is still open");
+  if (id > 1) {
+    const prev = draws.lookup((id - 1) as Uint<32>).status;
+    assert(prev == DrawStatus.settled || prev == DrawStatus.voided, "the previous draw isn't settled yet");
+  }
+  const carried = carry;
   const sales = (linePrice * drawLines.lookup(id).read()) as Uint<128>;
-  const pool = (sales + d.carried) as Uint<128>;
+  const pool = (sales + carried) as Uint<128>;
   const winners = map((div: Uint<8>): Uint<64> => winnerCounts.lookup(winnerKey(id, div)).read(),
                       [1, 2, 3, 4, 5, 6, 7, 8, 9]);
   // Divide by 1, not 0, for a division nobody won, then drop the result.
@@ -453,8 +476,8 @@ export circuit settleDraw(n: Uint<32>): [] {
                      }, shares(), winners);
   const paid = fold((acc: Uint<128>, p: Uint<128>, w: Uint<64>): Uint<128> => (acc + p * w) as Uint<128>,
                     0, prizes, winners);
-  carry = (carry + pool - paid) as Uint<128>;
-  draws.insert(id, Draw { ...d, status: DrawStatus.settled, prizes: prizes });
+  carry = (pool - paid) as Uint<128>;
+  draws.insert(id, Draw { ...d, status: DrawStatus.settled, carried: carried, prizes: prizes });
 }
 
 // Pay a registered winning line. Anyone may call this; the money goes to the
@@ -490,7 +513,6 @@ export circuit voidDraw(n: Uint<32>): [] {
   const unanswered = d.status == DrawStatus.requested && blockTimeGte(d.drawDeadline);
   const uncomputed = d.status == DrawStatus.fulfilled && blockTimeGte(d.claimDeadline);
   assert(unrevealed || unanswered || uncomputed, "draw can't be voided");
-  carry = (carry + d.carried) as Uint<128>;
   draws.insert(id, Draw { ...d, status: DrawStatus.voided });
 }
 

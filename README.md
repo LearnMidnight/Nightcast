@@ -47,10 +47,10 @@ The construction, ledger layout and threat model are in [docs/SPEC.md](docs/SPEC
 | `contract/src/simulator.ts` | Runs the compiled contract in memory with several actors and a controllable clock |
 | `sdk/src/oracle.ts` | The oracle service: polls, fulfils pending requests bound to its key, retries with backoff, respects deadlines, optional requester allowlist |
 | `sdk/src/chain.ts` | Chain adapters: simulator, and live Midnight via midnight-js |
-| `sdk/src/derive.ts` | Turning an output into numbers: `randomWords`, `uniformInt`, `pickNumbers`, `pickMoonball`, `drawMidnight7`, `combineDrawSeed` |
+| `sdk/src/derive.ts` | Turning an output into numbers: `randomWords`, `uniformInt`, `pickNumbers`, `pickMoonball`, `drawStarfall`, `combineDrawSeed` |
 | `sdk/src/keygen.ts` | `./nightcast keygen`: generate oracle, operator and requester secrets |
 | `deploy/` | `./nightcast` commands: deploy (locked from the start), accept the oracle key, verify, wallets, run the oracle, test requests |
-| `lotto/` | The Midnight Lotto contract (Midnight 7 + Moonball, tNIGHT, secret tickets) with Nightcast's VRF embedded; design in [docs/LOTTO.md](docs/LOTTO.md) |
+| `lotto/` | The Lunardraw contract (Starfall, tNIGHT, secret tickets) with Nightcast's VRF embedded; design in [docs/LOTTO.md](docs/LOTTO.md) |
 | `nightcast` | Wrapper script that runs the tools from a checkout |
 | `deployments/` | Published records of live deployments |
 
@@ -119,16 +119,16 @@ To embed the oracle in your own service, use `NightcastOracle` with a `MidnightC
 ### Use the randomness
 
 ```ts
-import { combineDrawSeed, drawMidnight7, pickNumbers } from '@nightcast/sdk';
+import { combineDrawSeed, drawStarfall, pickNumbers } from '@nightcast/sdk';
 
 // Lottery: commit SHA-256(operatorSeed) before sales, request after sales close,
 // then reveal operatorSeed once the request is fulfilled.
 const drawSeed = combineDrawSeed(operatorSeed, request.output);
-const { numbers, moonball } = drawMidnight7(drawSeed); // 7 from 35 + Moonball from 20
+const { numbers, moonball } = drawStarfall(drawSeed); // 7 from 35 + Moonball from 20
 const other = pickNumbers(drawSeed, 6, 45);             // any other pick/pool
 ```
 
-`pickNumbers` and `pickMoonball` are the same rules as the Midnight Lotto verification page (test vectors: 64 zeros gives Midnight 7 6 7 13 23 26 31 35 + Moonball 14, and 6 from 45 gives 1 3 7 21 31 35). If a request expires or the seed is never revealed, void the round and refund it rather than drawing again ([SPEC §4.2](docs/SPEC.md#42-withholding-and-aborts)).
+`pickNumbers` and `pickMoonball` are the same rules as the Lunardraw verification page (test vectors: 64 zeros gives Starfall 6 7 13 23 26 31 35 + Moonball 14, and 6 from 45 gives 1 3 7 21 31 35). If a request expires or the seed is never revealed, void the round and refund it rather than drawing again ([SPEC §4.2](docs/SPEC.md#42-withholding-and-aborts)).
 
 ## Limitations of v0
 

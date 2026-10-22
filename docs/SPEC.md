@@ -139,7 +139,7 @@ With commit-reveal, neither the consumer (no `sk`) nor the oracle (no seed) can 
 
 ### 5.1 On-chain consumers: embed, don't call (decision, 22 Oct 2026)
 
-A contract that needs randomness on chain (the Midnight Lotto, #6) cannot call the Nightcast contract yet, so it **embeds the same VRF** instead.
+A contract that needs randomness on chain (the Lunardraw, #6) cannot call the Nightcast contract yet, so it **embeds the same VRF** instead.
 
 - **Cross-contract calls are not available on the networks we target.** They arrived with Compact 0.33.0 alongside ledger 9 (`crossContractCall()` in compact-runtime 0.19, assembled by midnight-js 5.0). Preprod and Mainnet run ledger 8 with Compact 0.31.1 and midnight-js 4.1.1, and toolchains from 0.32.110 on are not compatible with them. Midnight's documentation still describes cross-contract interaction as unavailable and will change only once Compact 0.33+ is supported on Preview ([midnight-docs#1291](https://github.com/midnightntwrk/midnight-docs/issues/1291)).
 - **A contract can't read another contract's state in a circuit either**, so "call Nightcast, then read its output" isn't possible by any route today.

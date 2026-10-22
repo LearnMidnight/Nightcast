@@ -3,7 +3,7 @@ import { createHash } from 'node:crypto';
 import { pureCircuits } from '../managed/nightcast/contract/index.js';
 
 // Compact's persistentHash of byte strings is plain SHA-256 of the bytes. The
-// Midnight Lotto contract relies on this to reproduce the site's draw rule
+// Lunardraw contract relies on this to reproduce the site's draw rule
 // (lotto/src/draw.compact), so check it stays true.
 const pad32 = (s: string): Buffer => {
   const b = Buffer.alloc(32);

@@ -2,7 +2,7 @@ import type { WitnessContext } from '@midnight-ntwrk/compact-runtime';
 import type { Ledger, TicketPreimage } from './managed/lotto/contract/index.js';
 
 /**
- * Private state of whoever runs a Midnight Lotto circuit.
+ * Private state of whoever runs a Lunardraw circuit.
  *
  * - The oracle sets `oracleSecretKey` (for `acceptOracleKey` and `fulfilDraw`).
  * - The organiser sets `organiserSecret` (for `openDraw`).
@@ -28,23 +28,23 @@ type Ctx = WitnessContext<Ledger, LottoPrivateState>;
 
 export const witnesses = {
   oracleSecretKey({ privateState }: Ctx): [LottoPrivateState, bigint] {
-    if (privateState.oracleSecretKey === undefined) throw new Error('Midnight Lotto: no oracle secret key in private state');
+    if (privateState.oracleSecretKey === undefined) throw new Error('Lunardraw: no oracle secret key in private state');
     return [privateState, privateState.oracleSecretKey];
   },
 
   organiserSecret({ privateState }: Ctx): [LottoPrivateState, Uint8Array] {
-    if (privateState.organiserSecret === undefined) throw new Error('Midnight Lotto: no organiser secret in private state');
+    if (privateState.organiserSecret === undefined) throw new Error('Lunardraw: no organiser secret in private state');
     return [privateState, privateState.organiserSecret];
   },
 
   newTicket({ privateState }: Ctx): [LottoPrivateState, TicketPreimage] {
-    if (privateState.pendingTicket === undefined) throw new Error('Midnight Lotto: no ticket to buy in private state');
+    if (privateState.pendingTicket === undefined) throw new Error('Lunardraw: no ticket to buy in private state');
     return [privateState, privateState.pendingTicket];
   },
 
   ticketFor({ privateState }: Ctx, commitment: Uint8Array): [LottoPrivateState, TicketPreimage] {
     const t = privateState.tickets?.[hex(commitment)];
-    if (t === undefined) throw new Error(`Midnight Lotto: no ticket ${hex(commitment)} in private state`);
+    if (t === undefined) throw new Error(`Lunardraw: no ticket ${hex(commitment)} in private state`);
     return [privateState, t];
   },
 
