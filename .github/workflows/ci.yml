@@ -83,6 +83,11 @@ jobs:
         working-directory: sdk
         run: npx vitest run --reporter=default --reporter=github-actions --reporter=json --outputFile.json=../reports/sdk.json
 
+      - name: Test lotto contract
+        if: ${{ !cancelled() && steps.build.outcome == 'success' }}
+        working-directory: lotto
+        run: npx vitest run --reporter=default --reporter=github-actions --reporter=json --outputFile.json=../reports/lotto.json
+
       - name: Test deploy tooling
         if: ${{ !cancelled() && steps.build.outcome == 'success' }}
         working-directory: deploy
@@ -99,6 +104,41 @@ jobs:
               console.log(`::notice title=${name} tests::${r.numPassedTests} passed, ${r.numFailedTests} failed, ${r.numTotalTests} total`);
             ' "$PWD/$f"
           done
+
+  # Generates the lotto's proving keys and reports each circuit's size and
+  # build time. Informational until the lotto is deployed.
+  lotto-keys:
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/setup-node@v5
+        with:
+          node-version: 22
+
+      - name: Install Compact toolchain
+        run: |
+          curl --proto '=https' --tlsv1.2 -LsSf https://github.com/midnightntwrk/compact/releases/latest/download/compact-installer.sh | sh
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+
+      - name: Select compiler ${{ env.COMPACT_TOOLCHAIN }}
+        run: compact update "$COMPACT_TOOLCHAIN"
+
+      - name: Compile the lotto with proving keys
+        working-directory: lotto
+        shell: bash
+        run: |
+          start=$SECONDS
+          compact compile src/lotto.compact src/managed/lotto 2>&1 | tee keys.log
+          echo "::notice title=lotto keys::built in $((SECONDS - start))s"
+          for f in src/managed/lotto/keys/*.prover; do
+            c=$(basename "$f" .prover)
+            p=$(stat -c %s "$f"); v=$(stat -c %s "src/managed/lotto/keys/$c.verifier")
+            echo "::notice title=lotto circuit $c::prover key $((p / 1024)) KiB, verifier key $v bytes"
+          done
+          grep -iE "k=|rows|circuit" keys.log | head -20 | sed 's/^/::notice title=compiler::/' || true
 
   # Deploys to a throwaway local Midnight network in Docker: deploy, lock the
   # maintenance authority, activate the oracle key, verify the fingerprints,
