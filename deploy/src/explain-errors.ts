@@ -34,6 +34,7 @@ export const describeWalletError = (err: Tagged, max = 1500): string => {
       return;
     }
     seen.add(x);
+    const start = reasons.length;
     const o = x as { message?: unknown; cause?: unknown; error?: unknown; errors?: unknown; code?: unknown; reason?: unknown };
     const hasText = typeof o.message === 'string' && o.message !== '' && o.message !== '[object Object]';
     if (hasText) reasons.push(o.message as string);
@@ -49,10 +50,9 @@ export const describeWalletError = (err: Tagged, max = 1500): string => {
       o.error,
       ...(Array.isArray(o.errors) ? o.errors : []),
     ].filter((c) => c !== undefined && c !== null);
-    const before = reasons.length;
     for (const c of children) visit(c, depth + 1);
     // Nothing readable inside: show the object itself (skipping the SDK's own wrapper).
-    if (!hasText && reasons.length === before && !isWalletError(x)) reasons.push(show(x));
+    if (reasons.length === start && !isWalletError(x)) reasons.push(show(x));
   };
   visit(err, 0);
   const text = [...new Set(reasons)].join(': ').replace(/\s+/g, ' ').trim() || 'no details';
