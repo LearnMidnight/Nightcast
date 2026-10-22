@@ -203,4 +203,3 @@ describe('wallet error messages', () => {
     ]);
   });
 });
-});
