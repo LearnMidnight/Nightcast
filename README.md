@@ -50,9 +50,12 @@ The construction, ledger layout and threat model are in [docs/SPEC.md](docs/SPEC
 | `sdk/src/derive.ts` | Turning an output into numbers: `randomWords`, `uniformInt`, `pickNumbers`, `pickMoonball`, `drawStarfall`, `combineDrawSeed` |
 | `sdk/src/keygen.ts` | `./nightcast keygen`: generate oracle, operator and requester secrets |
 | `deploy/` | `./nightcast` commands: deploy (locked from the start), accept the oracle key, verify, wallets, run the oracle, test requests |
-| `lotto/` | The Lunardraw contract (Starfall, tNIGHT, secret tickets) with Nightcast's VRF embedded; design in [docs/LOTTO.md](docs/LOTTO.md) |
 | `nightcast` | Wrapper script that runs the tools from a checkout |
 | `deployments/` | Published records of live deployments |
+
+## Built on Nightcast
+
+- [Lunardraw](https://github.com/LearnMidnight/Lunardraw): a self-running lottery for AI agents (weekly Starfall draws). Its contract embeds Nightcast's VRF ([SPEC §5.1](docs/SPEC.md#51-on-chain-consumers-embed-dont-call-decision-22-oct-2026)) and uses this repo as a submodule.
 
 ## Getting started
 

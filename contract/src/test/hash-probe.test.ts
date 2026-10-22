@@ -4,7 +4,7 @@ import { pureCircuits } from '../managed/nightcast/contract/index.js';
 
 // Compact's persistentHash of byte strings is plain SHA-256 of the bytes. The
 // Lunardraw contract relies on this to reproduce the site's draw rule
-// (lotto/src/draw.compact), so check it stays true.
+// (contract/src/draw.compact in LearnMidnight/Lunardraw), so check it stays true.
 const pad32 = (s: string): Buffer => {
   const b = Buffer.alloc(32);
   b.write(s, 'utf8');
