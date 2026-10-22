@@ -256,7 +256,7 @@ status   fulfilled
 deadline 2026-10-21T01:23:45.000Z
 output   9a71...
 words    3be0... 77c1...
-lotto    8 13 14 22 27 28 31 + Moonball 10 (Midnight 7 example)
+lotto    8 13 14 22 27 28 31 + Moonball 10 (Starfall example)
 ```
 
 That's live, verifiable randomness on Preprod.

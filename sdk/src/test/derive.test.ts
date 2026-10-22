@@ -1,18 +1,18 @@
 import { describe, it, expect } from 'vitest';
 import { createHash } from 'node:crypto';
 import { generateOracleSecretKey, pureCircuits } from '@nightcast/contract';
-import { cleanHex, combineDrawSeed, drawMidnight7, pickMoonball, pickNumbers, randomWords, seedCommitment, uniformInt } from '../derive.js';
+import { cleanHex, combineDrawSeed, drawStarfall, pickMoonball, pickNumbers, randomWords, seedCommitment, uniformInt } from '../derive.js';
 
-describe('pickNumbers (Midnight Lotto rule)', () => {
+describe('pickNumbers (Lunardraw rule)', () => {
   it('matches the published test vector', () => {
-    // From the Midnight Lotto verification scheme: seed = 64 zeros, 6 from 45.
+    // From the Lunardraw verification scheme: seed = 64 zeros, 6 from 45.
     expect(pickNumbers('0'.repeat(64), 6, 45)).toEqual([1, 3, 7, 21, 31, 35]);
     expect(seedCommitment('0'.repeat(64))).toBe('60e05bd1b195af2f94112fa7197a5c88289058840ce7c6df9693756bc6250f55');
   });
 
-  it('matches the Midnight 7 + Moonball test vector', () => {
+  it('matches the Starfall test vector', () => {
     // From the site's verification scheme (checked in PHP, JS and Python): 64 zeros.
-    expect(drawMidnight7('0'.repeat(64))).toEqual({ numbers: [6, 7, 13, 23, 26, 31, 35], moonball: 14 });
+    expect(drawStarfall('0'.repeat(64))).toEqual({ numbers: [6, 7, 13, 23, 26, 31, 35], moonball: 14 });
     expect(pickMoonball('0'.repeat(64), 20)).toBe(14);
   });
 
