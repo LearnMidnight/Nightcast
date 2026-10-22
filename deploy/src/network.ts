@@ -394,12 +394,35 @@ export const openWallet = async (session: Session, opts: WalletOptions = {}): Pr
     // Registers any unregistered NIGHT for DUST generation (no faucet calls).
     await waitForFunds(wallet.wallet, { ...session.config, faucet: undefined }, false, wallet.unshieldedKeystore);
     opts.onWaitingForDust?.();
-    await firstValueFrom(
-      wallet.wallet.state().pipe(
-        throttleTime(5_000),
-        filter((s) => s.isSynced && s.dust.balance(new Date()) > 0n),
-      ),
-    );
+    // Say what the wallet sees every minute, so a long wait isn't silent.
+    const started = Date.now();
+    const dustProgress = wallet.wallet
+      .state()
+      .pipe(throttleTime(60_000))
+      .subscribe((s) => {
+        const minutes = Math.round((Date.now() - started) / 60_000);
+        session.logger.info(
+          `Waiting for DUST: ${s.dust.availableCoins.length} coin(s) available, ${s.dust.pendingCoins.length} pending, ` +
+            `balance ${s.dust.balance(new Date())}, ${s.isSynced ? 'synced' : `syncing (${describeSync(s)})`}` +
+            (minutes > 0 ? `, ${minutes} min so far` : ''),
+        );
+        if (minutes >= 15 && minutes < 16) {
+          session.logger.warn(
+            'Still no DUST after 15 minutes. If this wallet had DUST before, its saved state may be stale: stop with ' +
+              `Ctrl+C and run \`./nightcast wallet forget --network ${session.network} --wallet <file>\` to sync it from the start.`,
+          );
+        }
+      });
+    try {
+      await firstValueFrom(
+        wallet.wallet.state().pipe(
+          throttleTime(5_000),
+          filter((s) => s.isSynced && s.dust.balance(new Date()) > 0n),
+        ),
+      );
+    } finally {
+      dustProgress.unsubscribe();
+    }
   }
   return wallet;
 };
