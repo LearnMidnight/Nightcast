@@ -161,7 +161,7 @@ describe.runIf(enabled)('Nightcast on a local Midnight network', () => {
     const checks = verifyDeployment(record, state, fps);
     expect(checks.filter((c) => !c.ok)).toEqual([]);
     expect(Object.keys(fps).sort()).toEqual(
-      ['acceptOperator', 'acceptOracleKey', 'expire', 'fulfil', 'proposeOperator', 'proposeOracleKey', 'request'].sort(),
+      ['acceptOperator', 'acceptOracleKey', 'approveOracleKey', 'expire', 'fulfil', 'proposeOperator', 'proposeOracleKey', 'request'].sort(),
     );
   }, 5 * 60_000);
 
