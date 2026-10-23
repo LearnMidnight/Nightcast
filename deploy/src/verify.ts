@@ -63,6 +63,17 @@ export const verifyDeployment = (
       : 'not accepted yet: the oracle must call acceptOracleKey',
   });
 
+  if (ledger.oracleKeyReady && ledger.proposedOracleKey.is_some) {
+    const at = new Date(Number(ledger.oracleKeyChangeAt) * 1000).toISOString();
+    checks.push({
+      name: 'no oracle key change pending',
+      ok: false,
+      detail: `a new key is proposed; it can take effect ${ledger.oracleKeyApproved ? 'now (approved by the current oracle)' : `from ${at}`}; requests keep the key they were made with`,
+    });
+  } else {
+    checks.push({ name: 'no oracle key change pending', ok: true, detail: `a change would wait ${ledger.oracleKeyDelay}s` });
+  }
+
   const windowsMatch =
     ledger.minWindow.toString() === record.parameters.minWindow &&
     ledger.maxWindow.toString() === record.parameters.maxWindow;

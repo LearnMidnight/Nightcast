@@ -260,6 +260,8 @@ describe('key rotation', () => {
     const midId = sim.request(bytes('t'), bytes('during'), deadline);
     expect(sim.getLedger().requests.lookup(midId).oracleKey).toEqual(oraclePublicKey(oldSk));
 
+    // The current oracle agrees, so the change needn't wait.
+    sim.approveOracleKey();
     sim.acceptOracleKey({ oracleSecretKey: newSk });
     const newId = sim.request(bytes('t'), bytes('after'), deadline);
     expect(sim.getLedger().requests.lookup(newId).oracleKey).toEqual(oraclePublicKey(newSk));
@@ -268,6 +270,39 @@ describe('key rotation', () => {
     expect(() => sim.fulfil(newId, { oracleSecretKey: oldSk })).toThrow(/not the oracle/);
     expect(hex(sim.fulfil(oldId, { oracleSecretKey: oldSk }))).toBe(hex(pureCircuits.evaluate(oldSk, oldId)));
     expect(hex(sim.fulfil(newId, { oracleSecretKey: newSk }))).toBe(hex(pureCircuits.evaluate(newSk, newId)));
+  });
+});
+
+describe('key rotation wait', () => {
+  it('makes a replacement key wait the longest request window, unless the current oracle agrees', () => {
+    const { sim } = fresh();
+    const maxWindow = sim.getLedger().maxWindow;
+    const newSk = generateOracleSecretKey();
+    expect(() => sim.approveOracleKey()).toThrow(/no key proposed/);
+    sim.proposeOracleKey(oraclePublicKey(newSk));
+    expect(sim.getLedger().oracleKeyChangeAt).toBe(BigInt(sim.now) + maxWindow);
+    // An operator who made the key itself can't install it straight away...
+    expect(() => sim.acceptOracleKey({ oracleSecretKey: newSk })).toThrow(/still waiting/);
+    sim.advance(Number(maxWindow) - 10);
+    expect(() => sim.acceptOracleKey({ oracleSecretKey: newSk })).toThrow(/still waiting/);
+    // ...and proposing again restarts the wait.
+    sim.proposeOracleKey(oraclePublicKey(newSk));
+    sim.advance(20);
+    expect(() => sim.acceptOracleKey({ oracleSecretKey: newSk })).toThrow(/still waiting/);
+    expect(() => sim.proposeOracleKey(oraclePublicKey(newSk), sim.operator, BigInt(sim.now + 1_000))).toThrow(/clock/);
+    // Only the current oracle can approve. After the wait, no approval is needed.
+    expect(() => sim.approveOracleKey({ oracleSecretKey: newSk })).toThrow(/not the current oracle/);
+    sim.advance(Number(maxWindow));
+    sim.acceptOracleKey({ oracleSecretKey: newSk });
+    expect(sim.getLedger().oracleKey).toEqual(oraclePublicKey(newSk));
+    expect(sim.getLedger().oracleKeyApproved).toBe(false);
+  });
+
+  it('accepts the first key at once', () => {
+    const { sim } = fresh({ acceptKey: false });
+    expect(sim.getLedger().oracleKeyReady).toBe(false);
+    sim.acceptOracleKey();
+    expect(sim.getLedger().oracleKeyReady).toBe(true);
   });
 });
 

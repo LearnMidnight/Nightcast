@@ -124,8 +124,13 @@ export class NightcastSimulator {
     this.run(as, (ctx) => this.contract.impureCircuits.acceptOracleKey(ctx));
   }
 
-  proposeOracleKey(key: JubjubPoint, as: NightcastPrivateState = this.operator): void {
-    this.run(as, (ctx) => this.contract.impureCircuits.proposeOracleKey(ctx, key));
+  /** Propose a new oracle key; `now` defaults to the simulator's clock. */
+  proposeOracleKey(key: JubjubPoint, as: NightcastPrivateState = this.operator, now: bigint = BigInt(this.now)): void {
+    this.run(as, (ctx) => this.contract.impureCircuits.proposeOracleKey(ctx, key, now));
+  }
+
+  approveOracleKey(as: NightcastPrivateState = this.oracle): void {
+    this.run(as, (ctx) => this.contract.impureCircuits.approveOracleKey(ctx));
   }
 
   proposeOperator(commitment: Uint8Array, as: NightcastPrivateState = this.operator): void {
