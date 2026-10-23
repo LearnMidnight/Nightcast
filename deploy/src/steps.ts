@@ -9,7 +9,15 @@ import {
 } from '@midnight-ntwrk/midnight-js-protocol/ledger';
 import { getNetworkId } from '@midnight-ntwrk/midnight-js/network-id';
 import { ttlOneHour } from '@midnight-ntwrk/midnight-js/utils';
-import { createUnprovenDeployTx, deployContract, findDeployedContract, submitTx } from '@midnight-ntwrk/midnight-js/contracts';
+import {
+  type ContractProviders,
+  createUnprovenDeployTx,
+  type DeployTxOptionsWithPrivateState,
+  deployContract,
+  findDeployedContract,
+  submitTx,
+} from '@midnight-ntwrk/midnight-js/contracts';
+import type { Contract } from '@midnight-ntwrk/midnight-js-protocol/compact-js/effect/Contract';
 import { Nightcast, oraclePublicKey } from '@nightcast/contract';
 import { isLocked } from './lock.js';
 import { compiledNightcast, NIGHTCAST_PRIVATE_STATE_ID, type NightcastProviders } from './network.js';
@@ -55,13 +63,26 @@ export const deployNightcast = async (
 export const deployNightcastLocked = async (
   providers: NightcastProviders,
   params: DeployParams,
-): Promise<{ contractAddress: string; txId: string }> => {
-  const built = await createUnprovenDeployTx(providers, {
+): Promise<{ contractAddress: string; txId: string }> =>
+  deployLocked(providers, {
     compiledContract: compiledNightcast(),
     initialPrivateState: {},
-    signingKey: sampleSigningKey(), // never used: replaced below before anything is sent
+    signingKey: sampleSigningKey(), // never used: the authority is replaced before anything is sent
     args: [params.oraclePublicKey, params.operatorCommitment, params.minWindow, params.maxWindow],
   });
+
+/**
+ * Deploy any compiled contract already locked, in one transaction: run its
+ * constructor, replace the maintenance authority with one nobody can use
+ * (empty committee, threshold 1), and submit the deploy. For constructors that
+ * create no coins (the transaction is only the deploy). Used for Nightcast and
+ * for contracts that embed its VRF, such as Lunardraw's.
+ */
+export const deployLocked = async <C extends Contract.Any>(
+  providers: ContractProviders<C, Contract.ProvableCircuitId<C>, unknown> | ContractProviders<C>,
+  options: DeployTxOptionsWithPrivateState<C>,
+): Promise<{ contractAddress: string; txId: string }> => {
+  const built = await createUnprovenDeployTx(providers, options);
 
   // Same state the constructor produced, with the authority swapped.
   const state = LedgerContractState.deserialize(built.public.initialContractState.serialize());

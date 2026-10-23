@@ -527,10 +527,21 @@ export const nightcastProviders = (
   session: Session,
   wallet: MidnightWalletProvider,
   dir = zkConfigPath(),
-): NightcastProviders => {
-  const zkConfigProvider = new NodeZkConfigProvider<NightcastCircuits>(dir);
+): NightcastProviders => contractProviders<NightcastCircuits, typeof NIGHTCAST_PRIVATE_STATE_ID, NightcastPrivateState>(session, wallet, dir);
+
+/**
+ * midnight-js providers for any compiled contract whose assets (`keys/`,
+ * `zkir/`) are in `dir`, paying with `wallet`. Private state is kept in
+ * memory only.
+ */
+export const contractProviders = <C extends string, PSI extends string, PS>(
+  session: Session,
+  wallet: MidnightWalletProvider,
+  dir: string,
+): MidnightProviders<C, PSI, PS> => {
+  const zkConfigProvider = new NodeZkConfigProvider<C>(dir);
   return {
-    privateStateProvider: inMemoryPrivateStateProvider<typeof NIGHTCAST_PRIVATE_STATE_ID, NightcastPrivateState>(),
+    privateStateProvider: inMemoryPrivateStateProvider<PSI, PS>(),
     publicDataProvider: indexerPublicDataProvider(session.config.indexer, session.config.indexerWS),
     zkConfigProvider,
     proofProvider: httpClientProofProvider(session.config.proofServer, zkConfigProvider),

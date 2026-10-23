@@ -5,7 +5,24 @@
   "license": "MIT",
   "private": true,
   "type": "module",
-  "main": "dist/cli.js",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    },
+    "./explain-errors": {
+      "types": "./dist/explain-errors.d.ts",
+      "default": "./dist/explain-errors.js"
+    },
+    "./redact-output": {
+      "types": "./dist/redact-output.d.ts",
+      "default": "./dist/redact-output.js"
+    },
+    "./cli": "./dist/cli.js",
+    "./package.json": "./package.json"
+  },
   "bin": {
     "nightcast-deploy": "dist/cli.js"
   },

@@ -259,3 +259,24 @@ describe('checkRequest', () => {
     expect(asFulfilled.find((c) => c.name === 'answered')?.detail).toMatch(/voided, never redrawn/);
   });
 });
+
+describe('dust fee-loop patch for other projects', () => {
+  it('patches the dust wallet under a --root folder, once', async () => {
+    const { execFileSync } = await import('node:child_process');
+    const { mkdirSync, mkdtempSync: mkd, readFileSync: read, writeFileSync } = await import('node:fs');
+    const { join: j } = await import('node:path');
+    const { tmpdir: tmp } = await import('node:os');
+    const { fileURLToPath } = await import('node:url');
+    const project = mkd(j(tmp(), 'consumer-'));
+    const dist = j(project, 'node_modules', '@midnight-ntwrk', 'wallet-sdk-dust-wallet', 'dist', 'v1');
+    mkdirSync(dist, { recursive: true });
+    const file = j(dist, 'Transacting.js');
+    writeFileSync(file, "const recipe = (currentFee) => fromEntry('dust', currentFee); // computeBalancingRecipe\n");
+    const script = fileURLToPath(new URL('../../scripts/patch-dust-fee-loop.mjs', import.meta.url));
+    execFileSync(process.execPath, [script, '--quiet', '--root', project, '--root', project]);
+    const patched = read(file, 'utf8');
+    expect(patched).toContain('/* nightcast: dust fee-loop fix */ (currentFee > 0n ? -currentFee : currentFee)');
+    execFileSync(process.execPath, [script, '--check', '--root', project]);
+    expect(read(file, 'utf8')).toBe(patched);
+  });
+});
