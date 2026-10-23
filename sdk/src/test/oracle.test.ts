@@ -58,6 +58,7 @@ describe('NightcastOracle', () => {
     const { sim, oracle } = setup();
     const other = generateOracleSecretKey();
     sim.proposeOracleKey(oraclePublicKey(other));
+    sim.approveOracleKey(); // the current oracle agrees, so no wait
     sim.acceptOracleKey({ oracleSecretKey: other });
     const id = sim.request(label('g'), label('s'), BigInt(sim.now + 600));
     expect((await oracle.tick()).fulfilled).toEqual([]);
