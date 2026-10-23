@@ -117,6 +117,26 @@ Commit `deployments/preprod.json` to publish it. Anyone can then check the live 
 
 `oracle` joins the deployment in `deployments/preprod.json` and answers every request bound to its key until you press Ctrl+C (`--requesters <hex,...>` limits it to known requesters). `request --wait` makes a test request and prints the result; `status --id <id>` looks one up from public data.
 
+### Check a result, end to end
+
+```sh
+./nightcast check    --network preprod --id <request id> --tag <text> --seed <hex>
+./nightcast selftest --network preprod --requester requester.secret --wallet other-wallet.secret
+```
+
+`check` confirms a request from public data alone, with no secrets:
+- the deployment is the published, locked one;
+- the request is bound to the published oracle key;
+- its curve point is `hashToCurve(id)`, so the oracle couldn't choose its input;
+- it was answered;
+- given the tag and seed (`request` prints both), its id is the one that was asked for.
+
+The output itself was checked by the network, which verified the oracle's `fulfil` proof against the published verifier key. `request --wait` runs these checks on its result.
+
+`selftest` is the full end-to-end run (with the oracle running):
+1. It makes a request, waits for the answer, and checks it as above.
+2. It makes a second request too close to its deadline for the oracle to take, waits for the deadline, and marks it expired with `expire`, which anyone can do. That is what happens to a round the oracle doesn't answer: it is voided, never redrawn.
+
 To embed the oracle in your own service, use `NightcastOracle` with a `MidnightChain` from `@nightcast/sdk` (see `deploy/src/service.ts` for how the CLI does it).
 
 ### Use the randomness

@@ -25,6 +25,10 @@ services:
     environment:
       RUST_LOG: 'indexer=info,chain_indexer=info,indexer_api=info,wallet_indexer=info,indexer_common=info,fastrace_opentelemetry=off,info'
       APP__INFRA__NODE__URL: 'ws://node:9944'
+      # The built-in SPO indexer needs the node too. Left at its default
+      # (localhost) it retries for about 5 minutes, then exits and takes the
+      # whole indexer down with it.
+      APP__INFRA__SPO_NODE__URL: 'ws://node:9944'
       APP__APPLICATION__NETWORK_ID: 'undeployed'
       APP__INFRA__STORAGE__PASSWORD: 'indexer'
       APP__INFRA__PUB_SUB__PASSWORD: 'indexer'

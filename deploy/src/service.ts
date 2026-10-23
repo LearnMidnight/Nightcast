@@ -85,6 +85,22 @@ export const submitRequest = async (
   return { id: result.private.result, tag, seed, deadline, txId: result.public.txId };
 };
 
+/** Mark a missed request as expired (anyone may, once its deadline has passed). */
+export const expireRequest = async (
+  providers: NightcastProviders,
+  contractAddress: string,
+  id: Uint8Array,
+): Promise<string> => {
+  const nightcast = await findDeployedContract(providers, {
+    contractAddress,
+    compiledContract: compiledNightcast(),
+    privateStateId: NIGHTCAST_PRIVATE_STATE_ID,
+    initialPrivateState: {},
+  });
+  const result = await nightcast.callTx.expire(id);
+  return result.public.txId;
+};
+
 /** Read a request from public chain data. */
 export const readRequest = async (
   providers: Pick<NightcastProviders, 'publicDataProvider'>,

@@ -2,7 +2,7 @@
  * End-to-end test on a throwaway local Midnight network in Docker.
  * Run with NIGHTCAST_E2E=1 (CI does this in its own job); skipped otherwise.
  */
-import { describe, it, expect, beforeAll, afterAll } from 'vitest';
+import { describe, it, expect, beforeAll, afterAll, afterEach } from 'vitest';
 import { mkdtempSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -31,7 +31,8 @@ import {
 } from '../network.js';
 import type { DeploymentRecord } from '../record.js';
 import { acceptOracleKey, deployNightcast, deployNightcastLocked } from '../steps.js';
-import { startOracleService, submitRequest, waitForResult } from '../service.js';
+import { checkRequest } from '../check.js';
+import { expireRequest, readRequest, startOracleService, type SubmittedRequest, submitRequest, waitForResult } from '../service.js';
 import { verifyDeployment } from '../verify.js';
 
 const enabled = process.env.NIGHTCAST_E2E === '1';
@@ -50,6 +51,25 @@ describe.runIf(enabled)('Nightcast on a local Midnight network', () => {
   const operatorSecret = generateOperatorSecret();
   let address: string;
 
+  /** The record a publisher would write for this deployment. */
+  const recordNow = (): DeploymentRecord => {
+    const pk = oraclePublicKey(sk);
+    return {
+      network: 'local',
+      contractAddress: address,
+      deployedAt: new Date().toISOString(),
+      compiler: compilerInfo(),
+      parameters: {
+        oraclePublicKey: { x: pk.x.toString(), y: pk.y.toString() },
+        operatorCommitment: hex(pureCircuits.operatorCommitmentOf(operatorSecret)),
+        minWindow: '60',
+        maxWindow: '86400',
+      },
+      transactions: {},
+      verifierKeys: localFingerprints(),
+    };
+  };
+
   beforeAll(async () => {
     process.env.NIGHTCAST_DEPLOYMENTS_DIR = mkdtempSync(join(tmpdir(), 'nightcast-deployments-'));
     session = await connect('local');
@@ -57,8 +77,16 @@ describe.runIf(enabled)('Nightcast on a local Midnight network', () => {
     providers = nightcastProviders(session, wallet);
   }, 15 * 60_000);
 
+  // After a failure, leave the containers running so CI's "Container logs"
+  // step can show what the node and indexer said (CI disables Ryuk for this).
+  let failed = false;
+  afterEach((ctx) => {
+    if (ctx.task.result?.state === 'fail') failed = true;
+  });
+
   afterAll(async () => {
     await wallet?.stop().catch(() => undefined);
+    if (failed && process.env.CI) return;
     await session?.shutdown().catch(() => undefined);
   }, 5 * 60_000);
 
@@ -170,9 +198,46 @@ describe.runIf(enabled)('Nightcast on a local Midnight network', () => {
       expect(r?.status).toBe(Status.fulfilled);
       expect(hex(r!.requester)).toBe(hex(pureCircuits.requesterCommitmentOf(requesterSecret)));
       expect(hex(r!.output)).toBe(hex(pureCircuits.evaluate(sk, req.id)));
+      // Everything `check` confirms from public data, on a real deployment.
+      const state = await requesterProviders.publicDataProvider.queryContractState(address);
+      const checks = checkRequest(recordNow(), state, req.id, r, { inputs: { tag: req.tag, seed: req.seed } });
+      expect(checks.filter((c) => !c.ok)).toEqual([]);
     } finally {
       await running.stop();
       await requesterWallet.stop().catch(() => undefined);
     }
+  }, 20 * 60_000);
+
+  it('expires a request nobody answers, and the checks agree', async () => {
+    const requesterSecret = label('expire-requester');
+    let req: SubmittedRequest | undefined;
+    // As short a deadline as the contract allows, with room for the proof.
+    for (let attempt = 0; attempt < 3 && !req; attempt++) {
+      req = await submitRequest(providers, address, requesterSecret, { tag: 'e2e-expire', deadlineSecs: 120 + 60 * attempt }).catch(
+        () => undefined,
+      );
+    }
+    expect(req).toBeDefined();
+    const id = req!.id;
+    await expect(expireRequest(providers, address, id)).rejects.toThrow();
+    // Keep reading while we wait, to tell an indexer that stops by itself from
+    // one that stops after the expire transaction.
+    const read = (when: string) =>
+      readRequest(providers, address, id).catch((err: unknown) => {
+        throw new Error(`the indexer stopped answering ${when}: ${err instanceof Error ? err.message : String(err)}`);
+      });
+    while (Date.now() / 1000 < Number(req!.deadline) + 15) {
+      await read('while waiting for the deadline');
+      await new Promise((res) => setTimeout(res, 5_000));
+    }
+    let r = await read('just before expire');
+    for (let attempt = 0; attempt < 5 && r?.status === Status.pending; attempt++) {
+      await expireRequest(providers, address, id).catch(() => new Promise((res) => setTimeout(res, 20_000)));
+      r = await read(`after expire attempt ${attempt + 1}`);
+    }
+    expect(r?.status).toBe(Status.expired);
+    const state = await providers.publicDataProvider.queryContractState(address);
+    const checks = checkRequest(recordNow(), state, id, r, { inputs: { tag: req!.tag, seed: req!.seed }, expect: 'expired' });
+    expect(checks.filter((c) => !c.ok)).toEqual([]);
   }, 20 * 60_000);
 });

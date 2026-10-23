@@ -61,9 +61,19 @@ import {
 } from './network.js';
 import { walletStateFile } from './wallet.js';
 import { currentCommit, type DeploymentRecord, readRecord, recordPath, writeRecord } from './record.js';
-import { describeRequest, readRequest, startOracleService, submitRequest, waitForResult } from './service.js';
+import { checkRequest } from './check.js';
+import {
+  describeRequest,
+  expireRequest,
+  readRequest,
+  startOracleService,
+  type SubmittedRequest,
+  submitRequest,
+  textLabel,
+  waitForResult,
+} from './service.js';
 import { acceptOracleKey, deployNightcastLocked } from './steps.js';
-import { formatChecks, verifyDeployment } from './verify.js';
+import { type Check, formatChecks, verifyDeployment } from './verify.js';
 
 const USAGE = `usage:
   ./nightcast deploy       --network <${NETWORKS.join('|')}> --oracle <file> --operator <file> --wallet <file> [--min 60] [--max 86400] [--accept] [--proof-server-port <port>]
@@ -80,6 +90,11 @@ const USAGE = `usage:
   ./nightcast oracle       --network <network> --oracle <oracle secret file> --wallet <file> [--requesters <hex,...>] [--poll 5] [--proof-server-port <port>]
   ./nightcast request      --network <network> --requester <requester secret file> --wallet <file> [--tag <text>] [--deadline-mins 30] [--wait] [--proof-server-port <port>]
   ./nightcast status       --network <network> --id <request id>
+  ./nightcast check        --network <network> --id <request id> [--tag <text> --seed <hex>]
+                           (confirm a request's result from public data; with its tag and seed, also that it's the request asked for)
+  ./nightcast expire       --network <network> --id <request id> --wallet <file>
+  ./nightcast selftest     --network <network> --requester <requester secret file> --wallet <file> [--proof-server-port <port>]
+                           (end-to-end: a request the oracle answers, checked; and one it must skip, expired)
   ./nightcast blockfrost save --network <network> [--out <file>]
 
 --oracle, --operator and --requester take files from \`./nightcast keygen\`. --wallet takes a
@@ -215,6 +230,24 @@ const withSession = async <T>(network: Network, proofServerPort: number | undefi
   }
 };
 
+/** A read-only indexer connection for commands that need no wallet. */
+const publicDataFor = (network: Network) => {
+  if (network === 'local') throw new Error('this command on `local` must run inside the same session as the deploy');
+  const config = publicEndpoints(network, createLogger('warn'), projectIdFor(network));
+  setNetworkId(config.networkId);
+  return indexerPublicDataProvider(config.indexer, config.indexerWS);
+};
+
+const localFingerprintsOrNone = (): Fingerprints | undefined => {
+  try {
+    return localFingerprints();
+  } catch {
+    return undefined;
+  }
+};
+
+const sleep = (ms: number) => new Promise<void>((res) => setTimeout(res, ms));
+
 const runVerify = async (session: Session | undefined, network: Network, address?: string): Promise<boolean> => {
   const record = readRecord(network);
   if (address && address !== record.contractAddress) throw new Error(`record is for ${record.contractAddress}, not ${address}`);
@@ -249,6 +282,7 @@ const main = async (argv: string[]): Promise<number> => {
       requesters: { type: 'string' },
       poll: { type: 'string', default: '5' },
       tag: { type: 'string' },
+      seed: { type: 'string' },
       'deadline-mins': { type: 'string', default: '30' },
       wait: { type: 'boolean', default: false },
       id: { type: 'string' },
@@ -563,9 +597,15 @@ const main = async (argv: string[]): Promise<number> => {
             tag: values.tag,
             deadlineSecs: Math.floor(mins * 60),
           });
-          process.stdout.write(`\nRequest id: ${toHex(req.id)}\nDeadline:   ${new Date(Number(req.deadline) * 1000).toISOString()}\n\n`);
+          const tagText = values.tag ?? 'nightcast-test';
+          process.stdout.write(
+            `\nRequest id: ${toHex(req.id)}\nDeadline:   ${new Date(Number(req.deadline) * 1000).toISOString()}\n` +
+              `Tag:        ${tagText}\nSeed:       ${toHex(req.seed)} (public; with the tag, it lets anyone check the id)\n\n`,
+          );
           if (!values.wait) {
-            process.stdout.write(`Check it with: ./nightcast status --network ${network} --id ${toHex(req.id)}\n`);
+            process.stdout.write(
+              `Check it with: ./nightcast check --network ${network} --id ${toHex(req.id)} --tag ${tagText} --seed ${toHex(req.seed)}\n`,
+            );
             return 0;
           }
           session.logger.info('Waiting for the oracle to answer...');
@@ -579,9 +619,163 @@ const main = async (argv: string[]): Promise<number> => {
             process.stdout.write(
               `words    ${words.join(' ')}\nlotto    ${draw.numbers.join(' ')} + Moonball ${draw.moonball} (Starfall example)\n`,
             );
-            return 0;
+            const state = await providers.publicDataProvider.queryContractState(record.contractAddress);
+            const checks = checkRequest(record, state, req.id, result, {
+              inputs: { tag: req.tag, seed: req.seed },
+              deployment: false,
+            });
+            process.stdout.write(`\nChecks from public data:\n${formatChecks(checks)}\n`);
+            return checks.every((c) => c.ok) ? 0 : 1;
           }
           return 1;
+        } finally {
+          await wallet.stop().catch(() => undefined);
+        }
+      });
+    }
+
+    case 'check': {
+      const network = networkArg(values.network);
+      if (!values.id) throw new Error(USAGE);
+      if (values.seed && !values.tag) throw new Error('--seed needs the --tag the request was made with');
+      const record = readRecord(network);
+      const id = fromHex(values.id);
+      const publicDataProvider = publicDataFor(network);
+      const state = await publicDataProvider.queryContractState(record.contractAddress);
+      const r = await readRequest({ publicDataProvider }, record.contractAddress, id);
+      const checks = checkRequest(record, state, id, r, {
+        inputs: values.seed ? { tag: textLabel(values.tag!), seed: fromHex(values.seed) } : undefined,
+        local: localFingerprintsOrNone(),
+      });
+      process.stdout.write(`Request ${values.id} on ${network}\n${formatChecks(checks)}\n`);
+      if (!values.seed) process.stdout.write('(Pass --tag and --seed as well to check the id is the request that was asked for.)\n');
+      return checks.every((c) => c.ok) ? 0 : 1;
+    }
+
+    case 'expire': {
+      const network = networkArg(values.network);
+      if (!values.id) throw new Error(USAGE);
+      const record = readRecord(network);
+      const id = fromHex(values.id);
+      return withSession(network, portArg(values['proof-server-port']), async (session) => {
+        const wallet = await openWallet(session, walletOptions(network, walletSeed(values.wallet)));
+        try {
+          const providers = nightcastProviders(session, wallet);
+          const before = await readRequest(providers, record.contractAddress, id);
+          if (!before) throw new Error(`no request ${values.id}`);
+          if (before.status !== Status.pending) {
+            process.stdout.write(describeRequest(id, before) + '\n(Nothing to do: it is no longer pending.)\n');
+            return 0;
+          }
+          session.logger.info('Marking the request as expired...');
+          const txId = await expireRequest(providers, record.contractAddress, id);
+          session.logger.info(`Expired (tx ${txId})`);
+          process.stdout.write(describeRequest(id, await readRequest(providers, record.contractAddress, id)) + '\n');
+          return 0;
+        } finally {
+          await wallet.stop().catch(() => undefined);
+        }
+      });
+    }
+
+    case 'selftest': {
+      const network = networkArg(values.network);
+      if (!values.requester) throw new Error(USAGE);
+      const requesterFile = readKeyFile(values.requester, 'requester');
+      if (!requesterFile.secret) throw new Error(`${values.requester} has no secret`);
+      const requesterSecret = fromHex(requesterFile.secret);
+      const record = readRecord(network);
+      const minWindow = Number(record.parameters.minWindow);
+      return withSession(network, portArg(values['proof-server-port']), async (session) => {
+        const log = session.logger;
+        const wallet = await openWallet(session, walletOptions(network, walletSeed(values.wallet)));
+        try {
+          const providers = nightcastProviders(session, wallet);
+          const address = record.contractAddress;
+          const stateNow = () => providers.publicDataProvider.queryContractState(address);
+          const all: Check[] = [];
+
+          // The deployment itself, as `verify`.
+          const deployment = verifyDeployment(record, await stateNow(), localFingerprintsOrNone());
+          process.stdout.write(`\nNightcast on ${network} at ${address}\n${formatChecks(deployment)}\n`);
+          all.push(...deployment);
+
+          // 1. A request the oracle answers.
+          process.stdout.write('\n1/2  A request for the oracle to answer (the oracle must be running)\n');
+          const answered = await submitRequest(providers, address, requesterSecret, { tag: 'nightcast-selftest', deadlineSecs: 30 * 60 });
+          process.stdout.write(`     id ${toHex(answered.id)}, waiting for the answer...\n`);
+          const r1 = await waitForResult(providers, address, answered.id, { timeoutMs: 31 * 60_000 });
+          const c1 = checkRequest(record, await stateNow(), answered.id, r1, {
+            inputs: { tag: answered.tag, seed: answered.seed },
+            deployment: false,
+          });
+          if (r1?.status === Status.pending) {
+            c1.push({ name: 'answered in time', ok: false, detail: 'no answer within 30 minutes: is the oracle running?' });
+          }
+          process.stdout.write(`${formatChecks(c1)}\n`);
+          all.push(...c1);
+
+          // 2. A request too close to its deadline for the oracle to take, which
+          //    then expires: what happens to a draw the oracle doesn't answer.
+          process.stdout.write('\n2/2  A request the oracle must skip, then marked expired\n');
+          let skipped: SubmittedRequest | undefined;
+          for (let attempt = 0; attempt < 3 && !skipped; attempt++) {
+            try {
+              skipped = await submitRequest(providers, address, requesterSecret, {
+                tag: 'nightcast-selftest-expire',
+                deadlineSecs: minWindow + 50 + 30 * attempt,
+              });
+            } catch (err) {
+              // Usually the proof took long enough that the deadline was too soon by the time it landed.
+              log.warn(`The short request was refused (${err instanceof Error ? err.message.split('\n')[0] : String(err)}); trying with a little more time`);
+            }
+          }
+          if (!skipped) {
+            const c = { name: 'short request accepted', ok: false, detail: 'refused three times' };
+            process.stdout.write(`${formatChecks([c])}\n`);
+            all.push(c);
+          } else {
+            const deadline = Number(skipped.deadline);
+            process.stdout.write(`     id ${toHex(skipped.id)}, deadline ${new Date(deadline * 1000).toISOString()}; waiting for it to pass...\n`);
+            while (Date.now() / 1000 < deadline + 20) await sleep(5_000);
+            const c2: Check[] = [];
+            let r2 = await readRequest(providers, address, skipped.id);
+            if (r2?.status === Status.fulfilled) {
+              c2.push({
+                name: 'oracle skipped the short request',
+                ok: false,
+                detail: 'the oracle answered it in time, so expiry was not tested; run selftest again',
+              });
+            } else {
+              for (let attempt = 0; attempt < 5 && r2?.status === Status.pending; attempt++) {
+                try {
+                  await expireRequest(providers, address, skipped.id);
+                } catch (err) {
+                  // The chain's clock can be a little behind ours.
+                  log.warn(`expire was refused (${err instanceof Error ? err.message.split('\n')[0] : String(err)}); trying again in 30 s`);
+                  await sleep(30_000);
+                }
+                r2 = await waitForResult(providers, address, skipped.id, { pollMs: 5_000, timeoutMs: 60_000 });
+              }
+              c2.push(
+                ...checkRequest(record, await stateNow(), skipped.id, r2, {
+                  inputs: { tag: skipped.tag, seed: skipped.seed },
+                  expect: 'expired',
+                  deployment: false,
+                }),
+              );
+            }
+            process.stdout.write(`${formatChecks(c2)}\n`);
+            all.push(...c2);
+          }
+
+          const failed = all.filter((c) => !c.ok);
+          process.stdout.write(
+            failed.length === 0
+              ? '\nSelftest passed: answered and checked from public data, and a skipped request expired.\n'
+              : `\nSelftest found ${failed.length} problem(s): ${failed.map((c) => c.name).join(', ')}\n`,
+          );
+          return failed.length === 0 ? 0 : 1;
         } finally {
           await wallet.stop().catch(() => undefined);
         }
