@@ -50,11 +50,18 @@ services:
     container_name: node_$TESTCONTAINERS_UID
     ports:
       - '9944'
+    # Healthy once block 1 exists: the indexer (which waits for this) reads
+    # block 1 as soon as it starts, and exits if it isn't there yet.
     healthcheck:
-      test: ['CMD', 'curl', '-f', 'http://localhost:9944/health']
+      test:
+        - CMD-SHELL
+        - >-
+          r=$$(curl -sf -H 'Content-Type: application/json'
+          -d '{"id":1,"jsonrpc":"2.0","method":"chain_getBlockHash","params":[1]}'
+          http://localhost:9944); case "$$r" in *'"result":"0x'*) exit 0;; *) exit 1;; esac
       interval: 2s
       timeout: 5s
-      retries: 20
+      retries: 60
       start_period: 20s
     environment:
       CFG_PRESET: 'dev'
