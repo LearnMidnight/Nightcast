@@ -33,7 +33,7 @@ const setup = (opts: { safetyMarginSecs?: number } = {}) => {
     maxWindow: 3_600n,
   });
   const chain = new SimulatorChain(sim, sk);
-  const oracle = new NightcastOracle({ chain, secretKey: sk, safetyMarginSecs: opts.safetyMarginSecs ?? 30 });
+  const oracle = new NightcastOracle({ chain, secretKey: sk, safetyMarginSecs: opts.safetyMarginSecs ?? 30, newRequestDelayMs: 0 });
   return { sk, sim, chain, oracle };
 };
 
@@ -74,6 +74,7 @@ describe('NightcastOracle', () => {
       chain,
       secretKey: sk,
       safetyMarginSecs: 30,
+      newRequestDelayMs: 0,
       requesters: [hex(pureCircuits.requesterCommitmentOf(friend.requesterSecret)).toUpperCase()],
     });
     expect((await oracle.tick()).fulfilled).toEqual([hex(good)]);
@@ -102,7 +103,7 @@ describe('NightcastOracle', () => {
         sim.advance(190);
       },
     };
-    const oracle = new NightcastOracle({ chain: slow, secretKey: sk, safetyMarginSecs: 30 });
+    const oracle = new NightcastOracle({ chain: slow, secretKey: sk, safetyMarginSecs: 30, newRequestDelayMs: 0 });
     const report = await oracle.tick();
     expect(report.fulfilled).toEqual([hex(first)]);
     expect(report.skipped).toEqual([{ id: hex(second), reason: 'too close to deadline' }]);
@@ -120,7 +121,7 @@ describe('NightcastOracle', () => {
         await chain.fulfil(rid);
       },
     };
-    const oracle = new NightcastOracle({ chain: flaky, secretKey: sk, backoffMs: 5, maxBackoffMs: 20 });
+    const oracle = new NightcastOracle({ chain: flaky, secretKey: sk, backoffMs: 5, maxBackoffMs: 20, newRequestDelayMs: 0 });
     expect((await oracle.tick()).failed).toEqual([{ id: hex(id), error: 'node unavailable' }]);
     expect((await oracle.tick()).skipped).toEqual([{ id: hex(id), reason: 'backing off' }]);
     for (let i = 0; i < 20 && sim.getLedger().requests.lookup(id).status !== Status.fulfilled; i++) {
@@ -140,7 +141,7 @@ describe('NightcastOracle', () => {
 
   it('polls until stopped', async () => {
     const { sim, sk, chain } = setup();
-    const oracle = new NightcastOracle({ chain, secretKey: sk, pollMs: 10, safetyMarginSecs: 30 });
+    const oracle = new NightcastOracle({ chain, secretKey: sk, pollMs: 10, safetyMarginSecs: 30, newRequestDelayMs: 0 });
     oracle.start();
     const id = sim.request(label('g'), label('later'), BigInt(sim.now + 600));
     for (let i = 0; i < 50 && sim.getLedger().requests.lookup(id).status !== Status.fulfilled; i++) {
@@ -148,6 +149,58 @@ describe('NightcastOracle', () => {
     }
     await oracle.stop();
     expect(sim.getLedger().requests.lookup(id).status).toBe(Status.fulfilled);
+  });
+});
+
+describe('NightcastOracle and a lagging indexer', () => {
+  it('waits a moment before answering a request it has just seen', async () => {
+    const { sim, sk, chain } = setup();
+    const id = sim.request(label('g'), label('s'), BigInt(sim.now + 600));
+    const oracle = new NightcastOracle({ chain, secretKey: sk, safetyMarginSecs: 30, newRequestDelayMs: 40 });
+    expect((await oracle.tick()).skipped).toEqual([{ id: hex(id), reason: 'new; letting the node catch up' }]);
+    expect(sim.getLedger().requests.lookup(id).status).toBe(Status.pending);
+    await new Promise((r) => setTimeout(r, 50));
+    expect((await oracle.tick()).fulfilled).toEqual([hex(id)]);
+  });
+
+  it("doesn't answer the same request twice while the indexer catches up", async () => {
+    const { sim, sk, chain } = setup();
+    const id = sim.request(label('g'), label('s'), BigInt(sim.now + 600));
+    // An indexer that keeps reporting the request as pending after it was answered.
+    const stale = await chain.listRequests();
+    let attempts = 0;
+    const lagging = {
+      listRequests: async () => stale,
+      now: () => chain.now(),
+      fulfil: async (rid: Uint8Array) => {
+        attempts += 1;
+        await chain.fulfil(rid);
+      },
+    };
+    const oracle = new NightcastOracle({ chain: lagging, secretKey: sk, newRequestDelayMs: 0, answeredGraceMs: 60_000 });
+    expect((await oracle.tick()).fulfilled).toEqual([hex(id)]);
+    expect((await oracle.tick()).skipped).toEqual([{ id: hex(id), reason: 'answered; waiting for the indexer' }]);
+    expect(attempts).toBe(1);
+  });
+
+  it('tries again if a request is still pending after the grace period', async () => {
+    const { sim, sk, chain } = setup();
+    const id = sim.request(label('g'), label('s'), BigInt(sim.now + 600));
+    const entries = await chain.listRequests();
+    let attempts = 0;
+    // A fulfil that "succeeds" but never lands, as a dropped transaction would.
+    const dropped = {
+      listRequests: async () => entries,
+      now: () => chain.now(),
+      fulfil: async () => {
+        attempts += 1;
+      },
+    };
+    const oracle = new NightcastOracle({ chain: dropped, secretKey: sk, newRequestDelayMs: 0, answeredGraceMs: 20 });
+    await oracle.tick();
+    await new Promise((r) => setTimeout(r, 30));
+    expect((await oracle.tick()).fulfilled).toEqual([hex(id)]);
+    expect(attempts).toBe(2);
   });
 });
 
