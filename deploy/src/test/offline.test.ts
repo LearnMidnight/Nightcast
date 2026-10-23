@@ -164,3 +164,42 @@ describe('output redaction', () => {
     expect(cli.indexOf("import './redact-output.js'")).toBeLessThan(cli.indexOf("from '@midnight-ntwrk"));
   });
 });
+
+describe('wallet error messages', () => {
+  // Shaped like the SDK's errors: a tagged error whose message is an object.
+  const syncError = (message: unknown, cause?: unknown) =>
+    Object.assign(new Error(String(message)), { _tag: 'Wallet.Sync', message, ...(cause ? { cause } : {}) });
+
+  it('finds the reason inside an object message', async () => {
+    const { describeWalletError } = await import('../explain-errors.js');
+    const err = syncError({ message: 'Unexpected server response: 429', error: new Error('Too Many Requests') });
+    expect(describeWalletError(err)).toBe('Unexpected server response: 429: Too Many Requests');
+  });
+
+  it('describes a closed WebSocket and a GraphQL error list', async () => {
+    const { describeWalletError } = await import('../explain-errors.js');
+    expect(describeWalletError(syncError({ code: 1006, reason: '' }))).toBe('connection closed (code 1006)');
+    expect(describeWalletError(syncError({ errors: [{ message: 'daily request limit reached' }] }))).toBe(
+      'daily request limit reached',
+    );
+  });
+
+  it('shows a plain object when there is no message to read', async () => {
+    const { describeWalletError } = await import('../explain-errors.js');
+    expect(describeWalletError(syncError({ status: 503 }))).toBe('{ status: 503 }');
+  });
+
+  it('replaces the SDK print with one line, and counts repeats', async () => {
+    const { wrapConsoleError } = await import('../explain-errors.js');
+    const lines: string[] = [];
+    const print = wrapConsoleError((...args: unknown[]) => lines.push(args.map(String).join(' ')));
+    const err = syncError({ message: 'socket hang up' });
+    for (let i = 0; i < 10; i++) print(err);
+    print('something else', 42);
+    expect(lines).toEqual([
+      'Wallet sync problem: socket hang up. The wallet retries by itself.',
+      'Wallet sync problem: socket hang up (seen 10 times; the wallet keeps retrying)',
+      'something else 42',
+    ]);
+  });
+});

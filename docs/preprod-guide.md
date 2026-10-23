@@ -295,13 +295,13 @@ git push
 | `preprod needs a Blockfrost project id` | Do step 8. |
 | `the Blockfrost project id was refused` (401 or 403) | The ID is wrong or for another network. Check the project's network is **Midnight Preprod**, then run `./nightcast blockfrost save --network preprod` again. |
 | A step sits for many minutes with Node at 200–300% CPU, and Ctrl+C does nothing | Ubuntu is short of memory: see step 2. Stop it with Ctrl+\\ and run the command again. |
-| Repeated `Wallet.Sync: [object ErrorEvent]` | Press Ctrl+C and run `./nightcast doctor --network preprod`; it shows which connection fails and why. |
+| Repeated `Wallet sync problem: ...` | The wallet retries by itself, so a few are fine. If it keeps repeating, press Ctrl+C and run `./nightcast doctor --network preprod`; it shows which connection fails. If everything answers, check your Blockfrost project's daily request usage on blockfrost.io. |
 | `doctor` reports a problem, or a command says `did not answer` | Check your internet connection and run `./nightcast doctor --network preprod` again; Preprod is sometimes briefly down. |
 | `Cannot connect to the Docker daemon` | Open Docker Desktop and check WSL integration is on for Ubuntu (step 2). |
 | `compact: command not found` or `nvm: command not found` | Run `source ~/.bashrc`, or close and reopen the Ubuntu terminal. |
 | Sync progress stops moving for many minutes | Press Ctrl+C, run `./nightcast doctor --network preprod`, then run the command again; it resumes from the last save. |
 | Stuck on "Waiting for the NIGHT to arrive" | Check you pasted the `mn_addr_preprod1...` address into the faucet, with no spaces. |
-| Stuck on "Waiting for the first DUST" | Normal for a few minutes after funding; DUST builds up over time. |
+| Stuck on "Waiting for the first DUST" | Normal for a few minutes after funding; DUST builds up over time. A `Waiting for DUST` line every minute shows what the wallet sees. If a wallet that had DUST before shows 0 for more than 15 minutes, its saved sync state is probably stale: press Ctrl+C, run `./nightcast wallet forget --network preprod --wallet <its wallet file>`, then start again (it syncs from the beginning, which takes a while). |
 | `the oracle key is not active yet` | Run `./nightcast accept-key --network preprod --oracle ~/nightcast-secrets/oracle.secret --wallet ~/nightcast-secrets/oracle-wallet.secret`. |
 | A request shows `expired` | The oracle wasn't running before its deadline. Start the oracle and make a new request. |
 | `No compiled contract with proving keys found` | Run `npm run compact` then `npm run build` in `~/nightcast`. |

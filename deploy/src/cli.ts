@@ -25,9 +25,11 @@
  */
 // First, so nothing can print a Blockfrost project id before the filter is in place.
 import './redact-output.js';
+// Then make the wallet SDK's `Wallet.Sync: [object Object]` errors readable.
+import './explain-errors.js';
 import { webcrypto } from 'node:crypto';
 import { totalmem } from 'node:os';
-import { chmodSync, mkdirSync, readFileSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
+import { chmodSync, existsSync, mkdirSync, readFileSync, realpathSync, renameSync, rmSync, writeFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { parseArgs } from 'node:util';
@@ -57,6 +59,7 @@ import {
   walletBalances,
   waitForSpendableDust,
 } from './network.js';
+import { walletStateFile } from './wallet.js';
 import { currentCommit, type DeploymentRecord, readRecord, recordPath, writeRecord } from './record.js';
 import { describeRequest, readRequest, startOracleService, submitRequest, waitForResult } from './service.js';
 import { acceptOracleKey, deployNightcastLocked } from './steps.js';
@@ -72,6 +75,8 @@ const USAGE = `usage:
   ./nightcast doctor       --network <network> [--proof-server-port <port>]
   ./nightcast wallet new   --out <file>
   ./nightcast wallet show  --network <network> --wallet <file> [--proof-server-port <port>]
+  ./nightcast wallet forget --network <network> --wallet <file>
+                           (set aside the wallet's saved sync state, so the next command syncs it from the start)
   ./nightcast oracle       --network <network> --oracle <oracle secret file> --wallet <file> [--requesters <hex,...>] [--poll 5] [--proof-server-port <port>]
   ./nightcast request      --network <network> --requester <requester secret file> --wallet <file> [--tag <text>] [--deadline-mins 30] [--wait] [--proof-server-port <port>]
   ./nightcast status       --network <network> --id <request id>
@@ -474,7 +479,26 @@ const main = async (argv: string[]): Promise<number> => {
         );
         return 0;
       }
-      if (sub !== 'show') throw new Error('usage: ./nightcast wallet <new|show> ...');
+      if (sub === 'forget') {
+        const network = networkArg(values.network);
+        const seed = walletSeed(values.wallet);
+        if (!seed) throw new Error('usage: ./nightcast wallet forget --network <network> --wallet <file>');
+        const file = walletStateFile(network, seed);
+        if (!existsSync(file)) {
+          process.stdout.write(`This wallet has no saved state on ${network}; the next command syncs it from the start anyway.\n`);
+          return 0;
+        }
+        // Keep the old state (renamed) rather than deleting it.
+        const aside = `${file}.old-${new Date().toISOString().replace(/[:.]/g, '-')}`;
+        renameSync(file, aside);
+        process.stdout.write(
+          `Set the saved state aside (${aside}).\n` +
+            `The next command with this wallet syncs it from the start. On Preprod that reads about 1.7 million events\n` +
+            `and can take an hour or more; progress is shown every 30 seconds. Your keys and coins are not affected.\n`,
+        );
+        return 0;
+      }
+      if (sub !== 'show') throw new Error('usage: ./nightcast wallet <new|show|forget> ...');
       const network = networkArg(values.network);
       const seed = walletSeed(values.wallet);
       return withSession(network, portArg(values['proof-server-port']), async (session) => {
