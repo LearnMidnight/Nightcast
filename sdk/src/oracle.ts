@@ -19,6 +19,20 @@ export type OracleOptions = {
    * minWindow.
    */
   safetyMarginSecs?: number;
+  /**
+   * Wait this long (ms) after first seeing a request before answering it. The
+   * indexer can show a new request a few seconds before the node we submit to
+   * has it, and a fulfil sent too early is rejected. Default 20 s.
+   */
+  newRequestDelayMs?: number;
+  /**
+   * After a fulfil succeeds, don't try that request again for this long (ms)
+   * even if the indexer still lists it as pending: it lags behind the chain,
+   * and a second fulfil would only be rejected. Default 10 minutes; after
+   * that, a request still pending is retried (its transaction may have been
+   * dropped).
+   */
+  answeredGraceMs?: number;
   /** First retry delay after a failed fulfil, in ms; doubles each failure up to `maxBackoffMs`. */
   backoffMs?: number;
   maxBackoffMs?: number;
@@ -71,7 +85,11 @@ export const selectWork = (
  * Watches a Nightcast deployment and fulfils every pending request bound to
  * its key. Fulfils one at a time, which keeps wallet balancing simple and
  * avoids two transactions competing for the same fees. Failed fulfils are
- * retried with exponential backoff until the deadline gets too close.
+ * retried with exponential backoff until the deadline gets too close. It
+ * reads requests from an indexer, which can be a little ahead of the node it
+ * submits to (a new request) or behind the chain (a request it has just
+ * answered), so it waits briefly before answering a new request and doesn't
+ * answer the same one twice in quick succession.
  *
  * The oracle cannot choose outputs: each one is fixed by the key and the
  * request's stored point. Its only power is to answer or not, which is why
@@ -81,11 +99,22 @@ export class NightcastOracle {
   readonly publicKey: { x: bigint; y: bigint };
   private readonly retries = new Map<string, Retry>();
   private readonly warnedLate = new Set<string>();
+  /** When each pending request was first seen (ms, local clock). */
+  private readonly firstSeen = new Map<string, number>();
+  /** When each request was last fulfilled successfully (ms, local clock). */
+  private readonly answered = new Map<string, number>();
   private readonly requesters: ReadonlySet<string> | undefined;
   private timer: ReturnType<typeof setTimeout> | undefined;
   private running = false;
   private busy: Promise<TickReport> | undefined;
-  private readonly cfg: { pollMs: number; safetyMarginSecs: number; backoffMs: number; maxBackoffMs: number };
+  private readonly cfg: {
+    pollMs: number;
+    safetyMarginSecs: number;
+    backoffMs: number;
+    maxBackoffMs: number;
+    newRequestDelayMs: number;
+    answeredGraceMs: number;
+  };
   private readonly logger: OracleLogger;
 
   constructor(private readonly options: OracleOptions) {
@@ -95,6 +124,8 @@ export class NightcastOracle {
       safetyMarginSecs: options.safetyMarginSecs ?? 120,
       backoffMs: options.backoffMs ?? 5_000,
       maxBackoffMs: options.maxBackoffMs ?? 60_000,
+      newRequestDelayMs: options.newRequestDelayMs ?? 20_000,
+      answeredGraceMs: options.answeredGraceMs ?? 10 * 60_000,
     };
     this.requesters = options.requesters ? new Set([...options.requesters].map((r) => r.toLowerCase())) : undefined;
     this.logger = options.logger ?? silent;
@@ -123,7 +154,7 @@ export class NightcastOracle {
 
   private async doTick(): Promise<TickReport> {
     const { chain } = this.options;
-    const { safetyMarginSecs, backoffMs, maxBackoffMs } = this.cfg;
+    const { safetyMarginSecs, backoffMs, maxBackoffMs, newRequestDelayMs, answeredGraceMs } = this.cfg;
     const report: TickReport = { fulfilled: [], failed: [], skipped: [] };
 
     const entries = await chain.listRequests();
@@ -132,6 +163,8 @@ export class NightcastOracle {
     // Forget state for requests that are no longer pending for us.
     const live = new Set(todo.map((e) => hex(e.id)));
     for (const id of this.retries.keys()) if (!live.has(id)) this.retries.delete(id);
+    for (const id of this.firstSeen.keys()) if (!live.has(id)) this.firstSeen.delete(id);
+    for (const id of this.answered.keys()) if (!live.has(id)) this.answered.delete(id);
     const late = new Set(tooLate.map((e) => hex(e.id)));
     for (const id of this.warnedLate) if (!late.has(id)) this.warnedLate.delete(id);
 
@@ -146,6 +179,17 @@ export class NightcastOracle {
 
     for (const e of todo) {
       const id = hex(e.id);
+      const seenAt = this.firstSeen.get(id) ?? Date.now();
+      if (!this.firstSeen.has(id)) this.firstSeen.set(id, seenAt);
+      if (Date.now() - seenAt < newRequestDelayMs) {
+        report.skipped.push({ id, reason: 'new; letting the node catch up' });
+        continue;
+      }
+      const answeredAt = this.answered.get(id);
+      if (answeredAt !== undefined && Date.now() - answeredAt < answeredGraceMs) {
+        report.skipped.push({ id, reason: 'answered; waiting for the indexer' });
+        continue;
+      }
       const retry = this.retries.get(id);
       if (retry && Date.now() < retry.nextTryAt) {
         report.skipped.push({ id, reason: 'backing off' });
@@ -159,6 +203,7 @@ export class NightcastOracle {
       try {
         await chain.fulfil(e.id);
         this.retries.delete(id);
+        this.answered.set(id, Date.now());
         report.fulfilled.push(id);
         this.logger.info(`fulfilled ${id} -> ${hex(this.expectedOutput(e))}`);
       } catch (err) {
