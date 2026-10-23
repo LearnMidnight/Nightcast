@@ -8,9 +8,7 @@ services:
     command: ['midnight-proof-server --verbose']
     # Reachable from this machine only: the oracle's secret key passes through it.
     ports:
-      - target: 6300
-        host_ip: 127.0.0.1
-        protocol: tcp
+      - "127.0.0.1:0:6300"
     environment:
       RUST_BACKTRACE: "full"
     healthcheck:
