@@ -46,7 +46,7 @@ Save, close Notepad, and run `wsl --shutdown`. (If Ubuntu can't reach github.com
 
 ### 2b. Install Docker Desktop
 
-Docker runs the Midnight proof server, which creates the zero-knowledge proofs.
+Docker runs the Midnight proof server, which creates the zero-knowledge proofs. It sees your oracle secret while it works, so it must run on your own PC (the tools start it there, listening only to your PC); never point the tools at somebody else's proof server.
 
 1. Download Docker Desktop from [docker.com](https://www.docker.com/products/docker-desktop/) and install it. Keep **Use WSL 2** ticked.
 2. Open Docker Desktop → **Settings → Resources → WSL integration**, switch on **Ubuntu**, then **Apply & restart**.

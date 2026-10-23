@@ -6,8 +6,11 @@ services:
     image: "midnightntwrk/proof-server:8.1.3"
     container_name: proof-server_$TESTCONTAINERS_UID
     command: ['midnight-proof-server --verbose']
+    # Reachable from this machine only: the oracle's secret key passes through it.
+    # (Every port here is bound to 127.0.0.1: Docker hands out ephemeral ports
+    # per address, so mixing 127.0.0.1 and 0.0.0.0 binds makes them collide.)
     ports:
-      - '6300'
+      - "127.0.0.1:0:6300"
     environment:
       RUST_BACKTRACE: 'full'
     healthcheck:
@@ -21,7 +24,7 @@ services:
     image: "midnightntwrk/indexer-standalone:4.3.5"
     container_name: indexer_$TESTCONTAINERS_UID
     ports:
-      - '8088'
+      - '127.0.0.1:0:8088'
     environment:
       RUST_LOG: 'indexer=info,chain_indexer=info,indexer_api=info,wallet_indexer=info,indexer_common=info,fastrace_opentelemetry=off,info'
       APP__INFRA__NODE__URL: 'ws://node:9944'
@@ -49,7 +52,7 @@ services:
     image: "midnightntwrk/midnight-node:1.0.400"
     container_name: node_$TESTCONTAINERS_UID
     ports:
-      - '9944'
+      - '127.0.0.1:0:9944'
     # Healthy once block 1 exists: the indexer (which waits for this) reads
     # block 1 as soon as it starts, and exits if it isn't there yet.
     healthcheck:

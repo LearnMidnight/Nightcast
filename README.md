@@ -78,6 +78,8 @@ npm test
 
 The oracle, operator and each requester are separate roles; keep their secrets on separate machines.
 
+**Run your own proof server.** Every secret a circuit uses (the oracle key in `fulfil` and `acceptOracleKey`, the operator secret, a requester secret) is sent to the proof server to build the proof. So the oracle and the operator must each use a proof server on their own machine, never a hosted or shared one. The tools start one in Docker bound to `127.0.0.1`, so nothing else on the network can reach it.
+
 ```sh
 ./nightcast keygen oracle    --out oracle.secret     # prints the oracle public key
 ./nightcast keygen operator  --out operator.secret   # prints the operator commitment
