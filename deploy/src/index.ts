@@ -29,6 +29,14 @@ export {
 } from './network.js';
 export { deployLocked } from './steps.js';
 export { isLocked, type AuthorityView } from './lock.js';
-export { compareFingerprints, type CompilerInfo, type Fingerprints, onChainFingerprints, type OperationsSource } from './fingerprints.js';
+export {
+  compareFingerprints,
+  compilerInfo,
+  type CompilerInfo,
+  type Fingerprints,
+  localFingerprints,
+  onChainFingerprints,
+  type OperationsSource,
+} from './fingerprints.js';
 export { forgetWalletState, walletStateFile } from './wallet.js';
 export { redact } from './redact-output.js';
