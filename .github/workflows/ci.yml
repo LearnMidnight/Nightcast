@@ -220,6 +220,12 @@ jobs:
         if: failure()
         run: |
           echo "::warning title=logs containers::$(docker ps -a --format '{{.Names}}: {{.Status}}' | awk 'BEGIN{ORS="%0A"} {print}')"
+          # For containers that stopped: how, and their last warnings and errors.
+          for c in $(docker ps -a --filter status=exited --format '{{.Names}}'); do
+            state=$(docker inspect --format 'exit {{.State.ExitCode}}, OOM killed {{.State.OOMKilled}}, finished {{.State.FinishedAt}} {{.State.Error}}' "$c")
+            errs=$(docker logs "$c" 2>&1 | grep -iE '"level":"(ERROR|WARN)"|panic|error' | tail -n 6 | cut -c1-600 | sed 's/%/%25/g' | awk 'BEGIN{ORS="%0A"} {print}')
+            echo "::warning title=logs $c stopped::$state%0A$errs"
+          done
           for c in $(docker ps -a --format '{{.Names}}'); do
             tail=$(docker logs --tail 25 "$c" 2>&1 | tail -c 2500 | sed 's/%/%25/g' | awk 'BEGIN{ORS="%0A"} {print}')
             echo "::warning title=logs $c::$tail"
