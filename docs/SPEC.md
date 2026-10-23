@@ -124,6 +124,10 @@ Every Midnight contract has a maintenance authority: a committee of signing keys
 
 Anyone can check a deployment with `./nightcast verify`: the authority on chain must have `threshold > committee size`, and the on-chain verifier keys must match the published fingerprints (and, if they build the same commit, their own). Consumers should run this check, or rely on someone they trust who has, before trusting outputs. Verification checks the state on chain rather than trusting the deployer; contracts deployed by older versions (locked in a second transaction, counter 1) pass the same check.
 
+### 4.6 The proof server
+
+A Compact circuit's witnesses, including the oracle's `sk`, the operator secret and a requester secret, are handed to the proof server that builds the proof. A hosted or shared proof server therefore learns them. The oracle and the operator must run their own proof server, on the machine holding the secret, reachable only from that machine; `nightcast-deploy` starts one in Docker bound to `127.0.0.1`.
+
 ## 5. Consumer integration (v0)
 
 v0 consumers read results off-chain (indexer or midnight-js `queryContractState`) and derive what they need with the SDK. Anyone can recompute the derivation from public data.
