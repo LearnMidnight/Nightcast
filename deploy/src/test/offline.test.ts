@@ -1,5 +1,6 @@
 import { describe, it, expect } from 'vitest';
 import { generateOperatorSecret, generateOracleSecretKey, NightcastSimulator, oraclePublicKey } from '@nightcast/contract';
+import { checkRequest } from '../check.js';
 import { compareFingerprints, onChainFingerprints } from '../fingerprints.js';
 import { isLocked } from '../lock.js';
 import { blockfrostProjectId, createLogger, publicEndpoints, redact } from '../network.js';
@@ -201,5 +202,60 @@ describe('wallet error messages', () => {
       'Wallet sync problem: socket hang up (seen 10 times; the wallet keeps retrying)',
       'something else 42',
     ]);
+  });
+});
+
+describe('checkRequest', () => {
+  const keys = { expire: 'ke', fulfil: 'kf', request: 'kr' };
+  const fps = onChainFingerprints({ operations: () => Object.keys(keys), operation: (n) => ({ verifierKey: vk(keys[n as 'fulfil']) }) });
+  const label = (t: string) => {
+    const b = new Uint8Array(32);
+    b.set(new TextEncoder().encode(t));
+    return b;
+  };
+  const setup = () => {
+    const sk = generateOracleSecretKey();
+    const sim = new NightcastSimulator({ oracleSecretKey: sk, operatorSecret: generateOperatorSecret(), minWindow: 60n, maxWindow: 86_400n });
+    const record = { ...recordFor(sk, fps), contractAddress: sim.address };
+    const view = (): ContractStateView => ({
+      maintenanceAuthority: { committee: [], threshold: 1, counter: 1n },
+      operations: () => Object.keys(keys),
+      operation: (name) => ({ verifierKey: vk(keys[name as 'fulfil']) }),
+      data: sim.publicState(),
+    });
+    const tag = label('selftest');
+    const seed = label('seed-1');
+    const id = sim.request(tag, seed, BigInt(sim.now + 600));
+    const lookup = () => sim.getLedger().requests.lookup(id);
+    return { sk, sim, record, view, tag, seed, id, lookup };
+  };
+  const failing = (checks: { name: string; ok: boolean }[]) => checks.filter((c) => !c.ok).map((c) => c.name);
+
+  it('passes a fulfilled request, including the id from its tag and seed', () => {
+    const { sk, sim, record, view, tag, seed, id, lookup } = setup();
+    sim.fulfil(id, { oracleSecretKey: sk });
+    const checks = checkRequest(record, view(), id, lookup(), { inputs: { tag, seed }, local: fps });
+    expect(failing(checks)).toEqual([]);
+    expect(checks.map((c) => c.name)).toContain('id matches the tag and seed');
+    expect(checks.map((c) => c.name)).toContain('input fixed by the request id');
+  });
+
+  it('notices a wrong seed, an unanswered request and a missing one', () => {
+    const { sk, sim, record, view, tag, id, lookup } = setup();
+    expect(failing(checkRequest(record, view(), id, lookup(), { deployment: false }))).toEqual(['answered']);
+    sim.fulfil(id, { oracleSecretKey: sk });
+    expect(failing(checkRequest(record, view(), id, lookup(), { inputs: { tag, seed: label('other') }, deployment: false }))).toEqual([
+      'id matches the tag and seed',
+    ]);
+    expect(failing(checkRequest(record, view(), label('nope'), undefined, { deployment: false }))).toEqual(['request exists']);
+  });
+
+  it('checks an expired request, and says to void rather than redraw', () => {
+    const { sim, record, view, id, lookup } = setup();
+    sim.advance(601);
+    sim.expire(id);
+    expect(failing(checkRequest(record, view(), id, lookup(), { expect: 'expired', deployment: false }))).toEqual([]);
+    const asFulfilled = checkRequest(record, view(), id, lookup(), { deployment: false });
+    expect(asFulfilled.find((c) => c.name === 'answered')?.detail).toMatch(/voided, never redrawn/);
   });
 });

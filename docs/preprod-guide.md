@@ -267,7 +267,23 @@ You can look up any request later without a wallet:
 ./nightcast status --network preprod --id <request id>
 ```
 
-### 13. Stop the oracle
+### 13. Run the full self-test (optional, about 5 minutes)
+
+With the oracle still running in the first window, run this in the second one:
+
+```bash
+./nightcast selftest --network preprod \
+  --requester ~/nightcast-secrets/requester.secret \
+  --wallet ~/nightcast-secrets/requester-wallet.secret
+```
+
+It checks the deployment, then does two things:
+1. It asks for randomness and checks the answer from public data only.
+2. It makes a request with too little time left for the oracle to answer, waits for it to run out, and marks it expired.
+
+You should see only `PASS` lines and `Selftest passed` at the end. If it says the oracle answered the short request, just run it again.
+
+### 14. Stop the oracle
 
 Press **Ctrl+C** in the oracle window. Requests made while it's stopped wait until it's back, up to their deadline (30 minutes by default); after that anyone can mark them expired.
 
