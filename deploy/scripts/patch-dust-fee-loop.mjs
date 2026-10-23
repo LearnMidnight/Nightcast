@@ -18,8 +18,10 @@
  * deficit, so the balancer always picks coins to cover it.
  *
  * Idempotent. Runs on `npm install` and before every ./nightcast command.
- *   node deploy/scripts/patch-dust-fee-loop.mjs [--quiet] [--check]
- * --check exits 1 if an unpatched copy is found (for CI).
+ *   node deploy/scripts/patch-dust-fee-loop.mjs [--quiet] [--check] [--root <dir>]
+ * --check exits 1 if an unpatched copy is found (for CI). --root also patches
+ * <dir>/node_modules: a project that uses Nightcast as a submodule (Lunardraw)
+ * runs it with --root . from its own folder.
  */
 import { readdirSync, readFileSync, statSync, writeFileSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
@@ -30,6 +32,7 @@ const PATTERN = /fromEntry\((['"])dust\1,\s*currentFee\)/g;
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), '..', '..');
 const quiet = process.argv.includes('--quiet');
+const extraRoots = process.argv.flatMap((a, i, all) => (a === '--root' && all[i + 1] ? [resolve(all[i + 1])] : []));
 const check = process.argv.includes('--check');
 
 /** Every Transacting.js in any installed copy of the dust wallet package, following npm's layout. */
@@ -80,10 +83,11 @@ const collectTransacting = (dir, out) => {
 
 const targets = [];
 for (const dir of ['.', 'contract', 'sdk', 'deploy']) walkModules(join(root, dir, 'node_modules'), targets);
+for (const extra of extraRoots) walkModules(join(extra, 'node_modules'), targets);
 let patched = 0;
 let already = 0;
 let unknown = 0;
-for (const file of targets) {
+for (const file of new Set(targets)) {
   const src = readFileSync(file, 'utf8');
   if (src.includes(MARKER)) {
     already += 1;
