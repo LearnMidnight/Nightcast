@@ -148,6 +148,8 @@ jobs:
         working-directory: deploy
         env:
           NIGHTCAST_E2E: '1'
+          # Keep the network's containers after a failure, for the logs step.
+          TESTCONTAINERS_RYUK_DISABLED: 'true'
         shell: bash
         run: |
           set -o pipefail
@@ -217,6 +219,7 @@ jobs:
       - name: Container logs
         if: failure()
         run: |
+          echo "::warning title=logs containers::$(docker ps -a --format '{{.Names}}: {{.Status}}' | awk 'BEGIN{ORS="%0A"} {print}')"
           for c in $(docker ps -a --format '{{.Names}}'); do
             tail=$(docker logs --tail 25 "$c" 2>&1 | tail -c 2500 | sed 's/%/%25/g' | awk 'BEGIN{ORS="%0A"} {print}')
             echo "::warning title=logs $c::$tail"
