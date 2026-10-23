@@ -14,6 +14,8 @@ const fakeState = (opts: {
   threshold: number;
   keys: Record<string, string>;
   acceptKey?: boolean;
+  /** Propose a replacement key after accepting the first. */
+  proposeKey?: boolean;
   sk?: bigint;
 }): { state: ContractStateView; sk: bigint } => {
   const sk = opts.sk ?? generateOracleSecretKey();
@@ -24,6 +26,7 @@ const fakeState = (opts: {
     maxWindow: 86_400n,
     acceptKey: opts.acceptKey ?? true,
   });
+  if (opts.proposeKey) sim.proposeOracleKey(oraclePublicKey(generateOracleSecretKey()));
   const state: ContractStateView = {
     maintenanceAuthority: { committee: Array(opts.committee).fill('k'), threshold: opts.threshold, counter: 1n },
     operations: () => Object.keys(opts.keys),
@@ -96,6 +99,13 @@ describe('verifyDeployment', () => {
     const { state, sk } = fakeState({ committee: 0, threshold: 1, keys, acceptKey: false });
     const failed = verifyDeployment(recordFor(sk, fps), state).filter((c) => !c.ok).map((c) => c.name);
     expect(failed).toEqual(['oracle key accepted']);
+  });
+
+  it('reports a pending oracle key change', () => {
+    const { state, sk } = fakeState({ committee: 0, threshold: 1, keys, proposeKey: true });
+    const checks = verifyDeployment(recordFor(sk, fps), state);
+    expect(checks.filter((c) => !c.ok).map((c) => c.name)).toEqual(['no oracle key change pending']);
+    expect(checks.find((c) => c.name === 'no oracle key change pending')?.detail).toMatch(/can take effect from/);
   });
 
   it('reports a missing contract', () => {

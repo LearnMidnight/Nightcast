@@ -61,7 +61,8 @@ Ledger:
 | `requests: Map<Bytes<32>, Request>` | By id: `status` (pending, fulfilled, expired), `requester`, `tag`, `point` (H), `oracleKey`, `deadline`, `output` |
 | `requestCount: Counter` | Total requests (increment only, so concurrent requests don't conflict) |
 | `oracleKey`, `oracleKeyReady` | Key bound to new requests, once accepted |
-| `proposedOracleKey: Maybe<JubjubPoint>` | Key waiting for the oracle's proof of possession |
+| `proposedOracleKey: Maybe<JubjubPoint>`, `oracleKeyChangeAt`, `oracleKeyApproved` | Key waiting for the oracle's proof of possession; the earliest time it may be accepted; whether the current oracle agreed to it |
+| `oracleKeyDelay` (sealed) | The wait before a replacement key can be accepted: `maxWindow` |
 | `operator`, `proposedOperator` | `SHA(pad("nightcast:operator:v0"), secret)`, and a pending hand-over |
 | `minWindow`, `maxWindow` (sealed) | Allowed deadline distance in seconds; `60 ≤ min < max ≤ 30 days` |
 
@@ -70,11 +71,12 @@ Circuits:
 | Circuit | Who | Checks / effect |
 |---|---|---|
 | constructor `(pk, operatorCommitment, min, max)` | deployer | Window bounds. `pk` is only proposed. |
-| `acceptOracleKey()` | oracle | A key is proposed; it isn't the identity; `G·sk` equals it. Activates it. |
+| `acceptOracleKey()` | oracle | A key is proposed; it isn't the identity; `G·sk` equals it; if a key is already active, `now ≥ oracleKeyChangeAt` or the current oracle approved. Activates it. |
+| `approveOracleKey()` | current oracle | A key is proposed; `G·sk` equals the active key. Lifts the wait for this proposal. |
 | `request(tag, seed, deadline)` | requester | A key is active; `now + min < deadline ≤ now + max`; id is new. Stores a pending request with `H` and the current key. |
 | `fulfil(id)` | oracle | Pending; `now < deadline`; `G·sk` equals the request's key. Stores the output. |
 | `expire(id)` | anyone | Pending; `now ≥ deadline`. Marks it expired. |
-| `proposeOracleKey(pk)` | operator | Proposes a key; the current one stays active until the oracle accepts. Pending requests keep their key. |
+| `proposeOracleKey(pk, now)` | operator | `now` within 10 minutes of block time. Proposes a key, acceptable from `now + oracleKeyDelay` (or sooner with the current oracle's approval); proposing again restarts the wait. The current key stays active until the new one is accepted. Pending requests keep their key. |
 | `proposeOperator(c)` / `acceptOperator()` | operator / incoming operator | Two-step hand-over, so a mistyped commitment can't lock admin out. |
 
 ## 4. Threat model
@@ -110,7 +112,14 @@ Requests are free in v0, so anyone can create many with short deadlines and push
 
 ### 4.4 Key and operator compromise
 
-Whoever holds `sk` can predict every output for requests bound to it; rotation (`proposeOracleKey` + `acceptOracleKey`) only protects later requests. A compromised operator can propose a new key, but it only becomes active if the oracle proves possession of it, so an operator-only compromise cannot swap in its own key. Consumers that need more certainty should check `request.oracleKey` against a key they trust.
+Whoever holds `sk` can predict every output for requests bound to it; rotation (`proposeOracleKey` + `acceptOracleKey`) only protects later requests.
+
+The proof of possession in `acceptOracleKey` shows that *someone* holds the proposed key's secret; it can't tell the oracle from an operator who generated the key itself. So a compromised (or dishonest) operator **can** install a key it controls, and every later request would be bound to it. (An earlier version of this section claimed otherwise; the security review of 23 Oct 2026 corrected it.) The contract limits this in two ways:
+
+- A replacement key waits `oracleKeyDelay` (= `maxWindow`) from its proposal before it can be accepted, unless the current oracle approves it. Every request open at the proposal is answered or expired under the old key first, and the proposal is on chain, with its earliest effective time, for at least that long. `nightcast verify` and `check` report a pending change.
+- Each request records the key it was made under, and `fulfil` only accepts that key.
+
+A planned hand-over (the current oracle calls `approveOracleKey`) needs no wait. Consumers should check `request.oracleKey` against a key they trust before relying on an output, and treat a pending key change they didn't expect as a sign of operator compromise.
 
 ### 4.5 Contract maintenance authority (important)
 

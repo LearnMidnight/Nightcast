@@ -73,8 +73,16 @@ export ledger requestCount: Counter;
 // Key bound to new requests, once the oracle has proved it holds it.
 export ledger oracleKey: JubjubPoint;
 export ledger oracleKeyReady: Boolean;
-// A key the operator has proposed; becomes active when the oracle accepts it.
+// A key the operator has proposed, the earliest time it may be accepted
+// (block time at the proposal plus oracleKeyDelay), and whether the current
+// oracle agreed to it (which lifts the wait). The first key has no wait.
 export ledger proposedOracleKey: Maybe<JubjubPoint>;
+export ledger oracleKeyChangeAt: Uint<64>;
+export ledger oracleKeyApproved: Boolean;
+// The wait before a replacement key can take effect: the longest request
+// window, so every request open at the proposal is answered or expired
+// first, and the change is visible on chain for at least that long.
+export sealed ledger oracleKeyDelay: Uint<64>;
 // SHA-256 commitment to the operator's secret; authorises admin circuits.
 export ledger operator: Bytes<32>;
 export ledger proposedOperator: Maybe<Bytes<32>>;
@@ -100,6 +108,9 @@ constructor(key: JubjubPoint, operatorCommitment: Bytes<32>, minSecs: Uint<64>, 
   assert(minSecs < maxSecs, "minWindow must be below maxWindow");
   assert(maxSecs <= 2592000, "maxWindow must be at most 30 days");
   proposedOracleKey = some<JubjubPoint>(disclose(key));
+  oracleKeyChangeAt = 0;
+  oracleKeyApproved = false;
+  oracleKeyDelay = disclose(maxSecs);
   operator = disclose(operatorCommitment);
   minWindow = disclose(minSecs);
   maxWindow = disclose(maxSecs);
@@ -250,15 +261,33 @@ export circuit expire(id: Bytes<32>): [] {
 // The oracle activates a proposed key by proving it holds the secret (proof
 // of possession). This rules out the identity point, off-curve points and
 // keys nobody can use. Pending requests keep the key they were made with.
+// The first key is accepted at once; a replacement waits oracleKeyDelay
+// from its proposal unless the current oracle approved it. (The proof of
+// possession alone can't tell the oracle from an operator who made the key
+// itself, which is what the wait is for.)
 export circuit acceptOracleKey(): [] {
   assert(proposedOracleKey.is_some, "no key proposed");
   const key = proposedOracleKey.value;
   assert(!isIdentity(key), "identity key not allowed");
+  if (oracleKeyReady && !oracleKeyApproved) {
+    assert(blockTimeGte(oracleKeyChangeAt), "the new oracle key is still waiting");
+  }
   const sk = oracleSecretKey();
   assert(disclose(sameKey(publicKey(sk), key)), "secret does not match the proposed key");
   oracleKey = key;
   oracleKeyReady = true;
   proposedOracleKey = none<JubjubPoint>();
+  oracleKeyApproved = false;
+}
+
+// The current oracle agrees to the proposed key (a planned hand-over), so it
+// can be accepted without the wait.
+export circuit approveOracleKey(): [] {
+  assert(oracleKeyReady, "no current oracle key");
+  assert(proposedOracleKey.is_some, "no key proposed");
+  const sk = oracleSecretKey();
+  assert(disclose(sameKey(publicKey(sk), oracleKey)), "not the current oracle");
+  oracleKeyApproved = true;
 }
 
 // ------------------------------------------------------------------ admin
@@ -267,10 +296,19 @@ circuit assertOperator(): [] {
   assert(disclose(operatorCommitmentOf(operatorSecret()) == operator), "not the operator");
 }
 
-// Propose a new oracle key; the current key stays active until it's accepted.
-export circuit proposeOracleKey(key: JubjubPoint): [] {
+// Propose a new oracle key; the current key stays active until it's accepted,
+// which can happen from `now` + oracleKeyDelay (or sooner with the current
+// oracle's approval). `now` is the caller's clock, within 10 minutes of block
+// time. Proposing again restarts the wait, so the operator can't shorten it.
+export circuit proposeOracleKey(key: JubjubPoint, now: Uint<64>): [] {
   assertOperator();
+  const t = disclose(now);
+  assert(t > 600, "bad time");
+  assert(t < 18446744073709550000, "bad time");
+  assert(blockTimeGte(t - 600) && blockTimeLt((t + 600) as Uint<64>), "clock is more than 10 minutes off");
   proposedOracleKey = some<JubjubPoint>(disclose(key));
+  oracleKeyChangeAt = (t + oracleKeyDelay) as Uint<64>;
+  oracleKeyApproved = false;
 }
 
 // Propose a new operator; the change takes effect when they accept.

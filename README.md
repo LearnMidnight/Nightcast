@@ -10,7 +10,7 @@ It works like [Chainlink VRF](https://docs.chain.link/vrf): you request randomne
 
 | Network | Contract | Status |
 |---|---|---|
-| Preprod | `67e02b18db442101bfe3e099eade44033880f0bdb67bf0d84e4a6d87b49d4a1f` | Deployed locked (no admin key ever existed), oracle key active, first request fulfilled 22 Oct 2026 |
+| Preprod | `67e02b18db442101bfe3e099eade44033880f0bdb67bf0d84e4a6d87b49d4a1f` | Deployed locked (no admin key ever existed), oracle key active, first request fulfilled 22 Oct 2026. **Runs the code before the key-change wait (#37)**: its operator could install its own key. Being redeployed; this address will be replaced. |
 
 Check it yourself with `./nightcast verify --network preprod` (record: [deployments/preprod.json](deployments/preprod.json)).
 
@@ -42,7 +42,7 @@ The construction, ledger layout and threat model are in [docs/SPEC.md](docs/SPEC
 
 | Path | What it is |
 |---|---|
-| `contract/src/nightcast.compact` | The contract: `request`, `fulfil`, `expire`, key and operator management, and pure circuits for ids, keys and evaluation |
+| `contract/src/nightcast.compact` | The contract: `request`, `fulfil`, `expire`, key management (a replacement key waits the longest request window unless the current oracle approves it) and operator hand-over, and pure circuits for ids, keys and evaluation |
 | `contract/src/keys.ts` | Key generation and parsing |
 | `contract/src/simulator.ts` | Runs the compiled contract in memory with several actors and a controllable clock |
 | `sdk/src/oracle.ts` | The oracle service: polls, fulfils pending requests bound to its key, retries with backoff, respects deadlines, optional requester allowlist |
