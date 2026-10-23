@@ -1,8 +1,8 @@
 {
   "network": "preprod",
-  "contractAddress": "67e02b18db442101bfe3e099eade44033880f0bdb67bf0d84e4a6d87b49d4a1f",
-  "deployedAt": "2026-10-21T12:10:57.593Z",
-  "sourceCommit": "1a820fca7ad92dfdac3335bb7f367c1466825c3a",
+  "contractAddress": "f3083513bae7010e32acac41e3f3dbfdfa0516c6ca80382c5847dd3529cf158e",
+  "deployedAt": "2026-10-23T20:00:44.664Z",
+  "sourceCommit": "2ffbbab6c8f933991d546d2652a314d50f81fd3f",
   "compiler": {
     "compiler": "0.31.1",
     "language": "0.23.0",
@@ -18,9 +18,9 @@
     "maxWindow": "86400"
   },
   "transactions": {
-    "deploy": "002455e113310ee49f7a0c932154ffcc0824fe2dde8a270c022046db9470de2d10",
-    "lockAuthority": "002455e113310ee49f7a0c932154ffcc0824fe2dde8a270c022046db9470de2d10",
-    "acceptOracleKey": "00dae1b62b6fc7a2c5b7ca17856244530623406fc106ca5e0d3cb067114f684ce6"
+    "deploy": "00d1c04125f15c764feac9eea8adf9050525a536771de1b1dea6e3ff7b756c4109",
+    "lockAuthority": "00d1c04125f15c764feac9eea8adf9050525a536771de1b1dea6e3ff7b756c4109",
+    "acceptOracleKey": "00863652bcb9fc1fd51dbca710d210dc319633ac40480ca1df1496a6ca5c6669b4"
   },
   "maintenanceAuthority": {
     "committeeSize": 0,
@@ -28,12 +28,13 @@
     "counter": "0"
   },
   "verifierKeys": {
-    "acceptOperator": "13caad7e24d47c7e3100678aaf252a24f6f211423fb454a50c7fba2c9ac36462",
-    "acceptOracleKey": "7f98a721ff50c6ce6a7485446e7bf9d64c140fa2296e8488ee40bc6423e1f781",
+    "acceptOperator": "d151560a2d98896fceaef4cff2ada0925c3b89b39bfce281ad61f7cf67c32df7",
+    "acceptOracleKey": "a319454c17db9759a1178dc1edec34fe9068296aa0499cedd650906849293461",
+    "approveOracleKey": "6f8391382ef7c88fb5a6295ebdb735d15607f087f2d82464a556264aaf5d7aa2",
     "expire": "1868be4b8c67e7cca62230828c331d6917aa86a5303a4cca2c24258cea3673eb",
     "fulfil": "05e1555bb1a2c5ef3a1c3edd4a32cf1ab18a3a3e2b0864ad987dfcfb45f78a6d",
-    "proposeOperator": "f84be6b4bd60f2865ef83f7eb47e98463713bceb269b06196c24ccc1c3e3cb87",
-    "proposeOracleKey": "d92214aecb95e71b6c008358950b53b85c7f65c8018cbfa48bad73cf312ab16b",
-    "request": "970b68161130d528fdc47f0632ce660b94c9b4d92280bc5eb2b9ea272ab64baf"
+    "proposeOperator": "d9f52236641501109fe6461ff08a7bd295289177c10f18f1a8d2c6d556ece444",
+    "proposeOracleKey": "8d495b3ecd759923b704497a1fd1f1d74675ef5d3b02db44906d00449efd3f26",
+    "request": "e844d86255d62a3f7464fef3f2847fefa0d8cc2a09ee089aba34720a1051353e"
   }
 }

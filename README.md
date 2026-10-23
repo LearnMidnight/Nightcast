@@ -10,7 +10,7 @@ It works like [Chainlink VRF](https://docs.chain.link/vrf): you request randomne
 
 | Network | Contract | Status |
 |---|---|---|
-| Preprod | `67e02b18db442101bfe3e099eade44033880f0bdb67bf0d84e4a6d87b49d4a1f` | Deployed locked (no admin key ever existed), oracle key active, first request fulfilled 22 Oct 2026. **Runs the code before the key-change wait (#37)**: its operator could install its own key. Being redeployed; this address will be replaced. |
+| Preprod | `f3083513bae7010e32acac41e3f3dbfdfa0516c6ca80382c5847dd3529cf158e` | Deployed locked (no admin key ever existed) on 24 Oct 2026 with the key-change wait (#37); oracle key active. Replaces `67e02b18…49d4a1f` (21 Oct), which runs the code before the fix and is no longer served. |
 
 Check it yourself with `./nightcast verify --network preprod` (record: [deployments/preprod.json](deployments/preprod.json)).
 
