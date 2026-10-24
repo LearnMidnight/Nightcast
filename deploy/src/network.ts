@@ -534,6 +534,12 @@ export const nightcastProviders = (
  * `zkir/`) are in `dir`, paying with `wallet`. Private state is kept in
  * memory only.
  */
+/** How long to wait for one proof, in ms: NIGHTCAST_PROVE_TIMEOUT_MS or an hour. */
+export const proveTimeoutMs = (): number => {
+  const v = Number(process.env.NIGHTCAST_PROVE_TIMEOUT_MS);
+  return Number.isFinite(v) && v > 0 ? v : 60 * 60_000;
+};
+
 export const contractProviders = <C extends string, PSI extends string, PS>(
   session: Session,
   wallet: MidnightWalletProvider,
@@ -544,7 +550,10 @@ export const contractProviders = <C extends string, PSI extends string, PS>(
     privateStateProvider: inMemoryPrivateStateProvider<PSI, PS>(),
     publicDataProvider: indexerPublicDataProvider(session.config.indexer, session.config.indexerWS),
     zkConfigProvider,
-    proofProvider: httpClientProofProvider(session.config.proofServer, zkConfigProvider),
+    // The proof server is asked over HTTP; midnight-js gives up after 5
+    // minutes by default, which a big circuit (Lunardraw's computeNumbers,
+    // k=19) exceeds on a home PC. Allow an hour (NIGHTCAST_PROVE_TIMEOUT_MS).
+    proofProvider: httpClientProofProvider(session.config.proofServer, zkConfigProvider, { timeout: proveTimeoutMs() }),
     walletProvider: wallet,
     midnightProvider: wallet,
   };
