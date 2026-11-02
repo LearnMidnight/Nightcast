@@ -74,6 +74,12 @@ export type Session = {
   config: EnvironmentConfiguration;
   /** Services that didn't answer when connecting (empty when all is well). */
   problems: string[];
+  /**
+   * The proof server is a remote prover for one contract's circuits (e.g.
+   * Lunardraw's player prover), so a wallet opened in this session proves its
+   * own parts (DUST fees, shielded coins) in-process instead (see buildWallet).
+   */
+  remoteProver?: boolean;
   shutdown(): Promise<void>;
 };
 
@@ -313,7 +319,7 @@ export const connect = async (
   for (const p of problems) logger.warn(`${p}; carrying on, but the next steps may fail`);
   if (problems.length === 0) logger.info('All reachable.');
 
-  return { network, logger, config, problems, shutdown: () => proofServer.stop() };
+  return { network, logger, config, problems, remoteProver: remote !== undefined, shutdown: () => proofServer.stop() };
 };
 
 /** Seeds of the pre-funded wallets on a `local` network. */
@@ -333,6 +339,13 @@ export type WalletOptions = {
   onNoFunds?: (address: string) => void;
   /** Called once while waiting for the first DUST after registration. */
   onWaitingForDust?: () => void;
+  /**
+   * Where the wallet proves its own parts of a transaction (the DUST fee
+   * spend, shielded coins): `server` (the session's proof server) or `wasm`
+   * (in this process; keys and parameters are fetched from Midnight once).
+   * Default: `wasm` when the session uses a remote prover, else `server`.
+   */
+  prover?: 'server' | 'wasm';
 };
 
 /** Faucet pages for test NIGHT (from Midnight's "Acquire tokens" guide). */
@@ -353,7 +366,9 @@ export const openWallet = async (session: Session, opts: WalletOptions = {}): Pr
   // Remember sync progress between runs on public networks (a first sync takes
   // hours); `local` networks are throwaway, so start fresh there.
   const persist = session.network !== 'local' && process.env.NIGHTCAST_NO_WALLET_STATE !== '1';
-  const built = await buildWallet(session.config, session.network, seed, session.logger.child({}, { level: 'warn' }), persist);
+  const prover = opts.prover ?? (session.remoteProver ? 'wasm' : 'server');
+  if (prover === 'wasm') session.logger.info("The wallet proves its own fees in-process (keys from Midnight's servers, fetched once).");
+  const built = await buildWallet(session.config, session.network, seed, session.logger.child({}, { level: 'warn' }), persist, prover);
   const wallet = built.provider;
   const address = walletAddress(wallet);
   opts.onAddress?.(address);
