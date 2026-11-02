@@ -4,15 +4,13 @@
 
 `@nightcast/deploy` (the `./nightcast` operator tool) stays in the repository for now: it relies on dependency overrides and a patch to Midnight's wallet that npm can't carry to someone installing it.
 
-## One-time setup
+## How npm trusts the workflow
 
-1. On npmjs.com, as an owner of the `nightcast` organisation: **Access Tokens → Generate New Token → Granular Access Token**.
-   - Name: `nightcast-github-publish`. Expiry: 30–90 days.
-   - Packages and scopes: **Read and write**, only the `@nightcast` scope.
-   - Organisations: no access.
-2. On GitHub: **LearnMidnight/Nightcast → Settings → Secrets and variables → Actions → New repository secret**. Name `NPM_TOKEN`, value the token. Don't paste it anywhere else.
+**Trusted publishing**, no token. On npmjs.com, each package's **Settings → Trusted publisher** is set to GitHub Actions, organisation `LearnMidnight`, repository `Nightcast`, workflow `publish.yml`. npm then accepts a publish only from a run of that workflow (it proves who it is with GitHub's OIDC token), and nothing secret exists to leak. Needs npm 11.5.1 or later, which the workflow installs.
 
-Later, once the packages exist, npm's *trusted publishing* can replace the token (each package's settings → Trusted publisher → GitHub Actions, this repository, `publish.yml`); then delete the secret.
+History: 0.1.0 (2 Nov 2026) was the first release, so it couldn't use trusted publishing or a stage-only token (both need the package to exist already). It went out once with a granular token limited to `@nightcast`, deleted straight after. npm removes direct publishing with such tokens in January 2027 anyway.
+
+If trusted publishing is ever unavailable, a **stage-only** granular token is npm's fallback: the workflow runs `npm stage publish`, and an owner approves each staged version with `npm stage approve <id>` (2FA).
 
 ## Each release
 
