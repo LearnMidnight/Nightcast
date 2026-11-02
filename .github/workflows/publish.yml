@@ -5,7 +5,9 @@ name: Publish to npm
 # workflow run and commit). Run it by hand: Actions → Publish to npm → Run
 # workflow. Leave "Dry run" ticked first to see exactly what would go out.
 # No token: npm trusts this workflow directly (trusted publishing, set on each
-# package's settings page on npmjs.com). See docs/PUBLISHING.md.
+# package's settings page on npmjs.com), and only to *stage* a release: it goes
+# live when an owner approves it with 2FA (npmjs.com → Staged Packages, or
+# `npm stage approve <id>`). See docs/PUBLISHING.md.
 on:
   workflow_dispatch:
     inputs:
@@ -39,9 +41,12 @@ jobs:
           node-version: 22
           registry-url: https://registry.npmjs.org
 
-      # Trusted publishing needs npm 11.5.1 or later (Node 22 comes with npm 10).
+      # Trusted publishing and `npm stage` need npm 11.15.0 or later (Node 22 comes with npm 10).
       - name: npm 11
-        run: npm install -g npm@11 && npm --version
+        run: |
+          npm install -g npm@11
+          node -e 'const [a,b]=process.argv[1].split(".").map(Number); if (a < 11 || (a === 11 && b < 15)) { console.log(`::error::npm ${process.argv[1]} is too old for npm stage (11.15.0+)`); process.exit(1) }' "$(npm --version)"
+          echo "::notice title=npm::$(npm --version)"
 
       - name: Install Compact toolchain
         run: |
@@ -89,10 +94,15 @@ jobs:
             echo "::notice title=$name::will publish $version"
           done
 
-      - name: Publish ${{ inputs.dry_run && '(dry run)' || '' }}
+      # Stages both versions for approval; nothing is public until an owner
+      # approves them with 2FA. Approve the contract before the SDK (the SDK
+      # depends on it).
+      - name: Stage for approval ${{ inputs.dry_run && '(dry run)' || '' }}
         run: |
           flags="--access public --provenance"
           if [ "${{ inputs.dry_run }}" = "true" ]; then flags="$flags --dry-run"; fi
-          # The SDK depends on the contract: publish the contract first.
-          npm publish -w @nightcast/contract $flags
-          npm publish -w @nightcast/sdk $flags
+          npm stage publish -w @nightcast/contract $flags | tee stage-contract.txt
+          npm stage publish -w @nightcast/sdk $flags | tee stage-sdk.txt
+          if [ "${{ inputs.dry_run }}" != "true" ]; then
+            echo "::notice title=Staged::Approve on npmjs.com → Staged Packages (contract first, then sdk), or: npm stage approve <id>"
+          fi
