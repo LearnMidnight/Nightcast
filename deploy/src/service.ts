@@ -65,12 +65,16 @@ export const startOracleService = async (
 
 export type SubmittedRequest = { id: Uint8Array; tag: Uint8Array; seed: Uint8Array; deadline: bigint; txId: string };
 
-/** Make a request as the holder of `requesterSecret`. The seed is random. */
+/**
+ * Make a request as the holder of `requesterSecret`. The seed is random unless
+ * given (a raffle passes its list's fingerprint, listCommitment, so the
+ * answer is bound to that list).
+ */
 export const submitRequest = async (
   providers: NightcastProviders,
   contractAddress: string,
   requesterSecret: Uint8Array,
-  opts: { tag?: string; deadlineSecs?: number } = {},
+  opts: { tag?: string; deadlineSecs?: number; seed?: Uint8Array } = {},
 ): Promise<SubmittedRequest> => {
   const nightcast = await findDeployedContract(providers, {
     contractAddress,
@@ -79,7 +83,7 @@ export const submitRequest = async (
     initialPrivateState: { requesterSecret },
   });
   const tag = textLabel(opts.tag ?? 'nightcast-test');
-  const seed = webcrypto.getRandomValues(new Uint8Array(32));
+  const seed = opts.seed ?? webcrypto.getRandomValues(new Uint8Array(32));
   const deadline = BigInt(Math.floor(Date.now() / 1000) + (opts.deadlineSecs ?? 30 * 60));
   const result = await nightcast.callTx.request(tag, seed, deadline);
   return { id: result.private.result, tag, seed, deadline, txId: result.public.txId };

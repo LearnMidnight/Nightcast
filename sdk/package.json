@@ -1,9 +1,33 @@
 {
   "name": "@nightcast/sdk",
   "version": "0.1.0",
-  "description": "Nightcast oracle service, chain adapters and helpers for consuming Nightcast randomness.",
+  "description": "Nightcast SDK: turn a verifiable random answer from Midnight into fair picks (names, winners, shuffles, dice, weighted prizes), run an oracle, and draw lottery numbers. Experimental and unaudited: testnets only.",
+  "keywords": [
+    "midnight",
+    "vrf",
+    "verifiable-randomness",
+    "randomness",
+    "oracle",
+    "zero-knowledge",
+    "compact",
+    "lottery",
+    "raffle",
+    "ai-agents",
+    "shuffle",
+    "dice",
+    "fair-draw"
+  ],
+  "homepage": "https://github.com/LearnMidnight/Nightcast#readme",
+  "bugs": {
+    "url": "https://github.com/LearnMidnight/Nightcast/issues"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/LearnMidnight/Nightcast.git",
+    "directory": "sdk"
+  },
   "license": "MIT",
-  "private": true,
+  "author": "LearnMidnight",
   "type": "module",
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
@@ -16,7 +40,11 @@
   "bin": {
     "nightcast-keygen": "dist/keygen.js"
   },
-  "files": ["dist"],
+  "files": [
+    "dist",
+    "README.md",
+    "LICENSE"
+  ],
   "scripts": {
     "build": "rm -rf dist && tsc -p tsconfig.build.json && chmod +x dist/keygen.js",
     "typecheck": "tsc -p tsconfig.json --noEmit",
@@ -25,5 +53,11 @@
   "dependencies": {
     "@midnight-ntwrk/compact-runtime": "0.16.0",
     "@nightcast/contract": "0.1.0"
+  },
+  "engines": {
+    "node": ">=22"
+  },
+  "publishConfig": {
+    "access": "public"
   }
 }

@@ -1,0 +1,101 @@
+name: Publish to npm
+
+# Publishes @nightcast/contract and @nightcast/sdk from main, built and tested
+# here, with npm provenance (each version on npmjs.com links back to this
+# workflow run and commit). Run it by hand: Actions → Publish to npm → Run
+# workflow. Leave "Dry run" ticked first to see exactly what would go out.
+# Needs the repository secret NPM_TOKEN (a granular npm token that can publish
+# to the @nightcast scope). See docs/PUBLISHING.md.
+on:
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: 'Dry run: build, test and pack, publish nothing'
+        type: boolean
+        default: true
+
+permissions:
+  contents: read
+  id-token: write # npm provenance
+
+env:
+  COMPACT_TOOLCHAIN: 0.31.1
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Only from main
+        if: github.ref != 'refs/heads/main'
+        run: |
+          echo "::error::Publish from main only (this is ${{ github.ref }})."
+          exit 1
+
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+
+      - uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444 # v5.0.0
+        with:
+          node-version: 22
+          registry-url: https://registry.npmjs.org
+
+      - name: Install Compact toolchain
+        run: |
+          curl --proto '=https' --tlsv1.2 -LsSf https://github.com/midnightntwrk/compact/releases/latest/download/compact-installer.sh | sh
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+
+      - name: Select compiler ${{ env.COMPACT_TOOLCHAIN }}
+        run: compact update "$COMPACT_TOOLCHAIN"
+
+      - name: Install dependencies
+        run: npm ci --no-audit --no-fund
+
+      - name: Compile contract (with proving keys)
+        run: npm run compact
+
+      - name: Build
+        run: npm run build
+
+      - name: Test
+        run: |
+          (cd contract && npx vitest run)
+          (cd sdk && npx vitest run)
+
+      - name: Verifier key fingerprints
+        run: |
+          node deploy/dist/cli.js fingerprints | tee fingerprints.json
+          node -e '
+            const f = require("./fingerprints.json");
+            for (const [c, h] of Object.entries(f.verifierKeys)) console.log(`::notice title=fingerprint ${c}::${h}`);
+          '
+
+      - name: Check what would be published
+        run: |
+          npm pack -w @nightcast/contract -w @nightcast/sdk --dry-run --json > pack.json
+          node scripts/check-pack.mjs pack.json
+
+      - name: Versions not on npm yet
+        run: |
+          for p in contract sdk; do
+            name=$(node -p "require('./$p/package.json').name"); version=$(node -p "require('./$p/package.json').version")
+            if npm view "$name@$version" version > /dev/null 2>&1; then
+              echo "::error title=$name::$version is already on npm: raise the version in $p/package.json (and sdk's dependency on the contract) first"
+              exit 1
+            fi
+            echo "::notice title=$name::will publish $version"
+          done
+
+      - name: Publish ${{ inputs.dry_run && '(dry run)' || '' }}
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+        run: |
+          flags="--access public --provenance"
+          if [ "${{ inputs.dry_run }}" = "true" ]; then
+            flags="$flags --dry-run"
+          elif [ -z "$NODE_AUTH_TOKEN" ]; then
+            echo "::error::No NPM_TOKEN secret: add one (docs/PUBLISHING.md) and run again."
+            exit 1
+          fi
+          # The SDK depends on the contract: publish the contract first.
+          npm publish -w @nightcast/contract $flags
+          npm publish -w @nightcast/sdk $flags

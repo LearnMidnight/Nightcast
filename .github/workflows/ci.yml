@@ -88,6 +88,44 @@ jobs:
         working-directory: deploy
         run: npx vitest run src/test/offline.test.ts --reporter=default --reporter=github-actions --reporter=json --outputFile.json=../reports/deploy.json
 
+      # What npm would publish (docs/PUBLISHING.md): only dist, README and LICENSE, no secrets or tests.
+      - name: Pack the npm packages
+        id: pack
+        if: ${{ !cancelled() && steps.build.outcome == 'success' }}
+        run: |
+          mkdir -p "$RUNNER_TEMP/packs"
+          npm pack -w @nightcast/contract -w @nightcast/sdk --pack-destination "$RUNNER_TEMP/packs" --json > "$RUNNER_TEMP/packs/pack.json"
+          node scripts/check-pack.mjs "$RUNNER_TEMP/packs/pack.json"
+
+      # The sample app, outside the repository, installed from the packed
+      # tarballs as a stranger would install them from npm.
+      - name: Sample app from the packed packages
+        if: ${{ !cancelled() && steps.pack.outcome == 'success' }}
+        run: |
+          app="$RUNNER_TEMP/raffle"
+          cp -R examples/raffle "$app"
+          cd "$app"
+          packs="$RUNNER_TEMP/packs"
+          node -e '
+            const fs = require("fs");
+            const p = JSON.parse(fs.readFileSync("package.json", "utf8"));
+            const packs = process.argv[1];
+            const c = `file:${packs}/nightcast-contract-0.1.0.tgz`, s = `file:${packs}/nightcast-sdk-0.1.0.tgz`;
+            p.dependencies = { "@nightcast/contract": c, "@nightcast/sdk": s };
+            p.overrides = { "@nightcast/contract": c };
+            fs.writeFileSync("package.json", JSON.stringify(p, null, 2));
+          ' "$packs"
+          npm install --no-audit --no-fund
+          npm ls --all 2>/dev/null | grep -E "@nightcast|compact-runtime" | head || true
+          npm start | tee raffle.txt
+          grep -q "✓ a changed list would not match" raffle.txt
+          winners=$(sed -n '/^4. Winners/,/^$/p' raffle.txt | grep -c '^   [0-9]')
+          echo "::notice title=sample app::$winners winners drawn from packed packages"
+          # drawing from a given answer checks the list against the request's seed
+          seed=$(grep -o 'fingerprint: [0-9a-f]*' raffle.txt | cut -d' ' -f2)
+          node raffle.mjs --output "$(printf '%064d' 7)" --seed "$seed" --winners 2
+          if node raffle.mjs --output "$(printf '%064d' 7)" --seed "$(printf '%064d' 1)"; then echo '::error::drew with a list that does not match the seed'; exit 1; fi
+
       - name: Summarise tests
         if: always()
         run: |

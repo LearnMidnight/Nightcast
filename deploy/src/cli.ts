@@ -88,7 +88,7 @@ const USAGE = `usage:
   ./nightcast wallet forget --network <network> --wallet <file>
                            (set aside the wallet's saved sync state, so the next command syncs it from the start)
   ./nightcast oracle       --network <network> --oracle <oracle secret file> --wallet <file> [--requesters <hex,...>] [--poll 5] [--proof-server-port <port>]
-  ./nightcast request      --network <network> --requester <requester secret file> --wallet <file> [--tag <text>] [--deadline-mins 30] [--wait] [--proof-server-port <port>]
+  ./nightcast request      --network <network> --requester <requester secret file> --wallet <file> [--tag <text>] [--seed <64 hex>] [--deadline-mins 30] [--wait] [--proof-server-port <port>]
   ./nightcast status       --network <network> --id <request id>
   ./nightcast check        --network <network> --id <request id> [--tag <text> --seed <hex>]
                            (confirm a request's result from public data; with its tag and seed, also that it's the request asked for)
@@ -596,6 +596,8 @@ const main = async (argv: string[]): Promise<number> => {
           const req = await submitRequest(providers, record.contractAddress, requesterSecret, {
             tag: values.tag,
             deadlineSecs: Math.floor(mins * 60),
+            // a raffle's list fingerprint (listCommitment), or random
+            seed: values.seed ? fromHex(values.seed) : undefined,
           });
           const tagText = values.tag ?? 'nightcast-test';
           process.stdout.write(

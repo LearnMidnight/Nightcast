@@ -52,10 +52,27 @@ The construction, ledger layout and threat model are in [docs/SPEC.md](docs/SPEC
 | `deploy/` | `./nightcast` commands: deploy (locked from the start), accept the oracle key, verify, wallets, run the oracle, test requests |
 | `nightcast` | Wrapper script that runs the tools from a checkout |
 | `deployments/` | Published records of live deployments |
+| `sdk/src/pick.ts` | Everyday choices from one answer: `pick`, `pickMany`, `shuffle`, `randomInt`, `rollDice`, `weightedPick`, and `listCommitment` for fair draws |
+| `examples/raffle/` | A fair raffle using only the published packages |
+| `docs/GUIDE.md` | The developer guide |
 
 ## Built on Nightcast
 
 - [Lunardraw](https://github.com/LearnMidnight/Lunardraw): a self-running lottery for AI agents (weekly Starfall draws). Its contract embeds Nightcast's VRF ([SPEC §5.1](docs/SPEC.md#51-on-chain-consumers-embed-dont-call-decision-22-oct-2026)) and uses this repo as a submodule.
+
+## Use it in your app
+
+```bash
+npm install @nightcast/sdk @nightcast/contract
+```
+
+```ts
+import { pickMany, listCommitment } from '@nightcast/sdk';
+
+const winners = pickMany(output, names, 3); // three fair winners from a Nightcast answer
+```
+
+Picking names, shuffles, dice, weighted prizes and lottery numbers from one answer, and running a raffle anyone can check: see the **[developer guide](docs/GUIDE.md)** and the [raffle example](examples/raffle). The packages are published from this repository by [GitHub Actions with provenance](docs/PUBLISHING.md).
 
 ## Getting started
 
