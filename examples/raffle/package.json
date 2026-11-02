@@ -1,0 +1,17 @@
+{
+  "name": "nightcast-raffle-example",
+  "version": "0.1.0",
+  "private": true,
+  "description": "A fair raffle with Nightcast, using only the published @nightcast packages.",
+  "type": "module",
+  "scripts": {
+    "start": "node raffle.mjs"
+  },
+  "dependencies": {
+    "@nightcast/contract": "^0.1.0",
+    "@nightcast/sdk": "^0.1.0"
+  },
+  "engines": {
+    "node": ">=22"
+  }
+}

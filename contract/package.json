@@ -1,9 +1,31 @@
 {
   "name": "@nightcast/contract",
   "version": "0.1.0",
-  "description": "Nightcast verifiable randomness contract for Midnight (Compact), with key helpers and an in-memory simulator.",
+  "description": "Nightcast: verifiable randomness for Midnight. The Compact contract (compiled, with proving keys), key helpers and an in-memory simulator. Experimental and unaudited: testnets only.",
+  "keywords": [
+    "midnight",
+    "vrf",
+    "verifiable-randomness",
+    "randomness",
+    "oracle",
+    "zero-knowledge",
+    "compact",
+    "lottery",
+    "raffle",
+    "ai-agents",
+    "simulator"
+  ],
+  "homepage": "https://github.com/LearnMidnight/Nightcast#readme",
+  "bugs": {
+    "url": "https://github.com/LearnMidnight/Nightcast/issues"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/LearnMidnight/Nightcast.git",
+    "directory": "contract"
+  },
   "license": "MIT",
-  "private": true,
+  "author": "LearnMidnight",
   "type": "module",
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
@@ -15,7 +37,9 @@
     "./package.json": "./package.json"
   },
   "files": [
-    "dist"
+    "dist",
+    "README.md",
+    "LICENSE"
   ],
   "scripts": {
     "compact": "compact compile src/nightcast.compact src/managed/nightcast",
@@ -26,5 +50,11 @@
   },
   "dependencies": {
     "@midnight-ntwrk/compact-runtime": "0.16.0"
+  },
+  "engines": {
+    "node": ">=22"
+  },
+  "publishConfig": {
+    "access": "public"
   }
 }

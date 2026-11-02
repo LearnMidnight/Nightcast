@@ -4,7 +4,7 @@ import { generateOracleSecretKey, NightcastSimulator, toHex } from '@nightcast/c
 import { listCommitment, outputBytes, pick, pickMany, randomInt, rollDice, shuffle, weightedPick } from '../pick.js';
 
 // Stand-in outputs: any 32 bytes behave like an oracle's answer here.
-const output = (i: number | string): Uint8Array => createHash('sha256').update(`output ${i}`).digest();
+const output = (i: number | string): Uint8Array => Uint8Array.from(createHash('sha256').update(`output ${i}`).digest());
 const NAMES = ['Ava', 'Ben', 'Chloe', 'Dev', 'Ella'];
 
 // thousands of draws per distribution test: allow for a slow runner
