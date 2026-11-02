@@ -262,12 +262,14 @@ export const probeIndexerWebSocket = (url: string, timeoutMs = 20_000): Promise<
 
 /**
  * Connect to a network. For Preprod and Preview a proof server is started in
- * Docker unless `proofServerPort` points at one already running; `local`
+ * Docker unless `proofServerPort` points at one already running on this
+ * machine, or `proofServerUrl` at a remote prover (for example Lunardraw's
+ * player prover, which proves one circuit and answers `/health`); `local`
  * starts a whole throwaway network (node, indexer, proof server) in Docker.
  */
 export const connect = async (
   network: Network,
-  opts: { proofServerPort?: number; logger?: Logger; projectId?: string } = {},
+  opts: { proofServerPort?: number; proofServerUrl?: string; logger?: Logger; projectId?: string } = {},
 ): Promise<Session> => {
   const logger = opts.logger ?? createLogger();
   const webSocket = installWebSocket();
@@ -286,10 +288,16 @@ export const connect = async (
 
   const base = publicEndpoints(network, logger, opts.projectId);
   setNetworkId(base.networkId);
-  logger.info(opts.proofServerPort ? `Using the proof server on port ${opts.proofServerPort}` : 'Starting a proof server in Docker...');
-  const proofServer = opts.proofServerPort
-    ? new StaticProofServerContainer(opts.proofServerPort)
-    : await DynamicProofServerContainer.start(logger, undefined, base.networkId);
+  const remote = opts.proofServerUrl?.replace(/\/+$/, '');
+  if (remote !== undefined && !/^https?:\/\/[^\s/]+/.test(remote)) throw new Error(`not a prover address: ${opts.proofServerUrl}`);
+  logger.info(
+    remote ? `Using the prover at ${remote}` : opts.proofServerPort ? `Using the proof server on port ${opts.proofServerPort}` : 'Starting a proof server in Docker...',
+  );
+  const proofServer: { getUrl(): string; stop(): Promise<void> } = remote
+    ? { getUrl: () => remote, stop: async () => undefined }
+    : opts.proofServerPort
+      ? new StaticProofServerContainer(opts.proofServerPort)
+      : await DynamicProofServerContainer.start(logger, undefined, base.networkId);
   const config: EnvironmentConfiguration = { ...base, proofServer: proofServer.getUrl() };
 
   logger.info(`Checking the ${network} node, indexer and proof server...`);
