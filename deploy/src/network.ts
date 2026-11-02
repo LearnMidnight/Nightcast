@@ -293,7 +293,7 @@ export const connect = async (
   logger.info(
     remote ? `Using the prover at ${remote}` : opts.proofServerPort ? `Using the proof server on port ${opts.proofServerPort}` : 'Starting a proof server in Docker...',
   );
-  const proofServer: { getUrl(): string; stop(): Promise<unknown> } = remote
+  const proofServer: { getUrl(): string; stop(): Promise<void> } = remote
     ? { getUrl: () => remote, stop: async () => undefined }
     : opts.proofServerPort
       ? new StaticProofServerContainer(opts.proofServerPort)
