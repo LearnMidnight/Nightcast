@@ -16,6 +16,7 @@ import { join } from 'node:path';
 import type { Logger } from 'pino';
 import { DustSecretKey, LedgerParameters, ZswapSecretKeys } from '@midnight-ntwrk/midnight-js-protocol/ledger';
 import {
+  Capabilities,
   createKeystore,
   type DefaultConfiguration,
   DustWallet,
@@ -101,6 +102,13 @@ export const buildWallet = async (
   seed: string,
   logger: Logger,
   persist: boolean,
+  /**
+   * `server`: the wallet proves its fee and coin spends on env.proofServer.
+   * `wasm`: in this process, with the wallet SDK's WASM prover (keys and
+   * parameters fetched from Midnight's file share and cached), for a session
+   * whose proof server is a remote prover that only proves contract circuits.
+   */
+  prover: 'server' | 'wasm' = 'server',
 ): Promise<PersistentWallet> => {
   const seeds = WalletSeeds.fromMasterSeed(seed);
   const config = walletConfiguration(env);
@@ -145,6 +153,7 @@ export const buildWallet = async (
   const { shielded, unshielded, dust } = parts;
   const facade = await WalletFacade.init({
     configuration: config,
+    ...(prover === 'wasm' ? { provingService: () => Capabilities.makeWasmProvingService() } : {}),
     shielded: () => shielded,
     unshielded: () => unshielded,
     dust: () => dust,
