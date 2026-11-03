@@ -301,7 +301,7 @@ describe('agent support', () => {
     const urls: string[] = [];
     const fetcher = (async (url: string) => {
       urls.push(url);
-      return new Response(new TextEncoder().encode(`bytes of ${url.split('/').slice(-3).join('/')}`));
+      return new Response(new TextEncoder().encode(`bytes of ${url.replace('https://s3.example/', '')}`));
     }) as unknown as typeof fetch;
     const kmp = diskKeyMaterialProvider(dir, 'https://s3.example', fetcher) as unknown as {
       lookupKey(l: string): Promise<{ proverKey: Uint8Array; verifierKey: Uint8Array; ir: Uint8Array } | undefined>;
@@ -310,7 +310,7 @@ describe('agent support', () => {
     const key = await kmp.lookupKey('midnight/dust/spend');
     expect(new TextDecoder().decode(key!.proverKey)).toBe('bytes of dust/9/spend.prover');
     expect(urls.sort()).toEqual(['https://s3.example/dust/9/spend.bzkir', 'https://s3.example/dust/9/spend.prover', 'https://s3.example/dust/9/spend.verifier']);
-    expect(new TextDecoder().decode(await kmp.getParams(14))).toBe('bytes of s3.example/bls_midnight_2p14');
+    expect(new TextDecoder().decode(await kmp.getParams(14))).toBe('bytes of bls_midnight_2p14');
     expect(exists(joinPath(dir, 'dust/9/spend.prover'))).toBe(true);
     expect(await kmp.lookupKey('midnight/unknown')).toBeUndefined();
     // a new provider (a new run) reads the disk, not the network
@@ -318,7 +318,7 @@ describe('agent support', () => {
     const again = diskKeyMaterialProvider(dir, 'https://s3.example', fetcher) as unknown as typeof kmp;
     expect(new TextDecoder().decode((await again.lookupKey('midnight/dust/spend'))!.ir)).toBe('bytes of dust/9/spend.bzkir');
     expect(urls).toEqual([]);
-    expect(readBytes(joinPath(dir, 'bls_midnight_2p14'), 'utf8')).toBe('bytes of s3.example/bls_midnight_2p14');
+    expect(readBytes(joinPath(dir, 'bls_midnight_2p14'), 'utf8')).toBe('bytes of bls_midnight_2p14');
     // an error page is not a key
     const denied = (async () => new Response('AccessDenied', { status: 403 })) as unknown as typeof fetch;
     const real = globalThis.setTimeout;
