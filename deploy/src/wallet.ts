@@ -154,14 +154,36 @@ export type SteadySubmitOptions = {
 const ALREADY_IN = /already imported|AlreadyImported|temporarily banned|\b101[23]\b/i;
 /** The node looked at the transaction and refused it: sending it again won't help. */
 const REFUSED = /\b101[014-9]\b|Invalid Transaction|custom error/i;
-const errText = (err: unknown): string => {
-  const parts: string[] = [];
-  for (let e: unknown = err, i = 0; e && i < 5; e = (e as { cause?: unknown }).cause, i++) parts.push(e instanceof Error ? e.message : String(e));
-  // Effect's FiberFailure keeps the node's reason in its text, not its message
-  const text = String(err);
-  if (!parts.some((p) => text.includes(p) && p.length >= text.length)) parts.push(text);
-  return parts.join(': ');
+/**
+ * Every message in an error, however deep: Effect wraps the node client's
+ * error (and polkadot-js's under it) in a FiberFailure whose Cause sits behind
+ * a symbol key, so `.cause` alone stops at "Transaction submission error".
+ */
+export const errorMessages = (err: unknown): string[] => {
+  const found: string[] = [];
+  const seen = new Set<unknown>();
+  const visit = (v: unknown, depth: number): void => {
+    if (!v || typeof v !== 'object' || seen.has(v) || depth > 8 || found.length > 12) return;
+    seen.add(v);
+    const o = v as Record<string | symbol, unknown>;
+    if (typeof o.message === 'string' && o.message && !found.includes(o.message)) found.push(o.message);
+    for (const k of [...Object.getOwnPropertyNames(o), ...Object.getOwnPropertySymbols(o)]) {
+      if (k === 'stack' || k === 'message') continue;
+      let child: unknown;
+      try {
+        child = o[k];
+      } catch {
+        continue;
+      }
+      if (Array.isArray(child)) child.forEach((c) => visit(c, depth + 1));
+      else visit(child, depth + 1);
+    }
+  };
+  visit(err, 0);
+  if (!found.length) found.push(String(err));
+  return found.map((m) => m.split('\n')[0]!.trim()).filter(Boolean);
 };
+const errText = (err: unknown): string => errorMessages(err).join(': ');
 
 /**
  * Sending transactions to the node, more steadily than the wallet SDK's own
@@ -181,6 +203,12 @@ export const steadySubmissionService = (relayURL: URL, o: SteadySubmitOptions = 
   return {
     async submitTransaction(tx: unknown) {
       const id = (tx as Submittable).identifiers?.().at(-1);
+      try {
+        const bytes = (tx as { serialize?: () => Uint8Array }).serialize?.().length;
+        if (bytes) o.log?.(`sending the transaction (${Math.round(bytes / 1024)} KB)`);
+      } catch {
+        /* size is only for the log */
+      }
       let last: unknown;
       for (let i = 1; i <= tries; i++) {
         const service = make(relayURL);
@@ -204,7 +232,8 @@ export const steadySubmissionService = (relayURL: URL, o: SteadySubmitOptions = 
             o.log?.('the transaction is on the chain (the answer from the node was lost)');
             return { _tag: 'InBlock' };
           }
-          if (i < tries) o.log?.(`sending the transaction didn't finish (${text.slice(0, 160)}); trying again on a fresh connection (${i + 1} of ${tries})`);
+          if (i < tries) o.log?.(`sending the transaction didn't finish (${text.slice(0, 400)}); trying again on a fresh connection (${i + 1} of ${tries})`);
+          else o.log?.(`sending the transaction failed ${tries} times; the last time: ${text.slice(0, 600)}`);
         } finally {
           clearTimeout(timer);
           service.close().catch(() => undefined);

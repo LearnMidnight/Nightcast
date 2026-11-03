@@ -292,6 +292,15 @@ describe('dust fee-loop patch for other projects', () => {
 });
 
 describe('agent support', () => {
+  it('finds every message in an error, including one behind a symbol key (Effect\'s FiberFailure)', async () => {
+    const { errorMessages } = await import('../wallet.js');
+    const inner = new Error('disconnected from wss://node: 1006:: Abnormal Closure');
+    const tagged = Object.assign(new Error('Transaction submission error'), { cause: { _tag: 'SubmissionError', message: 'Transaction submission error', cause: inner } });
+    const failure = Object.assign(new Error('(FiberFailure) SubmissionError: Transaction submission error\n    at file:///x.js:1:1'), { [Symbol.for('effect/Runtime/FiberFailure/Cause')]: { _tag: 'Fail', error: tagged } });
+    expect(errorMessages(failure)).toEqual(['(FiberFailure) SubmissionError: Transaction submission error', 'Transaction submission error', 'disconnected from wss://node: 1006:: Abnormal Closure']);
+    expect(errorMessages('plain')).toEqual(['plain']);
+  });
+
   it('sends a transaction steadily: a fresh connection per try, a time limit, and the chain or the node already having it counts', async () => {
     const { steadySubmissionService } = await import('../wallet.js');
     const tx = { identifiers: () => ['a', 'tx-1'] };
