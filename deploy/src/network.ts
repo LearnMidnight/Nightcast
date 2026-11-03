@@ -366,6 +366,12 @@ export type WalletOptions = {
    * Default: `wasm` when the session uses a remote prover, else `server`.
    */
   prover?: 'server' | 'wasm';
+  /**
+   * Send transactions on a fresh node connection each time, with time limits
+   * and retries (see steadySubmissionService). Default: on when the session
+   * uses a remote prover (agents on other people's machines), else off.
+   */
+  steadySubmit?: boolean;
 };
 
 /** Faucet pages for test NIGHT (from Midnight's "Acquire tokens" guide). */
@@ -388,7 +394,27 @@ export const openWallet = async (session: Session, opts: WalletOptions = {}): Pr
   const persist = session.network !== 'local' && process.env.NIGHTCAST_NO_WALLET_STATE !== '1';
   const prover = opts.prover ?? (session.remoteProver ? 'wasm' : 'server');
   if (prover === 'wasm') session.logger.info("The wallet proves its own fees in-process (keys from Midnight's servers, fetched once).");
-  const built = await buildWallet(session.config, session.network, seed, session.logger.child({}, { level: 'warn' }), persist, prover);
+  const steady = opts.steadySubmit ?? session.remoteProver === true;
+  const indexer = steady ? indexerPublicDataProvider(session.config.indexer, session.config.indexerWS) : undefined;
+  const built = await buildWallet(
+    session.config,
+    session.network,
+    seed,
+    session.logger.child({}, { level: 'warn' }),
+    persist,
+    prover,
+    steady
+      ? {
+          log: (m) => session.logger.info(m),
+          // the indexer has it in a block: give it a few seconds to say so
+          seen: async (txId) =>
+            Promise.race([
+              indexer!.watchForTxData(txId).then(() => true),
+              new Promise<boolean>((r) => setTimeout(() => r(false), 10_000).unref()),
+            ]),
+        }
+      : undefined,
+  );
   const wallet = built.provider;
   const address = walletAddress(wallet);
   opts.onAddress?.(address);

@@ -292,6 +292,39 @@ describe('dust fee-loop patch for other projects', () => {
 });
 
 describe('agent support', () => {
+  it('sends a transaction steadily: a fresh connection per try, a time limit, and the chain or the node already having it counts', async () => {
+    const { steadySubmissionService } = await import('../wallet.js');
+    const tx = { identifiers: () => ['a', 'tx-1'] };
+    const url = new URL('wss://node.example');
+    const made: string[] = [];
+    const service = (answer: () => Promise<unknown>) => ({ submitTransaction: answer, close: async () => void made.push('closed') });
+    const hangs = () => new Promise<never>(() => undefined);
+    const logs: string[] = [];
+
+    // the first try hangs, the second gets through
+    let n = 0;
+    const s1 = steadySubmissionService(url, { tryMs: 20, log: (m) => logs.push(m), make: () => (made.push('made'), service(++n === 1 ? hangs : async () => ({ _tag: 'InBlock' }))) });
+    expect(await s1.submitTransaction(tx, 'Finalized')).toEqual({ _tag: 'InBlock' });
+    expect(made).toEqual(['made', 'closed', 'made', 'closed']);
+    expect(logs[0]).toMatch(/no answer from the node within 0 s.*trying again on a fresh connection \(2 of 3\)/);
+
+    // the node says it already has it: sent
+    const s2 = steadySubmissionService(url, { tryMs: 20, make: () => service(async () => Promise.reject(new Error('submission failed', { cause: new Error('1013: Transaction Already Imported') }))) });
+    expect(await s2.submitTransaction(tx)).toEqual({ _tag: 'Submitted' });
+
+    // the answer was lost but the chain has it
+    const seen: string[] = [];
+    const s3 = steadySubmissionService(url, { tryMs: 20, seen: async (id) => (seen.push(id), true), make: () => service(hangs) });
+    expect(await s3.submitTransaction(tx)).toEqual({ _tag: 'InBlock' });
+    expect(seen).toEqual(['tx-1']);
+
+    // never gets through: the last error, after every try
+    let tries = 0;
+    const s4 = steadySubmissionService(url, { tries: 2, tryMs: 20, seen: async () => false, make: () => (tries++, service(async () => Promise.reject(new Error('1010: Invalid Transaction')))) });
+    await expect(s4.submitTransaction(tx)).rejects.toThrow('1010: Invalid Transaction');
+    expect(tries).toBe(2);
+  });
+
   it("keeps the in-process prover's keys on disk: downloaded once, refused when the server sends an error", async () => {
     const { mkdtempSync, existsSync: exists, readFileSync: readBytes } = await import('node:fs');
     const { tmpdir } = await import('node:os');

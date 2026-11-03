@@ -136,6 +136,80 @@ export const syncBatchSize = (): number => {
   return Number.isFinite(n) && n > 0 ? n : 500;
 };
 
+type SubmissionService = { submitTransaction(tx: unknown, waitFor?: 'Submitted' | 'InBlock' | 'Finalized'): Promise<unknown>; close(): Promise<void> };
+type Submittable = { identifiers(): string[] };
+
+export type SteadySubmitOptions = {
+  /** Tries in all (default 3). */
+  tries?: number;
+  /** Time limit for each try (ms, default 75 s). */
+  tryMs?: number;
+  /** Whether the chain already has the transaction (e.g. the indexer has it in a block). */
+  seen?: (txId: string) => Promise<boolean>;
+  log?: (msg: string) => void;
+  /** A one-off submission service (default: the wallet SDK's, on a fresh node connection). */
+  make?: (relayURL: URL) => SubmissionService;
+};
+
+const ALREADY_IN = /already imported|AlreadyImported|temporarily banned|\b101[23]\b/i;
+const errText = (err: unknown): string => {
+  const parts: string[] = [];
+  for (let e: unknown = err, i = 0; e && i < 5; e = (e as { cause?: unknown }).cause, i++) parts.push(e instanceof Error ? e.message : String(e));
+  return parts.join(': ');
+};
+
+/**
+ * Sending transactions to the node, more steadily than the wallet SDK's own
+ * service. That one keeps one node connection for the wallet's whole life,
+ * and with wallet-sdk-node-client 1.1.x a connection that drops (Blockfrost's
+ * node websocket does, now and then) can leave a submission waiting forever
+ * (midnight-wallet #327, fixed in 2.x). This one opens a fresh connection for
+ * each try, gives each try a time limit, and waits for the transaction to be
+ * in a block, not finalised (callers watch the indexer for it anyway). A
+ * transaction the node already has, or the chain already shows, counts as
+ * sent.
+ */
+export const steadySubmissionService = (relayURL: URL, o: SteadySubmitOptions = {}): SubmissionService => {
+  const tries = o.tries ?? 3;
+  const tryMs = o.tryMs ?? 75_000;
+  const make = o.make ?? ((url: URL) => Capabilities.makeDefaultSubmissionService({ relayURL: url }) as unknown as SubmissionService);
+  return {
+    async submitTransaction(tx: unknown) {
+      const id = (tx as Submittable).identifiers?.().at(-1);
+      let last: unknown;
+      for (let i = 1; i <= tries; i++) {
+        const service = make(relayURL);
+        let timer: ReturnType<typeof setTimeout> | undefined;
+        try {
+          return await Promise.race([
+            service.submitTransaction(tx, 'InBlock'),
+            new Promise<never>((_, reject) => {
+              timer = setTimeout(() => reject(new Error(`no answer from the node within ${Math.round(tryMs / 1000)} s`)), tryMs);
+            }),
+          ]);
+        } catch (err) {
+          last = err;
+          const text = errText(err);
+          if (ALREADY_IN.test(text)) {
+            o.log?.('the node already has the transaction (an earlier try reached it)');
+            return { _tag: 'Submitted' };
+          }
+          if (id && o.seen && (await o.seen(id).catch(() => false))) {
+            o.log?.('the transaction is on the chain (the answer from the node was lost)');
+            return { _tag: 'InBlock' };
+          }
+          if (i < tries) o.log?.(`sending the transaction didn't finish (${text.slice(0, 160)}); trying again on a fresh connection (${i + 1} of ${tries})`);
+        } finally {
+          clearTimeout(timer);
+          service.close().catch(() => undefined);
+        }
+      }
+      throw last;
+    },
+    close: async () => undefined,
+  };
+};
+
 /** Same mapping as the testkit's (not exported there), plus larger sync batches. */
 const walletConfiguration = (env: EnvironmentConfiguration): DefaultConfiguration => ({
   batchUpdates: { size: syncBatchSize(), timeout: 100, spacing: 0 },
@@ -182,6 +256,8 @@ export const buildWallet = async (
    * whose proof server is a remote prover that only proves contract circuits.
    */
   prover: 'server' | 'wasm' = 'server',
+  /** Send transactions with {@link steadySubmissionService} instead of the wallet SDK's own. */
+  steady?: SteadySubmitOptions,
 ): Promise<PersistentWallet> => {
   const seeds = WalletSeeds.fromMasterSeed(seed);
   const config = walletConfiguration(env);
@@ -227,6 +303,7 @@ export const buildWallet = async (
   const facade = await WalletFacade.init({
     configuration: config,
     ...(prover === 'wasm' ? { provingService: () => Capabilities.makeWasmProvingService({ keyMaterialProvider: diskKeyMaterialProvider() }) } : {}),
+    ...(steady ? { submissionService: () => steadySubmissionService(new URL(env.nodeWS), steady) as never } : {}),
     shielded: () => shielded,
     unshielded: () => unshielded,
     dust: () => dust,
