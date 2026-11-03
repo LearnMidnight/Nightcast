@@ -152,9 +152,14 @@ export type SteadySubmitOptions = {
 };
 
 const ALREADY_IN = /already imported|AlreadyImported|temporarily banned|\b101[23]\b/i;
+/** The node looked at the transaction and refused it: sending it again won't help. */
+const REFUSED = /\b101[014-9]\b|Invalid Transaction|custom error/i;
 const errText = (err: unknown): string => {
   const parts: string[] = [];
   for (let e: unknown = err, i = 0; e && i < 5; e = (e as { cause?: unknown }).cause, i++) parts.push(e instanceof Error ? e.message : String(e));
+  // Effect's FiberFailure keeps the node's reason in its text, not its message
+  const text = String(err);
+  if (!parts.some((p) => text.includes(p) && p.length >= text.length)) parts.push(text);
   return parts.join(': ');
 };
 
@@ -194,6 +199,7 @@ export const steadySubmissionService = (relayURL: URL, o: SteadySubmitOptions = 
             o.log?.('the node already has the transaction (an earlier try reached it)');
             return { _tag: 'Submitted' };
           }
+          if (REFUSED.test(text) && !ALREADY_IN.test(text)) throw err;
           if (id && o.seen && (await o.seen(id).catch(() => false))) {
             o.log?.('the transaction is on the chain (the answer from the node was lost)');
             return { _tag: 'InBlock' };

@@ -318,10 +318,17 @@ describe('agent support', () => {
     expect(await s3.submitTransaction(tx)).toEqual({ _tag: 'InBlock' });
     expect(seen).toEqual(['tx-1']);
 
-    // never gets through: the last error, after every try
+    // the node refuses it: no point sending it again, the refusal goes straight back
     let tries = 0;
-    const s4 = steadySubmissionService(url, { tries: 2, tryMs: 20, seen: async () => false, make: () => (tries++, service(async () => Promise.reject(new Error('1010: Invalid Transaction')))) });
-    await expect(s4.submitTransaction(tx)).rejects.toThrow('1010: Invalid Transaction');
+    const refusal = new Error('Transaction submission error', { cause: new Error('1010: Invalid Transaction: Custom error: 170') });
+    const s4 = steadySubmissionService(url, { tries: 3, tryMs: 20, seen: async () => false, make: () => (tries++, service(async () => Promise.reject(refusal))) });
+    await expect(s4.submitTransaction(tx)).rejects.toBe(refusal);
+    expect(tries).toBe(1);
+
+    // never gets through on the connection: the last error, after every try
+    tries = 0;
+    const s5 = steadySubmissionService(url, { tries: 2, tryMs: 20, seen: async () => false, make: () => (tries++, service(async () => Promise.reject(new Error('disconnected from wss://node: 1006:: Abnormal Closure')))) });
+    await expect(s5.submitTransaction(tx)).rejects.toThrow('1006:: Abnormal Closure');
     expect(tries).toBe(2);
   });
 
