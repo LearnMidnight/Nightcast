@@ -312,31 +312,47 @@ describe('agent support', () => {
 
     // the first try hangs, the second gets through
     let n = 0;
-    const s1 = steadySubmissionService(url, { tryMs: 20, log: (m) => logs.push(m), make: () => (made.push('made'), service(++n === 1 ? hangs : async () => ({ _tag: 'InBlock' }))) });
+    const s1 = steadySubmissionService(url, { settleMs: 0, tryMs: 20, log: (m) => logs.push(m), make: () => (made.push('made'), service(++n === 1 ? hangs : async () => ({ _tag: 'InBlock' }))) });
     expect(await s1.submitTransaction(tx, 'Finalized')).toEqual({ _tag: 'InBlock' });
-    expect(made).toEqual(['made', 'closed', 'made', 'closed']);
+    // and the next connection is made ahead of time, ready for the next transaction
+    expect(made).toEqual(['made', 'closed', 'made', 'closed', 'made']);
     expect(logs[0]).toMatch(/no answer from the node within 0 s.*trying again on a fresh connection \(2 of 3\)/);
 
+    // a new connection is given time to settle before it sends (#327: a send right after
+    // it's made goes out on a closing socket); the one made ahead of time is ready sooner
+    let clock = 1_000;
+    const waits: number[] = [];
+    const s0 = steadySubmissionService(url, {
+      settleMs: 8_000,
+      now: () => clock,
+      sleep: async (ms) => void (waits.push(ms), (clock += ms)),
+      make: () => service(async () => ({ _tag: 'InBlock' })),
+    });
+    await s0.submitTransaction(tx);
+    clock += 3_000; // the next purchase comes along 3 s later
+    await s0.submitTransaction(tx);
+    expect(waits).toEqual([8_000, 5_000]);
+
     // the node says it already has it: sent
-    const s2 = steadySubmissionService(url, { tryMs: 20, make: () => service(async () => Promise.reject(new Error('submission failed', { cause: new Error('1013: Transaction Already Imported') }))) });
+    const s2 = steadySubmissionService(url, { settleMs: 0, tryMs: 20, make: () => service(async () => Promise.reject(new Error('submission failed', { cause: new Error('1013: Transaction Already Imported') }))) });
     expect(await s2.submitTransaction(tx)).toEqual({ _tag: 'Submitted' });
 
     // the answer was lost but the chain has it
     const seen: string[] = [];
-    const s3 = steadySubmissionService(url, { tryMs: 20, seen: async (id) => (seen.push(id), true), make: () => service(hangs) });
+    const s3 = steadySubmissionService(url, { settleMs: 0, tryMs: 20, seen: async (id) => (seen.push(id), true), make: () => service(hangs) });
     expect(await s3.submitTransaction(tx)).toEqual({ _tag: 'InBlock' });
     expect(seen).toEqual(['tx-1']);
 
     // the node refuses it: no point sending it again, the refusal goes straight back
     let tries = 0;
     const refusal = new Error('Transaction submission error', { cause: new Error('1010: Invalid Transaction: Custom error: 170') });
-    const s4 = steadySubmissionService(url, { tries: 3, tryMs: 20, seen: async () => false, make: () => (tries++, service(async () => Promise.reject(refusal))) });
+    const s4 = steadySubmissionService(url, { settleMs: 0, tries: 3, tryMs: 20, seen: async () => false, make: () => (tries++, service(async () => Promise.reject(refusal))) });
     await expect(s4.submitTransaction(tx)).rejects.toBe(refusal);
     expect(tries).toBe(1);
 
     // never gets through on the connection: the last error, after every try
     tries = 0;
-    const s5 = steadySubmissionService(url, { tries: 2, tryMs: 20, seen: async () => false, make: () => (tries++, service(async () => Promise.reject(new Error('disconnected from wss://node: 1006:: Abnormal Closure')))) });
+    const s5 = steadySubmissionService(url, { settleMs: 0, tries: 2, tryMs: 20, seen: async () => false, make: () => (tries++, service(async () => Promise.reject(new Error('disconnected from wss://node: 1006:: Abnormal Closure')))) });
     await expect(s5.submitTransaction(tx)).rejects.toThrow('1006:: Abnormal Closure');
     expect(tries).toBe(2);
   });

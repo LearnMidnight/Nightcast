@@ -149,6 +149,10 @@ export type SteadySubmitOptions = {
   log?: (msg: string) => void;
   /** A one-off submission service (default: the wallet SDK's, on a fresh node connection). */
   make?: (relayURL: URL) => SubmissionService;
+  /** How long a new service needs before it can send (ms, default 8 s; see below). */
+  settleMs?: number;
+  sleep?: (ms: number) => Promise<void>;
+  now?: () => number;
 };
 
 const ALREADY_IN = /already imported|AlreadyImported|temporarily banned|\b101[23]\b/i;
@@ -195,54 +199,86 @@ const errText = (err: unknown): string => errorMessages(err).join(': ');
  * in a block, not finalised (callers watch the indexer for it anyway). A
  * transaction the node already has, or the chain already shows, counts as
  * sent.
+ *
+ * A new service can't send straight away: it loads the node's metadata and
+ * then closes its socket without waiting for the close to finish, so a send
+ * in the next second or two goes out on the closing socket and fails with
+ * "disconnected: 1000 Normal Closure" (the same bug, #327; on the VM every
+ * try failed that way). So each service is given `settleMs` first, and the
+ * next one is made ahead of time, ready for the next transaction.
  */
 export const steadySubmissionService = (relayURL: URL, o: SteadySubmitOptions = {}): SubmissionService => {
   const tries = o.tries ?? 3;
   const tryMs = o.tryMs ?? 75_000;
   const make = o.make ?? ((url: URL) => Capabilities.makeDefaultSubmissionService({ relayURL: url }) as unknown as SubmissionService);
+  const settleMs = o.settleMs ?? 8_000;
+  const sleep = o.sleep ?? ((ms: number) => new Promise<void>((r) => setTimeout(r, ms)));
+  const now = o.now ?? Date.now;
+  type Ready = { service: SubmissionService; readyAt: number };
+  const fresh = (): Ready => ({ service: make(relayURL), readyAt: now() + settleMs });
+  let next: Ready | undefined;
+  const take = async (): Promise<SubmissionService> => {
+    const r = next ?? fresh();
+    next = undefined;
+    const wait = r.readyAt - now();
+    if (wait > 0) await sleep(wait);
+    return r.service;
+  };
   return {
     async submitTransaction(tx: unknown) {
-      const id = (tx as Submittable).identifiers?.().at(-1);
       try {
-        const bytes = (tx as { serialize?: () => Uint8Array }).serialize?.().length;
-        if (bytes) o.log?.(`sending the transaction (${Math.round(bytes / 1024)} KB)`);
-      } catch {
-        /* size is only for the log */
+        return await send(tx);
+      } finally {
+        next ??= fresh(); // ready for the next transaction
       }
-      let last: unknown;
-      for (let i = 1; i <= tries; i++) {
-        const service = make(relayURL);
-        let timer: ReturnType<typeof setTimeout> | undefined;
-        try {
-          return await Promise.race([
-            service.submitTransaction(tx, 'InBlock'),
-            new Promise<never>((_, reject) => {
-              timer = setTimeout(() => reject(new Error(`no answer from the node within ${Math.round(tryMs / 1000)} s`)), tryMs);
-            }),
-          ]);
-        } catch (err) {
-          last = err;
-          const text = errText(err);
-          if (ALREADY_IN.test(text)) {
-            o.log?.('the node already has the transaction (an earlier try reached it)');
-            return { _tag: 'Submitted' };
-          }
-          if (REFUSED.test(text) && !ALREADY_IN.test(text)) throw err;
-          if (id && o.seen && (await o.seen(id).catch(() => false))) {
-            o.log?.('the transaction is on the chain (the answer from the node was lost)');
-            return { _tag: 'InBlock' };
-          }
-          if (i < tries) o.log?.(`sending the transaction didn't finish (${text.slice(0, 400)}); trying again on a fresh connection (${i + 1} of ${tries})`);
-          else o.log?.(`sending the transaction failed ${tries} times; the last time: ${text.slice(0, 600)}`);
-        } finally {
-          clearTimeout(timer);
-          service.close().catch(() => undefined);
-        }
-      }
-      throw last;
     },
-    close: async () => undefined,
+    close: async () => {
+      await next?.service.close().catch(() => undefined);
+      next = undefined;
+    },
   };
+
+  async function send(tx: unknown): Promise<unknown> {
+    const id = (tx as Submittable).identifiers?.().at(-1);
+    try {
+      const bytes = (tx as { serialize?: () => Uint8Array }).serialize?.().length;
+      if (bytes) o.log?.(`sending the transaction (${Math.round(bytes / 1024)} KB)`);
+    } catch {
+      /* size is only for the log */
+    }
+    let last: unknown;
+    for (let i = 1; i <= tries; i++) {
+      const service = await take();
+      let timer: ReturnType<typeof setTimeout> | undefined;
+      try {
+        return await Promise.race([
+          service.submitTransaction(tx, 'InBlock'),
+          new Promise<never>((_, reject) => {
+            timer = setTimeout(() => reject(new Error(`no answer from the node within ${Math.round(tryMs / 1000)} s`)), tryMs);
+          }),
+        ]);
+      } catch (err) {
+        last = err;
+        const text = errText(err);
+        if (ALREADY_IN.test(text)) {
+          o.log?.('the node already has the transaction (an earlier try reached it)');
+          return { _tag: 'Submitted' };
+        }
+        if (REFUSED.test(text) && !ALREADY_IN.test(text)) throw err;
+        if (id && o.seen && (await o.seen(id).catch(() => false))) {
+          o.log?.('the transaction is on the chain (the answer from the node was lost)');
+          return { _tag: 'InBlock' };
+        }
+        if (i < tries) o.log?.(`sending the transaction didn't finish (${text.slice(0, 400)}); trying again on a fresh connection (${i + 1} of ${tries})`);
+        else o.log?.(`sending the transaction failed ${tries} times; the last time: ${text.slice(0, 600)}`);
+      } finally {
+        clearTimeout(timer);
+        service.close().catch(() => undefined);
+      }
+    }
+    throw last;
+    throw last;
+  }
 };
 
 /** Same mapping as the testkit's (not exported there), plus larger sync batches. */
