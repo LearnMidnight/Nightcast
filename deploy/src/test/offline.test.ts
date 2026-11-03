@@ -290,3 +290,54 @@ describe('dust fee-loop patch for other projects', () => {
     expect(read(file, 'utf8')).toBe(patched);
   });
 });
+
+describe('agent support', () => {
+  it("keeps the in-process prover's keys on disk: downloaded once, refused when the server sends an error", async () => {
+    const { mkdtempSync, existsSync: exists, readFileSync: readBytes } = await import('node:fs');
+    const { tmpdir } = await import('node:os');
+    const { join: joinPath } = await import('node:path');
+    const { diskKeyMaterialProvider } = await import('../wallet.js');
+    const dir = mkdtempSync(joinPath(tmpdir(), 'keys-'));
+    const urls: string[] = [];
+    const fetcher = (async (url: string) => {
+      urls.push(url);
+      return new Response(new TextEncoder().encode(`bytes of ${url.split('/').slice(-3).join('/')}`));
+    }) as unknown as typeof fetch;
+    const kmp = diskKeyMaterialProvider(dir, 'https://s3.example', fetcher) as unknown as {
+      lookupKey(l: string): Promise<{ proverKey: Uint8Array; verifierKey: Uint8Array; ir: Uint8Array } | undefined>;
+      getParams(k: number): Promise<Uint8Array>;
+    };
+    const key = await kmp.lookupKey('midnight/dust/spend');
+    expect(new TextDecoder().decode(key!.proverKey)).toBe('bytes of dust/9/spend.prover');
+    expect(urls.sort()).toEqual(['https://s3.example/dust/9/spend.bzkir', 'https://s3.example/dust/9/spend.prover', 'https://s3.example/dust/9/spend.verifier']);
+    expect(new TextDecoder().decode(await kmp.getParams(14))).toBe('bytes of s3.example/bls_midnight_2p14');
+    expect(exists(joinPath(dir, 'dust/9/spend.prover'))).toBe(true);
+    expect(await kmp.lookupKey('midnight/unknown')).toBeUndefined();
+    // a new provider (a new run) reads the disk, not the network
+    urls.length = 0;
+    const again = diskKeyMaterialProvider(dir, 'https://s3.example', fetcher) as unknown as typeof kmp;
+    expect(new TextDecoder().decode((await again.lookupKey('midnight/dust/spend'))!.ir)).toBe('bytes of dust/9/spend.bzkir');
+    expect(urls).toEqual([]);
+    expect(readBytes(joinPath(dir, 'bls_midnight_2p14'), 'utf8')).toBe('bytes of s3.example/bls_midnight_2p14');
+    // an error page is not a key
+    const denied = (async () => new Response('AccessDenied', { status: 403 })) as unknown as typeof fetch;
+    const real = globalThis.setTimeout;
+    globalThis.setTimeout = ((fn: () => void) => real(fn, 0)) as typeof setTimeout;
+    try {
+      const bad = diskKeyMaterialProvider(mkdtempSync(joinPath(tmpdir(), 'keys-')), 'https://s3.example', denied) as unknown as typeof kmp;
+      await expect(bad.getParams(10)).rejects.toThrow(/HTTP 403/);
+    } finally {
+      globalThis.setTimeout = real;
+    }
+  });
+
+  it("gives a wallet's address from its seed without the network", async () => {
+    const { walletAddressOf } = await import('../network.js');
+    const seed = 'ab'.repeat(32);
+    const a = walletAddressOf('preprod', seed);
+    expect(a).toMatch(/^mn_addr_preprod1[0-9a-z]+$/);
+    expect(walletAddressOf('preprod', seed)).toBe(a);
+    expect(walletAddressOf('preview', seed)).toMatch(/^mn_addr_preview1/);
+    expect(walletAddressOf('preprod', 'cd'.repeat(32))).not.toBe(a);
+  });
+});

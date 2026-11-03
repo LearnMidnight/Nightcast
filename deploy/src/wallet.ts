@@ -12,7 +12,7 @@
 import { createHash } from 'node:crypto';
 import { chmodSync, existsSync, mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from 'node:fs';
 import { homedir } from 'node:os';
-import { join } from 'node:path';
+import { dirname, join } from 'node:path';
 import type { Logger } from 'pino';
 import { DustSecretKey, LedgerParameters, ZswapSecretKeys } from '@midnight-ntwrk/midnight-js-protocol/ledger';
 import {
@@ -42,6 +42,79 @@ type SavedWallet = {
   shielded: string;
   unshielded: string;
   dust: string;
+};
+
+/** A wallet's unshielded address (mn_addr_...) from its seed, offline. */
+export const addressFromSeed = (seed: string, walletNetworkId: Parameters<typeof createKeystore>[1]): string =>
+  createKeystore(WalletSeeds.fromMasterSeed(seed).unshielded, walletNetworkId).getBech32Address().asString();
+
+type KeyMaterialProvider = NonNullable<NonNullable<Parameters<typeof Capabilities.makeWasmProvingService>[0]>['keyMaterialProvider']>;
+
+/**
+ * Where the in-process prover keeps the keys and parameters it downloads
+ * (NIGHTCAST_KEY_CACHE overrides it). They are public, about 100 MB, and the
+ * same for every wallet, so they live outside the secrets folder.
+ */
+export const keyCacheDir = (): string => process.env.NIGHTCAST_KEY_CACHE ?? join(homedir(), '.cache', 'nightcast', 'keys');
+
+/**
+ * The wallet SDK's key material for in-process (WASM) proving, kept on disk.
+ * Same files and addresses as the SDK's own provider
+ * (wallet-sdk-prover-client 1.2.2, WasmProver.makeDefaultKeyMaterialProvider),
+ * which keeps them in memory only, so every run downloaded them again; and
+ * this one refuses an error page instead of caching it as a key.
+ */
+export const diskKeyMaterialProvider = (
+  dir: string = keyCacheDir(),
+  base = 'https://midnight-s3-fileshare-dev-eu-west-1.s3.eu-west-1.amazonaws.com',
+  fetcher: typeof fetch = fetch,
+): KeyMaterialProvider => {
+  const ver = 9;
+  const paths: Record<string, string> = {
+    'midnight/zswap/spend': `zswap/${ver}/spend`,
+    'midnight/zswap/output': `zswap/${ver}/output`,
+    'midnight/zswap/sign': `zswap/${ver}/sign`,
+    'midnight/dust/spend': `dust/${ver}/spend`,
+  };
+  const memory = new Map<string, Promise<Uint8Array>>();
+  const file = (name: string): Promise<Uint8Array> => {
+    let p = memory.get(name);
+    if (!p) {
+      p = (async () => {
+        const path = join(dir, name);
+        if (existsSync(path)) return new Uint8Array(readFileSync(path));
+        let last: unknown;
+        for (let i = 0; i < 5; i++) {
+          try {
+            const r = await fetcher(`${base}/${name}`);
+            if (!r.ok) throw new Error(`HTTP ${r.status}`);
+            const bytes = new Uint8Array(await r.arrayBuffer());
+            if (bytes.length === 0) throw new Error('empty');
+            mkdirSync(dirname(path), { recursive: true });
+            writeFileSync(`${path}.tmp`, bytes);
+            renameSync(`${path}.tmp`, path);
+            return bytes;
+          } catch (err) {
+            last = err;
+            await new Promise((res) => setTimeout(res, 1000 * 2 ** (i + 1)));
+          }
+        }
+        memory.delete(name);
+        throw new Error(`could not download ${base}/${name}: ${last instanceof Error ? last.message : String(last)}`);
+      })();
+      memory.set(name, p);
+    }
+    return p;
+  };
+  return {
+    lookupKey: async (keyLocation: string) => {
+      const pth = paths[keyLocation];
+      if (pth === undefined) return undefined;
+      const [proverKey, verifierKey, ir] = await Promise.all([file(`${pth}.prover`), file(`${pth}.verifier`), file(`${pth}.bzkir`)]);
+      return { proverKey, verifierKey, ir };
+    },
+    getParams: (k: number) => file(`bls_midnight_2p${k}`),
+  } as unknown as KeyMaterialProvider;
 };
 
 /** Folder for saved wallet state (NIGHTCAST_STATE_DIR overrides it). */
@@ -153,7 +226,7 @@ export const buildWallet = async (
   const { shielded, unshielded, dust } = parts;
   const facade = await WalletFacade.init({
     configuration: config,
-    ...(prover === 'wasm' ? { provingService: () => Capabilities.makeWasmProvingService() } : {}),
+    ...(prover === 'wasm' ? { provingService: () => Capabilities.makeWasmProvingService({ keyMaterialProvider: diskKeyMaterialProvider() }) } : {}),
     shielded: () => shielded,
     unshielded: () => unshielded,
     dust: () => dust,

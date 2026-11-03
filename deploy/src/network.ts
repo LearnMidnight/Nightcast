@@ -28,7 +28,7 @@ import {
 } from '@midnight-ntwrk/testkit-js';
 import { Nightcast, type NightcastPrivateState, witnesses } from '@nightcast/contract';
 import { zkConfigPath } from './fingerprints.js';
-import { buildWallet } from './wallet.js';
+import { addressFromSeed, buildWallet } from './wallet.js';
 
 export const NETWORKS = ['preprod', 'preview', 'local'] as const;
 export type Network = (typeof NETWORKS)[number];
@@ -54,7 +54,12 @@ export const createLogger = (level = process.env.NIGHTCAST_LOG_LEVEL ?? 'info'):
         method.apply(this, args.map((a) => (typeof a === 'string' ? redact(a) : a)) as typeof args);
       },
     },
-    transport: { target: 'pino-pretty', options: { colorize: true, ignore: 'pid,hostname' } },
+    // NIGHTCAST_LOG_FD=2 sends the log to stderr, for programs whose stdout is
+    // a protocol (an MCP server's JSON-RPC, say).
+    transport: {
+      target: 'pino-pretty',
+      options: { colorize: process.env.NIGHTCAST_LOG_FD !== '2', ignore: 'pid,hostname', destination: process.env.NIGHTCAST_LOG_FD === '2' ? 2 : 1 },
+    },
   });
 
 // The testkit's own logger prints wallet settings (including indexer URLs, so
@@ -320,6 +325,16 @@ export const connect = async (
   if (problems.length === 0) logger.info('All reachable.');
 
   return { network, logger, config, problems, remoteProver: remote !== undefined, shutdown: () => proofServer.stop() };
+};
+
+/**
+ * A wallet's unshielded address (mn_addr_...) from its seed, without opening
+ * it or touching the network: what to paste into the faucet.
+ */
+export const walletAddressOf = (network: Exclude<Network, 'local'>, seed: string): string => {
+  const quiet = pino({ level: 'silent' });
+  const env = (BLOCKFROST[network] ? new PreprodTestEnvironment(quiet) : new PreviewTestEnvironment(quiet)).getEnvironmentConfiguration();
+  return addressFromSeed(seed, env.walletNetworkId);
 };
 
 /** Seeds of the pre-funded wallets on a `local` network. */
