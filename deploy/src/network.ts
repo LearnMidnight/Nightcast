@@ -28,7 +28,7 @@ import {
 } from '@midnight-ntwrk/testkit-js';
 import { Nightcast, type NightcastPrivateState, witnesses } from '@nightcast/contract';
 import { zkConfigPath } from './fingerprints.js';
-import { buildWallet } from './wallet.js';
+import { addressFromSeed, buildWallet } from './wallet.js';
 
 export const NETWORKS = ['preprod', 'preview', 'local'] as const;
 export type Network = (typeof NETWORKS)[number];
@@ -54,7 +54,12 @@ export const createLogger = (level = process.env.NIGHTCAST_LOG_LEVEL ?? 'info'):
         method.apply(this, args.map((a) => (typeof a === 'string' ? redact(a) : a)) as typeof args);
       },
     },
-    transport: { target: 'pino-pretty', options: { colorize: true, ignore: 'pid,hostname' } },
+    // NIGHTCAST_LOG_FD=2 sends the log to stderr, for programs whose stdout is
+    // a protocol (an MCP server's JSON-RPC, say).
+    transport: {
+      target: 'pino-pretty',
+      options: { colorize: process.env.NIGHTCAST_LOG_FD !== '2', ignore: 'pid,hostname', destination: process.env.NIGHTCAST_LOG_FD === '2' ? 2 : 1 },
+    },
   });
 
 // The testkit's own logger prints wallet settings (including indexer URLs, so
@@ -322,6 +327,16 @@ export const connect = async (
   return { network, logger, config, problems, remoteProver: remote !== undefined, shutdown: () => proofServer.stop() };
 };
 
+/**
+ * A wallet's unshielded address (mn_addr_...) from its seed, without opening
+ * it or touching the network: what to paste into the faucet.
+ */
+export const walletAddressOf = (network: Exclude<Network, 'local'>, seed: string): string => {
+  const quiet = pino({ level: 'silent' });
+  const env = (BLOCKFROST[network] ? new PreprodTestEnvironment(quiet) : new PreviewTestEnvironment(quiet)).getEnvironmentConfiguration();
+  return addressFromSeed(seed, env.walletNetworkId);
+};
+
 /** Seeds of the pre-funded wallets on a `local` network. */
 export const LOCAL_GENESIS_SEEDS = [
   '0000000000000000000000000000000000000000000000000000000000000002',
@@ -335,6 +350,11 @@ export type WalletOptions = {
   seed?: string;
   /** Called with the wallet's unshielded address before waiting for funds. */
   onAddress?: (address: string) => void;
+  /**
+   * Called with the wallet as soon as it's built, before it syncs: to follow
+   * its state (`wallet.wallet.state()`), e.g. for a progress bar.
+   */
+  onWallet?: (wallet: MidnightWalletProvider) => void;
   /** Called once if the wallet has no NIGHT yet (it then waits for some to arrive). */
   onNoFunds?: (address: string) => void;
   /** Called once while waiting for the first DUST after registration. */
@@ -346,6 +366,12 @@ export type WalletOptions = {
    * Default: `wasm` when the session uses a remote prover, else `server`.
    */
   prover?: 'server' | 'wasm';
+  /**
+   * Send transactions on a fresh node connection each time, with time limits
+   * and retries (see steadySubmissionService). Default: on when the session
+   * uses a remote prover (agents on other people's machines), else off.
+   */
+  steadySubmit?: boolean;
 };
 
 /** Faucet pages for test NIGHT (from Midnight's "Acquire tokens" guide). */
@@ -368,10 +394,31 @@ export const openWallet = async (session: Session, opts: WalletOptions = {}): Pr
   const persist = session.network !== 'local' && process.env.NIGHTCAST_NO_WALLET_STATE !== '1';
   const prover = opts.prover ?? (session.remoteProver ? 'wasm' : 'server');
   if (prover === 'wasm') session.logger.info("The wallet proves its own fees in-process (keys from Midnight's servers, fetched once).");
-  const built = await buildWallet(session.config, session.network, seed, session.logger.child({}, { level: 'warn' }), persist, prover);
+  const steady = opts.steadySubmit ?? session.remoteProver === true;
+  const indexer = steady ? indexerPublicDataProvider(session.config.indexer, session.config.indexerWS) : undefined;
+  const built = await buildWallet(
+    session.config,
+    session.network,
+    seed,
+    session.logger.child({}, { level: 'warn' }),
+    persist,
+    prover,
+    steady
+      ? {
+          log: (m) => session.logger.info(m),
+          // the indexer has it in a block: give it a few seconds to say so
+          seen: async (txId) =>
+            Promise.race([
+              indexer!.watchForTxData(txId).then(() => true),
+              new Promise<boolean>((r) => setTimeout(() => r(false), 10_000).unref()),
+            ]),
+        }
+      : undefined,
+  );
   const wallet = built.provider;
   const address = walletAddress(wallet);
   opts.onAddress?.(address);
+  opts.onWallet?.(wallet);
   if (built.restored) session.logger.info('Carrying on from the saved wallet state.');
   await wallet.start(false);
 

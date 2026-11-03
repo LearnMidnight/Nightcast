@@ -24,6 +24,7 @@ export {
   type Session,
   type WalletOptions,
   walletAddress,
+  walletAddressOf,
   walletBalances,
   waitForSpendableDust,
 } from './network.js';
@@ -38,5 +39,5 @@ export {
   onChainFingerprints,
   type OperationsSource,
 } from './fingerprints.js';
-export { forgetWalletState, walletStateFile } from './wallet.js';
+export { addressFromSeed, diskKeyMaterialProvider, forgetWalletState, keyCacheDir, walletStateFile } from './wallet.js';
 export { redact } from './redact-output.js';
