@@ -350,6 +350,11 @@ export type WalletOptions = {
   seed?: string;
   /** Called with the wallet's unshielded address before waiting for funds. */
   onAddress?: (address: string) => void;
+  /**
+   * Called with the wallet as soon as it's built, before it syncs: to follow
+   * its state (`wallet.wallet.state()`), e.g. for a progress bar.
+   */
+  onWallet?: (wallet: MidnightWalletProvider) => void;
   /** Called once if the wallet has no NIGHT yet (it then waits for some to arrive). */
   onNoFunds?: (address: string) => void;
   /** Called once while waiting for the first DUST after registration. */
@@ -387,6 +392,7 @@ export const openWallet = async (session: Session, opts: WalletOptions = {}): Pr
   const wallet = built.provider;
   const address = walletAddress(wallet);
   opts.onAddress?.(address);
+  opts.onWallet?.(wallet);
   if (built.restored) session.logger.info('Carrying on from the saved wallet state.');
   await wallet.start(false);
 
