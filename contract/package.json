@@ -42,11 +42,12 @@
     "LICENSE"
   ],
   "scripts": {
-    "compact": "compact compile src/nightcast.compact src/managed/nightcast",
-    "compact:fast": "compact compile --skip-zk src/nightcast.compact src/managed/nightcast",
-    "build": "rm -rf dist && tsc -p tsconfig.build.json && cp -R src/managed dist/managed && cp src/nightcast.compact dist/",
+    "compact": "compact compile src/nightcast.compact src/managed/nightcast && npm run compact:words",
+    "compact:fast": "compact compile --skip-zk src/nightcast.compact src/managed/nightcast && npm run compact:words",
+    "build": "rm -rf dist && tsc -p tsconfig.build.json && cp -R src/managed dist/managed && cp src/nightcast.compact src/NightcastWords.compact dist/",
     "typecheck": "tsc -p tsconfig.json --noEmit",
-    "test": "vitest run"
+    "test": "vitest run",
+    "compact:words": "compact compile --skip-zk src/words.compact src/managed/words && compact compile --skip-zk src/test/words-probe.compact src/test/managed/words-probe"
   },
   "dependencies": {
     "@midnight-ntwrk/compact-runtime": "0.16.0"
@@ -56,5 +57,8 @@
   },
   "publishConfig": {
     "access": "public"
+  },
+  "devDependencies": {
+    "@midnight-ntwrk/zkir-v2": "2.1.0"
   }
 }

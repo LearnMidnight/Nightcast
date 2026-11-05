@@ -1,0 +1,20 @@
+// Test only: checks, inside a circuit, that NightcastWords gives the words
+// the JS (src/words.ts) gives. words.test.ts runs it and puts each run
+// through the zkir check a proof server does before proving.
+
+pragma language_version >= 0.22 && < 0.24;
+
+import CompactStandardLibrary;
+import "../NightcastWords" prefix Words$;
+
+// A ledger write makes probe a real (impure) circuit, so it gets zkir.
+export ledger checks: Counter;
+
+export circuit probe(output: Bytes<32>, index: Uint<32>, sha: Bytes<32>, poseidon: Bytes<32>, field: Field): [] {
+  const o = disclose(output);
+  const i = disclose(index);
+  assert(Words$randomWord(o, i) == disclose(sha), "SHA-256 word differs");
+  assert(Words$randomWordPoseidon(o, i) == disclose(poseidon), "Poseidon word differs");
+  assert(Words$randomWordPoseidonField(o, i) == disclose(field), "Poseidon field differs");
+  checks.increment(1);
+}
