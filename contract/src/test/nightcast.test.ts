@@ -280,10 +280,10 @@ describe('key rotation wait', () => {
     const newSk = generateOracleSecretKey();
     expect(() => sim.approveOracleKey()).toThrow(/no key proposed/);
     sim.proposeOracleKey(oraclePublicKey(newSk));
-    expect(sim.getLedger().oracleKeyChangeAt).toBe(BigInt(sim.now) + maxWindow);
+    expect(sim.getLedger().oracleKeyChangeAt).toBe(BigInt(sim.now) + 600n + maxWindow);
     // An operator who made the key itself can't install it straight away...
     expect(() => sim.acceptOracleKey({ oracleSecretKey: newSk })).toThrow(/still waiting/);
-    sim.advance(Number(maxWindow) - 10);
+    sim.advance(Number(maxWindow) + 600 - 10);
     expect(() => sim.acceptOracleKey({ oracleSecretKey: newSk })).toThrow(/still waiting/);
     // ...and proposing again restarts the wait.
     sim.proposeOracleKey(oraclePublicKey(newSk));
@@ -292,7 +292,7 @@ describe('key rotation wait', () => {
     expect(() => sim.proposeOracleKey(oraclePublicKey(newSk), sim.operator, BigInt(sim.now + 1_000))).toThrow(/clock/);
     // Only the current oracle can approve. After the wait, no approval is needed.
     expect(() => sim.approveOracleKey({ oracleSecretKey: newSk })).toThrow(/not the current oracle/);
-    sim.advance(Number(maxWindow));
+    sim.advance(Number(maxWindow) + 600);
     sim.acceptOracleKey({ oracleSecretKey: newSk });
     expect(sim.getLedger().oracleKey).toEqual(oraclePublicKey(newSk));
     expect(sim.getLedger().oracleKeyApproved).toBe(false);

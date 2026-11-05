@@ -147,9 +147,9 @@ describe.runIf(enabled)('Nightcast on a local Midnight network', () => {
     await expect(acceptOracleKey(providers, address, generateOracleSecretKey(), walletBytes(wallet))).rejects.toThrow();
     await acceptOracleKey(providers, address, sk, walletBytes(wallet));
     // Room for the four requests below.
-    await depositBond(providers, address, 4n * COLLATERAL);
+    await depositBond(providers, address, 4n);
     const l = Nightcast.ledger((await providers.publicDataProvider.queryContractState(address))!.data);
-    expect(l.bond).toBe(4n * COLLATERAL);
+    expect(l.bondSlots).toBe(4n);
     expect(hex(l.oraclePayout.bytes)).toBe(hex(walletBytes(wallet)));
   }, 10 * 60_000);
 
@@ -186,7 +186,6 @@ describe.runIf(enabled)('Nightcast on a local Midnight network', () => {
         'proposeOperator',
         'proposeOracleKey',
         'request',
-        'requestBondWithdrawal',
         'withdrawBond',
       ].sort(),
     );
@@ -206,14 +205,14 @@ describe.runIf(enabled)('Nightcast on a local Midnight network', () => {
     const pending = Nightcast.ledger((await providers.publicDataProvider.queryContractState(address))!.data);
     expect(pending.requests.lookup(id).fee).toBe(FEE);
     expect(pending.requests.lookup(id).collateral).toBe(COLLATERAL);
-    expect(pending.bond).toBe(3n * COLLATERAL);
+    expect(pending.bondSlots).toBe(3n);
 
     await nightcast.callTx.fulfil(id);
     const state = await providers.publicDataProvider.queryContractState(address);
     const r = Nightcast.ledger(state!.data).requests.lookup(id);
     expect(r.status).toBe(Status.fulfilled);
     // The collateral is back in the bond; the fee went to the oracle's payout.
-    expect(Nightcast.ledger(state!.data).bond).toBe(4n * COLLATERAL);
+    expect(Nightcast.ledger(state!.data).bondSlots).toBe(4n);
     expect(hex(r.requester)).toBe(hex(pureCircuits.requesterCommitmentOf(requesterSecret)));
     expect(hex(r.output)).toBe(hex(pureCircuits.evaluateAt(sk, r.point)));
     expect(hex(r.output)).toBe(hex(pureCircuits.evaluate(sk, id)));
@@ -273,6 +272,6 @@ describe.runIf(enabled)('Nightcast on a local Midnight network', () => {
     const checks = checkRequest(recordNow(), state, id, r, { inputs: { tag: req!.tag, seed: req!.seed }, expect: 'expired' });
     expect(checks.filter((c) => !c.ok)).toEqual([]);
     // The skipped request's collateral left with its fee (to the refund address), so the bond is smaller.
-    expect(Nightcast.ledger(state!.data).bond <= 3n * COLLATERAL).toBe(true);
+    expect(Nightcast.ledger(state!.data).bondSlots <= 3n).toBe(true);
   }, 20 * 60_000);
 });

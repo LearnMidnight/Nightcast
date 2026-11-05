@@ -200,17 +200,14 @@ export class NightcastSimulator {
     this.named('acceptOracleKey', as, (ctx) => this.contract.impureCircuits.acceptOracleKey(ctx, { bytes: payout }));
   }
 
-  depositBond(amount: bigint, as: NightcastPrivateState = this.anyone): void {
-    this.named('depositBond', as, (ctx) => this.contract.impureCircuits.depositBond(ctx, amount));
+  /** Add `slots` slots of collateral to the oracle's bond (slots × collateralPerRequest NIGHT atoms). */
+  depositBond(slots: bigint, as: NightcastPrivateState = this.anyone): void {
+    this.named('depositBond', as, (ctx) => this.contract.impureCircuits.depositBond(ctx, slots));
   }
 
-  /** The current oracle announces a bond withdrawal; `now` defaults to the simulator's clock. */
-  requestBondWithdrawal(amount: bigint, as: NightcastPrivateState = this.oracle, now: bigint = BigInt(this.now)): void {
-    this.named('requestBondWithdrawal', as, (ctx) => this.contract.impureCircuits.requestBondWithdrawal(ctx, amount, now));
-  }
-
-  withdrawBond(as: NightcastPrivateState = this.anyone): void {
-    this.named('withdrawBond', as, (ctx) => this.contract.impureCircuits.withdrawBond(ctx));
+  /** The current oracle takes `slots` free slots back to its payout. */
+  withdrawBond(slots: bigint, as: NightcastPrivateState = this.oracle): void {
+    this.named('withdrawBond', as, (ctx) => this.contract.impureCircuits.withdrawBond(ctx, slots));
   }
 
   /** Propose a new oracle key; `now` defaults to the simulator's clock. */
@@ -218,8 +215,10 @@ export class NightcastSimulator {
     this.named('proposeOracleKey', as, (ctx) => this.contract.impureCircuits.proposeOracleKey(ctx, key, now));
   }
 
-  approveOracleKey(as: NightcastPrivateState = this.oracle): void {
-    this.named('approveOracleKey', as, (ctx) => this.contract.impureCircuits.approveOracleKey(ctx));
+  /** The current oracle approves the proposed key (default: whatever is proposed now). */
+  approveOracleKey(as: NightcastPrivateState = this.oracle, key?: JubjubPoint): void {
+    const k = key ?? (this.getLedger().proposedOracleKey.is_some ? this.getLedger().proposedOracleKey.value : { x: 0n, y: 1n });
+    this.named('approveOracleKey', as, (ctx) => this.contract.impureCircuits.approveOracleKey(ctx, k));
   }
 
   proposeOperator(commitment: Uint8Array, as: NightcastPrivateState = this.operator): void {

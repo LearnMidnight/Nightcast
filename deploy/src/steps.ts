@@ -136,24 +136,24 @@ export const acceptOracleKey = async (
   return { txId: result.public.txId };
 };
 
-/** Add to the current oracle's bond, from this wallet. */
-export const depositBond = async (providers: NightcastProviders, contractAddress: string, amount: bigint): Promise<{ txId: string }> => {
+/** Add `slots` slots of collateral (slots × collateralPerRequest NIGHT atoms) to the current oracle's bond, from this wallet. */
+export const depositBond = async (providers: NightcastProviders, contractAddress: string, slots: bigint): Promise<{ txId: string }> => {
   const nightcast = await findDeployedContract(providers, {
     contractAddress,
     compiledContract: compiledNightcast(),
     privateStateId: NIGHTCAST_PRIVATE_STATE_ID,
     initialPrivateState: {},
   });
-  const result = await nightcast.callTx.depositBond(amount);
+  const result = await nightcast.callTx.depositBond(slots);
   return { txId: result.public.txId };
 };
 
-/** The current oracle announces a bond withdrawal (it completes after the contract's wait). */
-export const requestBondWithdrawal = async (
+/** The current oracle takes `slots` free slots of its bond back, to its payout. */
+export const withdrawBond = async (
   providers: NightcastProviders,
   contractAddress: string,
   oracleSecretKey: bigint,
-  amount: bigint,
+  slots: bigint,
 ): Promise<{ txId: string }> => {
   const nightcast = await findDeployedContract(providers, {
     contractAddress,
@@ -161,18 +161,6 @@ export const requestBondWithdrawal = async (
     privateStateId: NIGHTCAST_PRIVATE_STATE_ID,
     initialPrivateState: { oracleSecretKey },
   });
-  const result = await nightcast.callTx.requestBondWithdrawal(amount, BigInt(Math.floor(Date.now() / 1000)));
-  return { txId: result.public.txId };
-};
-
-/** Complete an announced withdrawal once its wait is over (anyone may; it pays the oracle's payout). */
-export const withdrawBond = async (providers: NightcastProviders, contractAddress: string): Promise<{ txId: string }> => {
-  const nightcast = await findDeployedContract(providers, {
-    contractAddress,
-    compiledContract: compiledNightcast(),
-    privateStateId: NIGHTCAST_PRIVATE_STATE_ID,
-    initialPrivateState: {},
-  });
-  const result = await nightcast.callTx.withdrawBond();
+  const result = await nightcast.callTx.withdrawBond(slots);
   return { txId: result.public.txId };
 };

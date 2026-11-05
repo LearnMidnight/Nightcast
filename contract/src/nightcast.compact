@@ -21,13 +21,18 @@
 //
 // Fees and bonds (v1, issues #13 and #9). A request pays `requestFee`, which
 // goes to the oracle when it answers. The oracle keeps a bond in the
-// contract; each request sets aside `collateralPerRequest` of it, which goes
-// back to the bond when the request is answered and, with the fee, to the
-// requester's refund address if it expires. So an oracle that skips a request
-// pays for it, and can't pull its bond out from under requests already made.
-// Bond withdrawals wait `oracleKeyDelay` (visible on chain), so consumers can
-// stop relying on the bond before it leaves. Both amounts are sealed at
-// deployment and may be 0.
+// contract, counted in slots of `collateralPerRequest`; each request takes one
+// slot, which goes back to the bond when the request is answered and, with
+// the fee, to the requester's refund address if it expires. So an oracle that
+// skips a request pays for it, and can't take collateral a request holds.
+// Free slots are the oracle's to withdraw at any time: a wait couldn't be
+// enforced (an oracle can always tie its free bond up in requests to itself
+// and let them expire), so the guarantee is per request. Both amounts are
+// sealed at deployment and may be 0.
+//
+// The free slots are a Counter that requests take from and answers give back
+// to without reading its value, so requests and answers made at the same time
+// don't invalidate each other's proofs (as a plain number cell would).
 //
 // See docs/SPEC.md for the construction, threat model and limitations.
 
@@ -61,12 +66,8 @@ export struct Request {
   refundTo: UserAddress;
   // Where the oracle that held `oracleKey` was paid when the request was made.
   payout: UserAddress;
-}
-
-export struct BondWithdrawal {
-  amount: Uint<128>;
-  // Block time from which it can be completed.
-  at: Uint<64>;
+  // Which acceptance of an oracle key the request was made under (oracleTerm).
+  term: Uint<64>;
 }
 
 struct AlphaPreimage {
@@ -115,14 +116,14 @@ export sealed ledger minWindow: Uint<64>;
 export sealed ledger maxWindow: Uint<64>;
 // What each request pays (to the oracle that answers it), in NIGHT atoms.
 export sealed ledger requestFee: Uint<128>;
-// How much of the oracle's bond each request sets aside, in NIGHT atoms.
+// How much of the oracle's bond each request sets aside (one slot), in NIGHT atoms.
 export sealed ledger collateralPerRequest: Uint<128>;
-// The current oracle's bond that no pending request has set aside yet.
-export ledger bond: Uint<128>;
+// The current oracle's free bond, in slots of collateralPerRequest.
+export ledger bondSlots: Counter;
 // Where the current oracle is paid (fees, and its bond when it withdraws or hands over).
 export ledger oraclePayout: UserAddress;
-// A bond withdrawal the current oracle has announced.
-export ledger bondWithdrawal: Maybe<BondWithdrawal>;
+// Counts acceptances of an oracle key; a request answered in the same term gives its slot back.
+export ledger oracleTerm: Uint<64>;
 
 // -------------------------------------------------------------- witnesses
 
@@ -150,8 +151,7 @@ constructor(key: JubjubPoint, operatorCommitment: Bytes<32>, minSecs: Uint<64>, 
   maxWindow = disclose(maxSecs);
   requestFee = disclose(fee);
   collateralPerRequest = disclose(collateral);
-  bond = 0;
-  bondWithdrawal = none<BondWithdrawal>();
+  oracleTerm = 0;
 }
 
 // ------------------------------------------------------- pure functions
@@ -215,6 +215,11 @@ pure circuit sameKey(a: JubjubPoint, b: JubjubPoint): Boolean {
   return jubjubPointX(a) == jubjubPointX(b) && jubjubPointY(a) == jubjubPointY(b);
 }
 
+// NIGHT atoms in `n` slots of collateral (fails rather than wrapping).
+circuit slotsValue(n: Uint<64>): Uint<128> {
+  return ((n as Field) * (collateralPerRequest as Field)) as Uint<128>;
+}
+
 pure circuit toUser(a: UserAddress): Either<ContractAddress, UserAddress> {
   return right<ContractAddress, UserAddress>(a);
 }
@@ -229,8 +234,8 @@ pure circuit isIdentity(a: JubjubPoint): Boolean {
 // nobody else can claim or burn your ids or make requests under your
 // commitment. `seed` must be fresh for this (requester, tag). The deadline
 // must leave the oracle more than `minWindow` and at most `maxWindow` seconds.
-// The caller pays `requestFee`; `collateralPerRequest` of the oracle's bond is
-// set aside for this request. If it expires, both go to `refundTo`.
+// The caller pays `requestFee`; one slot of the oracle's bond is set aside for
+// this request. If it expires, both go to `refundTo` (public, like the payer).
 // Returns the request id.
 export circuit request(tag: Bytes<32>, seed: Bytes<32>, deadline: Uint<64>, refundTo: UserAddress): Bytes<32> {
   assert(oracleKeyReady, "no active oracle key");
@@ -242,9 +247,10 @@ export circuit request(tag: Bytes<32>, seed: Bytes<32>, deadline: Uint<64>, refu
   const requester = disclose(requesterCommitmentOf(requesterSecret()));
   const id = disclose(requestId(kernel.self(), requester, tag, seed));
   assert(!requests.member(id), "request already exists");
-  assert(bond >= collateralPerRequest, "the oracle's bond is too small for another request");
-
-  bond = (bond - collateralPerRequest) as Uint<128>;
+  if (collateralPerRequest > 0) {
+    assert(!bondSlots.lessThan(1), "the oracle's bond is too small for another request");
+    bondSlots.decrement(1);
+  }
   if (requestFee > 0) {
     receiveUnshielded(nativeToken(), requestFee);
   }
@@ -259,7 +265,8 @@ export circuit request(tag: Bytes<32>, seed: Bytes<32>, deadline: Uint<64>, refu
     fee: requestFee,
     collateral: collateralPerRequest,
     refundTo: disclose(refundTo),
-    payout: oraclePayout
+    payout: oraclePayout,
+    term: oracleTerm
   });
   requestCount.increment(1);
   return id;
@@ -269,7 +276,8 @@ export circuit request(tag: Bytes<32>, seed: Bytes<32>, deadline: Uint<64>, refu
 // produce a proof that passes, and the output is fixed by that key and the
 // stored point, so the oracle has no choice over its value. The fee goes to
 // the payout the oracle had when the request was made; the collateral back to
-// the bond (or, if the key has since been replaced, to that payout too).
+// the bond (or, if the oracle key has been accepted again since, to that
+// payout too).
 export circuit fulfil(id: Bytes<32>): Bytes<32> {
   const rid = disclose(id);
   assert(requests.member(rid), "unknown request");
@@ -286,8 +294,8 @@ export circuit fulfil(id: Bytes<32>): Bytes<32> {
     sendUnshielded(nativeToken(), r.fee, toUser(r.payout));
   }
   if (r.collateral > 0) {
-    if (oracleKeyReady && sameKey(r.oracleKey, oracleKey)) {
-      bond = (bond + r.collateral) as Uint<128>;
+    if (r.term == oracleTerm) {
+      bondSlots.increment(1);
     } else {
       sendUnshielded(nativeToken(), r.collateral, toUser(r.payout));
     }
@@ -320,7 +328,7 @@ export circuit expire(id: Bytes<32>): [] {
 // possession alone can't tell the oracle from an operator who made the key
 // itself, which is what the wait is for.)
 // The accepting oracle names its payout address. A replacement doesn't take
-// over the old oracle's bond: what's left of it goes back to the old payout.
+// over the old oracle's bond: its free slots go back to the old payout.
 export circuit acceptOracleKey(payout: UserAddress): [] {
   assert(proposedOracleKey.is_some, "no key proposed");
   const key = proposedOracleKey.value;
@@ -330,11 +338,14 @@ export circuit acceptOracleKey(payout: UserAddress): [] {
   }
   const sk = oracleSecretKey();
   assert(disclose(sameKey(publicKey(sk), key)), "secret does not match the proposed key");
-  if (oracleKeyReady && bond > 0) {
-    sendUnshielded(nativeToken(), bond, toUser(oraclePayout));
+  if (oracleKeyReady) {
+    const free = slotsValue(bondSlots.read());
+    if (free > 0) {
+      sendUnshielded(nativeToken(), free, toUser(oraclePayout));
+    }
   }
-  bond = 0;
-  bondWithdrawal = none<BondWithdrawal>();
+  bondSlots.resetToDefault();
+  oracleTerm = (oracleTerm + 1) as Uint<64>;
   oraclePayout = disclose(payout);
   oracleKey = key;
   oracleKeyReady = true;
@@ -344,9 +355,12 @@ export circuit acceptOracleKey(payout: UserAddress): [] {
 
 // The current oracle agrees to the proposed key (a planned hand-over), so it
 // can be accepted without the wait.
-export circuit approveOracleKey(): [] {
+export circuit approveOracleKey(key: JubjubPoint): [] {
   assert(oracleKeyReady, "no current oracle key");
   assert(proposedOracleKey.is_some, "no key proposed");
+  // The approval is for this key only: a different proposal made in the
+  // meantime isn't approved by it.
+  assert(sameKey(disclose(key), proposedOracleKey.value), "that key is not the one proposed");
   const sk = oracleSecretKey();
   assert(disclose(sameKey(publicKey(sk), oracleKey)), "not the current oracle");
   oracleKeyApproved = true;
@@ -354,44 +368,28 @@ export circuit approveOracleKey(): [] {
 
 // ------------------------------------------------------------------ bond
 
-// Add to the current oracle's bond. Anyone may (it's the oracle's from then on).
-export circuit depositBond(amount: Uint<128>): [] {
+// Add `slots` slots (slots * collateralPerRequest NIGHT atoms) to the current
+// oracle's bond. Anyone may; it's the oracle's from then on.
+export circuit depositBond(slots: Uint<16>): [] {
   assert(oracleKeyReady, "no current oracle key");
-  const a = disclose(amount);
-  assert(a > 0, "nothing to deposit");
-  receiveUnshielded(nativeToken(), a);
-  bond = (bond + a) as Uint<128>;
+  assert(collateralPerRequest > 0, "this deployment takes no bond");
+  const n = disclose(slots);
+  assert(n > 0, "nothing to deposit");
+  receiveUnshielded(nativeToken(), slotsValue(n));
+  bondSlots.increment(n);
 }
 
-// The current oracle announces a withdrawal; it can be completed from `now` +
-// oracleKeyDelay. Until then the whole bond still backs new requests, so
-// consumers see it coming. Announcing again restarts the wait.
-export circuit requestBondWithdrawal(amount: Uint<128>, now: Uint<64>): [] {
+// The current oracle takes `slots` free slots back, to its payout. Collateral
+// that pending requests hold isn't free, so it can't be taken.
+export circuit withdrawBond(slots: Uint<16>): [] {
   assert(oracleKeyReady, "no current oracle key");
   const sk = oracleSecretKey();
   assert(disclose(sameKey(publicKey(sk), oracleKey)), "not the current oracle");
-  const a = disclose(amount);
-  assert(a > 0, "nothing to withdraw");
-  const t = disclose(now);
-  assert(t > 600, "bad time");
-  assert(t < 18446744073709550000, "bad time");
-  assert(blockTimeGte(t - 600) && blockTimeLt((t + 600) as Uint<64>), "clock is more than 10 minutes off");
-  bondWithdrawal = some<BondWithdrawal>(BondWithdrawal { amount: a, at: (t + oracleKeyDelay) as Uint<64> });
-}
-
-// Complete an announced withdrawal once its wait is over: up to the amount
-// announced, of the bond not set aside by pending requests, to the oracle's
-// payout. Anyone may call this.
-export circuit withdrawBond(): [] {
-  assert(bondWithdrawal.is_some, "no withdrawal announced");
-  const w = bondWithdrawal.value;
-  assert(blockTimeGte(w.at), "the withdrawal is still waiting");
-  const a = w.amount < bond ? w.amount : bond;
-  bond = (bond - a) as Uint<128>;
-  bondWithdrawal = none<BondWithdrawal>();
-  if (a > 0) {
-    sendUnshielded(nativeToken(), a, toUser(oraclePayout));
-  }
+  const n = disclose(slots);
+  assert(n > 0, "nothing to withdraw");
+  assert(!bondSlots.lessThan(n), "not that many free slots");
+  bondSlots.decrement(n);
+  sendUnshielded(nativeToken(), slotsValue(n), toUser(oraclePayout));
 }
 
 // ------------------------------------------------------------------ admin
@@ -401,7 +399,7 @@ circuit assertOperator(): [] {
 }
 
 // Propose a new oracle key; the current key stays active until it's accepted,
-// which can happen from `now` + oracleKeyDelay (or sooner with the current
+// which can happen from `now` + 10 minutes + oracleKeyDelay (or sooner with the current
 // oracle's approval). `now` is the caller's clock, within 10 minutes of block
 // time. Proposing again restarts the wait, so the operator can't shorten it.
 export circuit proposeOracleKey(key: JubjubPoint, now: Uint<64>): [] {
@@ -411,7 +409,9 @@ export circuit proposeOracleKey(key: JubjubPoint, now: Uint<64>): [] {
   assert(t < 18446744073709550000, "bad time");
   assert(blockTimeGte(t - 600) && blockTimeLt((t + 600) as Uint<64>), "clock is more than 10 minutes off");
   proposedOracleKey = some<JubjubPoint>(disclose(key));
-  oracleKeyChangeAt = (t + oracleKeyDelay) as Uint<64>;
+  // `t` may be up to 10 minutes behind the block, so count the wait from the
+  // latest block time it could stand for.
+  oracleKeyChangeAt = (t + 600 + oracleKeyDelay) as Uint<64>;
   oracleKeyApproved = false;
 }
 

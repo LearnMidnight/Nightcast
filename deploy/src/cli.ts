@@ -76,7 +76,7 @@ import {
   textLabel,
   waitForResult,
 } from './service.js';
-import { acceptOracleKey, deployNightcastLocked, depositBond, requestBondWithdrawal, withdrawBond } from './steps.js';
+import { acceptOracleKey, deployNightcastLocked, depositBond, withdrawBond } from './steps.js';
 import { type Check, formatChecks, verifyDeployment } from './verify.js';
 
 const USAGE = `usage:
@@ -100,11 +100,10 @@ const USAGE = `usage:
   ./nightcast selftest     --network <network> --requester <requester secret file> --wallet <file> [--proof-server-port <port>]
                            (end-to-end: a request the oracle answers, checked; and one it must skip, expired)
   ./nightcast blockfrost save --network <network> [--out <file>]
-  ./nightcast bond deposit  --network <network> --amount <NIGHT> --wallet <file> [--proof-server-port <port>]
-  ./nightcast bond withdraw --network <network> --amount <NIGHT> --oracle <oracle secret file> --wallet <file> [--proof-server-port <port>]
-                           (announce a withdrawal of the oracle's bond; it completes after the contract's wait)
-  ./nightcast bond complete --network <network> --wallet <file> [--proof-server-port <port>]
-                           (complete an announced withdrawal once its wait is over; pays the oracle's payout)
+  ./nightcast bond deposit  --network <network> --slots <n> --wallet <file> [--proof-server-port <port>]
+                           (add n slots to the oracle's bond: each is the collateral of one request)
+  ./nightcast bond withdraw --network <network> --slots <n> --oracle <oracle secret file> --wallet <file> [--proof-server-port <port>]
+                           (the oracle takes n free slots back, to its payout; slots held by pending requests stay)
   ./nightcast mcp          --network <network> [--wallet <file> --requester <requester secret file>]
                            [--http <host:port> [--trust-proxy] [--origins <a,b>]] [--per-hour 6] [--per-day 200] [--proof-server-port <port>]
                            (an MCP server for AI agents: check requests and derive results; with a wallet and requester,
@@ -343,7 +342,7 @@ const main = async (argv: string[]): Promise<number> => {
       fee: { type: 'string' },
       collateral: { type: 'string' },
       payout: { type: 'string' },
-      amount: { type: 'string' },
+      slots: { type: 'string' },
       'trust-proxy': { type: 'boolean', default: false },
       origins: { type: 'string' },
       'per-hour': { type: 'string' },
@@ -641,12 +640,12 @@ const main = async (argv: string[]): Promise<number> => {
     case 'bond': {
       const network = networkArg(values.network);
       const action = positionals[0];
-      if (!['deposit', 'withdraw', 'complete'].includes(action ?? '')) throw new Error(USAGE);
+      if (action !== 'deposit' && action !== 'withdraw') throw new Error(USAGE);
       const record = readRecord(network);
-      const amount = nightArg(values.amount, '--amount');
-      if (action !== 'complete' && amount <= 0n) throw new Error('--amount must be more than 0 NIGHT');
+      const slots = values.slots === undefined ? 0n : BigInt(values.slots);
+      if (slots <= 0n || slots > 65_535n) throw new Error('--slots must be 1 to 65535 (one slot is the collateral of one request)');
       const oracleSk = action === 'withdraw' ? (() => {
-        if (!values.oracle) throw new Error('bond withdraw needs --oracle (only the current oracle can announce a withdrawal)');
+        if (!values.oracle) throw new Error('bond withdraw needs --oracle (only the current oracle can withdraw)');
         const f = readKeyFile(values.oracle, 'oracle');
         if (!f.secret) throw new Error(`${values.oracle} has no secret`);
         return parseOracleSecretKey(f.secret);
@@ -657,10 +656,8 @@ const main = async (argv: string[]): Promise<number> => {
           const providers = nightcastProviders(session, wallet);
           const tx =
             action === 'deposit'
-              ? await depositBond(providers, record.contractAddress, amount)
-              : action === 'withdraw'
-                ? await requestBondWithdrawal(providers, record.contractAddress, oracleSk!, amount)
-                : await withdrawBond(providers, record.contractAddress);
+              ? await depositBond(providers, record.contractAddress, slots)
+              : await withdrawBond(providers, record.contractAddress, oracleSk!, slots);
           process.stdout.write(`Done (transaction ${tx.txId}).\n`);
           return (await runVerify(session, network)) ? 0 : 1;
         } finally {

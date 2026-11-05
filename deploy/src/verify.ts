@@ -99,14 +99,11 @@ export const verifyDeployment = (
   });
 
   if (ledger.collateralPerRequest > 0n) {
-    const room = ledger.bond / ledger.collateralPerRequest;
-    const w = ledger.bondWithdrawal;
+    const slots = ledger.bondSlots;
     checks.push({
       name: "the oracle's bond can back new requests",
-      ok: room > 0n,
-      detail:
-        `${night(ledger.bond)} NIGHT free, enough for ${room} more request(s)` +
-        (w.is_some ? `; a withdrawal of ${night(w.value.amount)} NIGHT is announced for ${new Date(Number(w.value.at) * 1000).toISOString()}` : ''),
+      ok: slots > 0n,
+      detail: `${slots} free slot(s) (${night(slots * ledger.collateralPerRequest)} NIGHT): enough for ${slots} more request(s). The oracle may withdraw free slots at any time; only a request's own collateral is guaranteed.`,
     });
   }
 

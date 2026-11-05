@@ -222,6 +222,7 @@ describe('selectWork', () => {
         collateral: 0n,
         refundTo: { bytes: new Uint8Array(32) },
         payout: { bytes: new Uint8Array(32) },
+        term: 1n,
       },
     });
     const { todo, tooLate } = selectWork(

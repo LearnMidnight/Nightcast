@@ -58,32 +58,31 @@ Ledger:
 
 | Field | Meaning |
 |---|---|
-| `requests: Map<Bytes<32>, Request>` | By id: `status` (pending, fulfilled, expired), `requester`, `tag`, `point` (H), `oracleKey`, `deadline`, `output`, and since v1 `fee`, `collateral`, `refundTo`, `payout` |
+| `requests: Map<Bytes<32>, Request>` | By id: `status` (pending, fulfilled, expired), `requester`, `tag`, `point` (H), `oracleKey`, `deadline`, `output`, and since v1 `fee`, `collateral`, `refundTo`, `payout`, `term` |
 | `requestCount: Counter` | Total requests (increment only, so concurrent requests don't conflict) |
 | `oracleKey`, `oracleKeyReady` | Key bound to new requests, once accepted |
 | `proposedOracleKey: Maybe<JubjubPoint>`, `oracleKeyChangeAt`, `oracleKeyApproved` | Key waiting for the oracle's proof of possession; the earliest time it may be accepted; whether the current oracle agreed to it |
 | `oracleKeyDelay` (sealed) | The wait before a replacement key can be accepted: `maxWindow` |
 | `operator`, `proposedOperator` | `SHA(pad("nightcast:operator:v0"), secret)`, and a pending hand-over |
 | `minWindow`, `maxWindow` (sealed) | Allowed deadline distance in seconds; `60 ≤ min < max ≤ 30 days` |
-| `requestFee`, `collateralPerRequest` (sealed, v1) | What a request pays the oracle, and how much of the oracle's bond it sets aside, in NIGHT atoms (either may be 0) |
-| `bond` (v1) | The current oracle's bond not set aside by pending requests |
+| `requestFee`, `collateralPerRequest` (sealed, v1) | What a request pays the oracle, and how much of the oracle's bond it sets aside (one slot), in NIGHT atoms (either may be 0) |
+| `bondSlots: Counter` (v1) | The current oracle's free bond, in slots of `collateralPerRequest` |
 | `oraclePayout` (v1) | Where the current oracle is paid: fees, and its bond when withdrawn or handed over |
-| `bondWithdrawal: Maybe<{amount, at}>` (v1) | A withdrawal the current oracle announced, completable from `at` |
+| `oracleTerm` (v1) | Counts key acceptances; a request answered in the term it was made in gives its slot back |
 
 Circuits:
 
 | Circuit | Who | Checks / effect |
 |---|---|---|
 | constructor `(pk, operatorCommitment, min, max, fee, collateral)` | deployer | Window bounds. `pk` is only proposed. |
-| `acceptOracleKey(payout)` | oracle | A key is proposed; it isn't the identity; `G·sk` equals it; if a key is already active, `now ≥ oracleKeyChangeAt` or the current oracle approved. Activates it with its payout address. A replacement doesn't inherit the bond: what's free of it goes back to the old payout. |
-| `approveOracleKey()` | current oracle | A key is proposed; `G·sk` equals the active key. Lifts the wait for this proposal. |
-| `request(tag, seed, deadline, refundTo)` | requester | A key is active; `now + min < deadline ≤ now + max`; id is new; `bond ≥ collateral`. Pays `fee` in; moves `collateral` from the bond into the request. Stores a pending request with `H`, the current key and the current payout. |
-| `fulfil(id)` | oracle | Pending; `now < deadline`; `G·sk` equals the request's key. Stores the output. Pays the fee to the request's `payout`; the collateral goes back to the bond (or to `payout`, if the key has been replaced since). |
+| `acceptOracleKey(payout)` | oracle | A key is proposed; it isn't the identity; `G·sk` equals it; if a key is already active, `now ≥ oracleKeyChangeAt` or the current oracle approved. Activates it with its payout address and starts a new term. A replacement doesn't inherit the bond: its free slots go back to the old payout. |
+| `approveOracleKey(key)` | current oracle | `key` is the one proposed (so a proposal made after the oracle decided isn't approved); `G·sk` equals the active key. Lifts the wait for this proposal. |
+| `request(tag, seed, deadline, refundTo)` | requester | A key is active; `now + min < deadline ≤ now + max`; id is new; a free slot, if the deployment takes collateral. Pays `fee` in; takes one slot from the bond into the request. Stores a pending request with `H`, the current key, payout and term. |
+| `fulfil(id)` | oracle | Pending; `now < deadline`; `G·sk` equals the request's key. Stores the output. Pays the fee to the request's `payout`; the slot goes back to the bond if the request's term is the current one, else its collateral goes to `payout` too. |
 | `expire(id)` | anyone | Pending; `now ≥ deadline`. Marks it expired. Pays fee and collateral to `refundTo`. |
-| `depositBond(amount)` | anyone | A key is active. Adds to the bond. |
-| `requestBondWithdrawal(amount, now)` | current oracle | `now` within 10 minutes of block time. Announces a withdrawal, completable from `now + oracleKeyDelay`; announcing again restarts the wait. |
-| `withdrawBond()` | anyone | A withdrawal is announced and its time has come. Pays `min(amount, bond)` to `oraclePayout`: never collateral that pending requests hold. |
-| `proposeOracleKey(pk, now)` | operator | `now` within 10 minutes of block time. Proposes a key, acceptable from `now + oracleKeyDelay` (or sooner with the current oracle's approval); proposing again restarts the wait. The current key stays active until the new one is accepted. Pending requests keep their key. |
+| `depositBond(slots)` | anyone | A key is active; the deployment takes collateral. Pays `slots × collateralPerRequest` in and adds the slots. |
+| `withdrawBond(slots)` | current oracle | That many free slots. Pays them to `oraclePayout`. Slots pending requests hold aren't free. |
+| `proposeOracleKey(pk, now)` | operator | `now` within 10 minutes of block time. Proposes a key, acceptable from `now + 10 minutes + oracleKeyDelay` (the caller's `now` may be up to 10 minutes behind the block, so the wait is never shorter than `oracleKeyDelay`) (or sooner with the current oracle's approval); proposing again restarts the wait. The current key stays active until the new one is accepted. Pending requests keep their key. |
 | `proposeOperator(c)` / `acceptOperator()` | operator / incoming operator | Two-step hand-over, so a mistyped commitment can't lock admin out. |
 
 ## 4. Threat model
@@ -115,23 +114,27 @@ These are aborts, not choices, but an abort is only harmless if the consumer's f
 
 ### 4.3 Spam
 
-Requests were free in v0, so anyone could create many with short deadlines and push real requests back in the oracle's queue. Since v1 each request pays `requestFee` (to the oracle that answers it), and each one also needs `collateralPerRequest` of free bond, so the number of open requests is bounded by the bond. A requester who fills the bond with requests pays the fee for each, and gets nothing back unless the oracle skips them. The oracle service can still be limited to known requester commitments (`requesters` option).
+Requests were free in v0, so anyone could create many with short deadlines and push real requests back in the oracle's queue. Since v1 each request pays `requestFee` (to the oracle that answers it), and each one also needs a free slot of bond, so the number of open requests is bounded by the bond. A requester who fills the bond with requests pays the fee for each, and gets nothing back unless the oracle skips them. The oracle service can still be limited to known requester commitments (`requesters` option).
 
 ### 4.3a Fees and bonds (v1, issues #13 and #9)
 
-The oracle has something at stake for every request: `collateralPerRequest` of its bond is set aside when a request is made. If it answers in time, the collateral goes back to the bond and the oracle is paid the fee. If it lets the request expire, the fee and the collateral both go to the request's `refundTo`, once anyone calls `expire`.
+The oracle has something at stake for every request. Its bond is counted in slots of `collateralPerRequest`, and a request takes one slot. If the oracle answers in time, the slot goes back to the bond and the oracle is paid the fee. If it lets the request expire, the fee and the collateral both go to the request's `refundTo`, once anyone calls `expire`.
 
-Accounting: the contract's NIGHT always equals the free `bond` plus the fee and collateral of every pending request. The simulator tests check this after every step.
+**Accounting.** The contract's NIGHT always equals the free slots times `collateralPerRequest`, plus the fee and collateral of every pending request. The simulator tests check this after every step, including over a long random mix of every call.
 
-The bond can't leave from under requests already made:
-- **Withdrawals only take the free part** (`min(amount, bond)`).
-- **They wait `oracleKeyDelay`** (the longest request window) after being announced. During the wait the whole bond still backs new requests, and the pending withdrawal is public (`verify` shows it). A consumer that relies on the bond before it makes its request (a lottery selling tickets, say) has that long to see it coming.
-- **A key replacement doesn't hand the old oracle's bond to the new one:** the free part goes back to the old payout. Requests bound to the old key keep their collateral, which goes to the old oracle's payout when it answers them, or to their requesters if they expire.
+**What is guaranteed: each request's own collateral.** Nobody can take it: not the oracle, the operator or a new oracle. It goes back to the bond, or to the oracle that answered, or to the requester.
 
-Limits:
-- The collateral bounds the oracle's incentive to withhold only up to its value. An oracle that gains more from a skipped draw than the collateral still can; choose `collateralPerRequest` for the stakes.
-- There's one payout per oracle key. To change it, the oracle rotates its key.
-- There's no slashing for anything but expiry: a wrong answer is impossible (the proof), and grinding (§4.1) is prevented by the input design, not by the bond.
+**What isn't: the free bond.** The oracle may withdraw free slots at any time. An earlier draft made withdrawals wait, but a wait can't be enforced: an oracle can always tie its free bond up in requests to itself (with its own refund address) and let them expire, getting it back in about `minWindow`. So a consumer should count on the collateral its request took, and check that there's a free slot when it plans to request. Lunardraw-style consumers, which request only after selling, should void and refund a draw whose request is refused for want of bond.
+
+**Key changes.** A replacement key doesn't inherit the old oracle's bond: its free slots go back to the old payout. Requests made under the old key (in its term) keep their collateral. It goes to the old oracle's payout when that oracle answers them, or to their requesters if they expire. `oracleTerm` tells terms apart even when a key comes back (A, then B, then A again). `approveOracleKey(key)` names the key it approves, so the operator can't slip a different proposal in ahead of the approval.
+
+**Requests and answers at the same time.** The free slots are a `Counter`. A request checks that at least one slot is free (`lessThan(1)`, which publishes only the yes/no) and takes one. An answer gives one back. Neither reads the count itself, so requests and answers built against the same state don't invalidate each other's proofs, which a plain number cell would. Only the last free slot can be taken once. The tests replay transactions built against an earlier state to check this.
+
+**Limits:**
+- The collateral bounds the oracle's incentive to withhold only up to its value. An oracle that gains more from a skipped draw than the collateral still can, so choose `collateralPerRequest` for the stakes.
+- There's one payout per oracle term. To change it, the oracle rotates its key.
+- There's no slashing for anything but expiry. A wrong answer is impossible (the proof), and grinding (§4.1) is prevented by the input design, not by the bond.
+- `refundTo`, and the wallet paying the fee, are public. That's more than v0 showed about a requester.
 
 ### 4.4 Key and operator compromise
 
