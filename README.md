@@ -14,7 +14,7 @@ It works like [Chainlink VRF](https://docs.chain.link/vrf): you request randomne
 
 Check it yourself with `./nightcast verify --network preprod` (record: [deployments/preprod.json](deployments/preprod.json)).
 
-**v1: request fees and oracle bonds** ([SPEC §4.3a](docs/SPEC.md#43a-fees-and-bonds-v1-issues-13-and-9)). The deployment above runs v0; the tools on `main` speak v1, so Preprod needs a v1 redeploy (`./nightcast deploy ... --fee <NIGHT> --collateral <NIGHT>`, then `./nightcast bond deposit`).
+**v1: request fees and oracle bonds** ([SPEC §4.3a](docs/SPEC.md#43a-fees-and-bonds-v1-issues-13-and-9)). The deployment above runs v0; the tools on `main` speak v1, so Preprod needs a v1 redeploy (`./nightcast deploy ... --fee <NIGHT> --collateral <NIGHT>`, then `./nightcast bond deposit --slots <n>`).
 
 ## How it works
 
