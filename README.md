@@ -60,6 +60,10 @@ The construction, ledger layout and threat model are in [docs/SPEC.md](docs/SPEC
 
 - [Lunardraw](https://github.com/LearnMidnight/Lunardraw): a self-running lottery for AI agents (weekly Starfall draws). Its contract embeds Nightcast's VRF ([SPEC §5.1](docs/SPEC.md#51-on-chain-consumers-embed-dont-call-decision-22-oct-2026)) and uses this repo as a submodule.
 
+## For AI agents
+
+`./nightcast mcp` is an MCP server with tools to fingerprint a list, request a random value, check a request and turn the answer into a result (a winner, an order, dice...). It runs over stdio for an AI app on your computer, or over HTTP to host it for agents anywhere. See [docs/MCP.md](docs/MCP.md).
+
 ## Use it in your app
 
 ```bash

@@ -1,0 +1,8 @@
+{
+  "version": 3,
+  "file": "index.js",
+  "sourceRoot": "../../../../../",
+  "sources": ["src/test/words-probe.compact", "compiler/standard-library.compact", "src/test/../NightcastWords.compact"],
+  "names": [],
+  "mappings": ";;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;EAIA;;;;;;;;;;MAQA,AAAA,KAOC;;;;;cAPoB,QAAiB;cAAE,OAAe;cAAE,KAAc;cAAE,UAAmB;cAAE,OAAY;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;yCAArF,QAAiB,+BAAE,OAAe,+BAAE,KAAc,+BAAE,UAAmB,+BAAE,OAAY;;;;;;;;;uCAArF,QAAiB;uCAAE,OAAe;uCAAE,KAAc;uCAAE,UAAmB;uCAAE,OAAY;;;OAOzG;;;;GACA;EAhBD;;;;;;;;;;;;;;;;;;;;;;;;;;IAMA;;;;;;;;;yEAA8B;;;;;;;GAU7B;ECpBD,AAAA,iBAAA;mEAAA;;;EAAA,AAAA,kBAAA;oEAAA;;;EAAA,AAAA,wBAAA;2DAAA;;;EC+CE,AAAA,aAMC,CANkB,QAAiB,EAAE,OAAe;;;4CAGzC,QAAM;2CACP,OAAK;GAEf;EAID,AAAA,0BAMC,CAN+B,QAAiB,EAAE,OAAe;;;2CAGtD,QAAM;0CACP,OAAK;GAEf;EAID,AAAA,qBAEC,CAF0B,QAAiB,EAAE,OAAe;wEACP,QAAM;wEAAE,OAAK;GAClE;EFzDH,AAAA,QAOC;;WAPoB,QAAiB;WAAE,OAAe;WAAE,KAAc;WAAE,UAAmB;WAAE,OAAY;;UAClG,GAAoB,GAAP,QAAM;UACnB,GAAmB,GAAN,OAAK;6DACA,GAAC,EAAE,GAAC,GAAc,KAAG;;qEACb,GAAC,EAAE,GAAC;0CAAc,UAAQ;;4DACrB,GAAC,EAAE,GAAC;;4BAAc,OAAK;;UAC5D,KAAM;IAAN;;;;;;;;;;6FAAA,KAAM;;;;wEAAA;;GACP;;;;;;;;;;;;;;;;;;;;;;;;IATD;qCAAA;;;;;;;;;;;0GAA8B;KAAA;;;;;;;;;;"
+}
