@@ -94,9 +94,9 @@ describe('deployment', () => {
     const c = new Contract(witnesses);
     const ctx = () => createConstructorContext({}, '0'.repeat(64));
     const key = oraclePublicKey(generateOracleSecretKey());
-    expect(() => c.initialState(ctx(), key, ZERO, 59n, 600n)).toThrow(/at least 60/);
-    expect(() => c.initialState(ctx(), key, ZERO, 600n, 600n)).toThrow(/below maxWindow/);
-    expect(() => c.initialState(ctx(), key, ZERO, 60n, 2_592_001n)).toThrow(/at most 30 days/);
+    expect(() => c.initialState(ctx(), key, ZERO, 59n, 600n, 0n, 0n)).toThrow(/at least 60/);
+    expect(() => c.initialState(ctx(), key, ZERO, 600n, 600n, 0n, 0n)).toThrow(/below maxWindow/);
+    expect(() => c.initialState(ctx(), key, ZERO, 60n, 2_592_001n, 0n, 0n)).toThrow(/at most 30 days/);
   });
 });
 

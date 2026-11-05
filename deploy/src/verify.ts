@@ -16,6 +16,13 @@ export type ContractStateView = OperationsSource & {
  * chain data. `local` (optional) is the fingerprint set of the code in this
  * checkout, to confirm it's the code that was deployed.
  */
+/** NIGHT atoms as NIGHT (6 decimals). */
+const night = (atoms: bigint): string => {
+  const whole = atoms / 1_000_000n;
+  const frac = (atoms % 1_000_000n).toString().padStart(6, '0').replace(/0+$/, '');
+  return frac ? `${whole}.${frac}` : whole.toString();
+};
+
 export const verifyDeployment = (
   record: DeploymentRecord,
   state: ContractStateView | null | undefined,
@@ -82,6 +89,26 @@ export const verifyDeployment = (
     ok: windowsMatch,
     detail: `${ledger.minWindow}s to ${ledger.maxWindow}s`,
   });
+
+  const fee = record.parameters.requestFee ?? '0';
+  const collateral = record.parameters.collateralPerRequest ?? '0';
+  checks.push({
+    name: 'request fee and collateral match',
+    ok: ledger.requestFee.toString() === fee && ledger.collateralPerRequest.toString() === collateral,
+    detail: `fee ${night(ledger.requestFee)} NIGHT a request (to the oracle), collateral ${night(ledger.collateralPerRequest)} NIGHT a request (to the requester if it expires)`,
+  });
+
+  if (ledger.collateralPerRequest > 0n) {
+    const room = ledger.bond / ledger.collateralPerRequest;
+    const w = ledger.bondWithdrawal;
+    checks.push({
+      name: "the oracle's bond can back new requests",
+      ok: room > 0n,
+      detail:
+        `${night(ledger.bond)} NIGHT free, enough for ${room} more request(s)` +
+        (w.is_some ? `; a withdrawal of ${night(w.value.amount)} NIGHT is announced for ${new Date(Number(w.value.at) * 1000).toISOString()}` : ''),
+    });
+  }
 
   return checks;
 };

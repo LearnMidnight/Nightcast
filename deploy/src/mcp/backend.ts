@@ -26,6 +26,8 @@ export const midnightBackend = (
   publicData: PublicDataProvider,
   requester?: {
     secret: Uint8Array;
+    /** Where a missed request's fee and collateral go: this server's wallet (known once it's open). */
+    refundTo: Promise<Uint8Array>;
     /** The wallet's providers, once the wallet is open (it can take minutes). */
     providers: Promise<NightcastProviders>;
     onSubmitError?: (err: unknown) => void;
@@ -57,6 +59,8 @@ export const midnightBackend = (
     contractAddress: record.contractAddress,
     minWindow: Number(record.parameters.minWindow),
     maxWindow: Number(record.parameters.maxWindow),
+    requestFee: BigInt(record.parameters.requestFee ?? '0'),
+    collateralPerRequest: BigInt(record.parameters.collateralPerRequest ?? '0'),
     canRequest: requester !== undefined,
     notReady: () => (!requester ? undefined : openError ? `the wallet could not open (${openError})` : opened ? undefined : "this server's wallet is still opening and syncing"),
     idFor: (tag, seed) => pureCircuits.requestId(deployment, commitment, tag, seed),
@@ -64,8 +68,11 @@ export const midnightBackend = (
       if (!requester) throw new Error('this server has no wallet');
       if (!opened) throw new Error("this server's wallet is still opening");
       try {
-        const c = (await handle()) as unknown as { callTx: { request(t: Uint8Array, s: Uint8Array, d: bigint): Promise<{ public: { txId: string } }> } };
-        const r = await c.callTx.request(tag, seed, deadline);
+        const c = (await handle()) as unknown as {
+          callTx: { request(t: Uint8Array, s: Uint8Array, d: bigint, refundTo: { bytes: Uint8Array }): Promise<{ public: { txId: string } }> };
+        };
+        // A missed request's fee and collateral come back to this server's wallet.
+        const r = await c.callTx.request(tag, seed, deadline, { bytes: await requester.refundTo });
         requester.onSubmitted?.();
         return { txId: r.public.txId };
       } catch (err) {

@@ -33,6 +33,7 @@ import { chmodSync, existsSync, mkdirSync, readFileSync, realpathSync, renameSyn
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { parseArgs } from 'node:util';
+import { MidnightBech32m } from '@midnight-ntwrk/wallet-sdk-address-format';
 import { fromHex, oraclePublicKey, parseOracleSecretKey, pureCircuits, Status, toHex } from '@nightcast/contract';
 import { drawStarfall } from '@nightcast/sdk';
 import { indexerPublicDataProvider } from '@midnight-ntwrk/midnight-js-indexer-public-data-provider';
@@ -75,7 +76,7 @@ import {
   textLabel,
   waitForResult,
 } from './service.js';
-import { acceptOracleKey, deployNightcastLocked } from './steps.js';
+import { acceptOracleKey, deployNightcastLocked, depositBond, requestBondWithdrawal, withdrawBond } from './steps.js';
 import { type Check, formatChecks, verifyDeployment } from './verify.js';
 
 const USAGE = `usage:
@@ -99,10 +100,19 @@ const USAGE = `usage:
   ./nightcast selftest     --network <network> --requester <requester secret file> --wallet <file> [--proof-server-port <port>]
                            (end-to-end: a request the oracle answers, checked; and one it must skip, expired)
   ./nightcast blockfrost save --network <network> [--out <file>]
+  ./nightcast bond deposit  --network <network> --amount <NIGHT> --wallet <file> [--proof-server-port <port>]
+  ./nightcast bond withdraw --network <network> --amount <NIGHT> --oracle <oracle secret file> --wallet <file> [--proof-server-port <port>]
+                           (announce a withdrawal of the oracle's bond; it completes after the contract's wait)
+  ./nightcast bond complete --network <network> --wallet <file> [--proof-server-port <port>]
+                           (complete an announced withdrawal once its wait is over; pays the oracle's payout)
   ./nightcast mcp          --network <network> [--wallet <file> --requester <requester secret file>]
                            [--http <host:port> [--trust-proxy] [--origins <a,b>]] [--per-hour 6] [--per-day 200] [--proof-server-port <port>]
                            (an MCP server for AI agents: check requests and derive results; with a wallet and requester,
                            also make requests. Over stdio by default; --http to host it. See docs/MCP.md)
+
+Deploy takes --fee <NIGHT> (what each request pays the oracle) and --collateral <NIGHT> (how much
+of the oracle's bond each request sets aside, paid to the requester if it expires); both default
+to 0. accept-key takes --payout <mn_addr... or hex> (where the oracle is paid; default: its wallet).
 
 --oracle, --operator and --requester take files from \`./nightcast keygen\`. --wallet takes a
 file from \`./nightcast wallet new\` (or set NIGHTCAST_WALLET_SEED). Deploy uses only the
@@ -255,6 +265,31 @@ const localFingerprintsOrNone = (): Fingerprints | undefined => {
 
 const sleep = (ms: number) => new Promise<void>((res) => setTimeout(res, ms));
 
+/** A wallet's own unshielded address, as the 32 bytes contracts pay to. */
+const walletBytes = (wallet: { unshieldedKeystore: { getAddress(): string } }): Uint8Array => fromHex(wallet.unshieldedKeystore.getAddress());
+
+/** An unshielded address from `mn_addr_...` or 64 hex characters. */
+const parseUserAddress = (s: string): Uint8Array => {
+  const h = s.trim().replace(/^0x/, '');
+  if (/^[0-9a-fA-F]{64}$/.test(h)) return fromHex(h);
+  let parsed: MidnightBech32m;
+  try {
+    parsed = MidnightBech32m.parse(s.trim());
+  } catch (err) {
+    throw new Error(`${s} is not an address (mn_addr_... or 64 hex characters): ${err instanceof Error ? err.message : String(err)}`);
+  }
+  if (parsed.type !== 'addr' || parsed.data.length !== 32) throw new Error(`${s} is not an unshielded wallet address (mn_addr_...)`);
+  return Uint8Array.from(parsed.data);
+};
+
+/** NIGHT as text ("2", "0.5") to atoms. */
+const nightArg = (v: string | undefined, name: string): bigint => {
+  if (v === undefined) return 0n;
+  const m = /^(\d+)(?:\.(\d{1,6}))?$/.exec(v.trim());
+  if (!m) throw new Error(`${name} takes NIGHT with up to 6 decimals, e.g. 0.5`);
+  return BigInt(m[1]) * 1_000_000n + BigInt((m[2] ?? '').padEnd(6, '0'));
+};
+
 const runVerify = async (session: Session | undefined, network: Network, address?: string): Promise<boolean> => {
   const record = readRecord(network);
   if (address && address !== record.contractAddress) throw new Error(`record is for ${record.contractAddress}, not ${address}`);
@@ -305,6 +340,10 @@ const main = async (argv: string[]): Promise<number> => {
       'proof-server-port': { type: 'string' },
       blockfrost: { type: 'string' },
       http: { type: 'string' },
+      fee: { type: 'string' },
+      collateral: { type: 'string' },
+      payout: { type: 'string' },
+      amount: { type: 'string' },
       'trust-proxy': { type: 'boolean', default: false },
       origins: { type: 'string' },
       'per-hour': { type: 'string' },
@@ -337,6 +376,8 @@ const main = async (argv: string[]): Promise<number> => {
         operatorCommitment: fromHex(operatorCommitment),
         minWindow: BigInt(values.min!),
         maxWindow: BigInt(values.max!),
+        requestFee: nightArg(values.fee, '--fee'),
+        collateralPerRequest: nightArg(values.collateral, '--collateral'),
       };
       const fingerprints = localFingerprints();
 
@@ -361,6 +402,8 @@ const main = async (argv: string[]): Promise<number> => {
               operatorCommitment,
               minWindow: params.minWindow.toString(),
               maxWindow: params.maxWindow.toString(),
+              requestFee: params.requestFee.toString(),
+              collateralPerRequest: params.collateralPerRequest.toString(),
             },
             // Locked in the deploy transaction itself, so there is no separate lock transaction.
             transactions: { deploy: deployed.txId, lockAuthority: deployed.txId },
@@ -376,7 +419,8 @@ const main = async (argv: string[]): Promise<number> => {
           if (values.accept) {
             await waitForSpendableDust(wallet, session.logger);
             session.logger.info('Activating the oracle key...');
-            const accepted = await acceptOracleKey(providers, deployed.contractAddress, parseOracleSecretKey(oracleFile.secret!));
+            const payout = values.payout ? parseUserAddress(values.payout) : walletBytes(wallet);
+            const accepted = await acceptOracleKey(providers, deployed.contractAddress, parseOracleSecretKey(oracleFile.secret!), payout);
             record.transactions.acceptOracleKey = accepted.txId;
             writeRecord(record);
           }
@@ -405,7 +449,10 @@ const main = async (argv: string[]): Promise<number> => {
         const wallet = await openWallet(session, walletOptions(network, walletSeed(values.wallet)));
         try {
           const providers = nightcastProviders(session, wallet);
-          const accepted = await acceptOracleKey(providers, record.contractAddress, parseOracleSecretKey(oracleFile.secret!));
+          // Fees (and the bond, when withdrawn) are paid here: --payout, or this wallet.
+          const payout = values.payout ? parseUserAddress(values.payout) : walletBytes(wallet);
+          session.logger.info(`The oracle will be paid at ${Buffer.from(payout).toString('hex')}`);
+          const accepted = await acceptOracleKey(providers, record.contractAddress, parseOracleSecretKey(oracleFile.secret!), payout);
           record.transactions.acceptOracleKey = accepted.txId;
           writeRecord(record);
           return (await runVerify(session, network)) ? 0 : 1;
@@ -591,6 +638,37 @@ const main = async (argv: string[]): Promise<number> => {
       });
     }
 
+    case 'bond': {
+      const network = networkArg(values.network);
+      const action = positionals[0];
+      if (!['deposit', 'withdraw', 'complete'].includes(action ?? '')) throw new Error(USAGE);
+      const record = readRecord(network);
+      const amount = nightArg(values.amount, '--amount');
+      if (action !== 'complete' && amount <= 0n) throw new Error('--amount must be more than 0 NIGHT');
+      const oracleSk = action === 'withdraw' ? (() => {
+        if (!values.oracle) throw new Error('bond withdraw needs --oracle (only the current oracle can announce a withdrawal)');
+        const f = readKeyFile(values.oracle, 'oracle');
+        if (!f.secret) throw new Error(`${values.oracle} has no secret`);
+        return parseOracleSecretKey(f.secret);
+      })() : undefined;
+      return withSession(network, portArg(values['proof-server-port']), async (session) => {
+        const wallet = await openWallet(session, walletOptions(network, walletSeed(values.wallet)));
+        try {
+          const providers = nightcastProviders(session, wallet);
+          const tx =
+            action === 'deposit'
+              ? await depositBond(providers, record.contractAddress, amount)
+              : action === 'withdraw'
+                ? await requestBondWithdrawal(providers, record.contractAddress, oracleSk!, amount)
+                : await withdrawBond(providers, record.contractAddress);
+          process.stdout.write(`Done (transaction ${tx.txId}).\n`);
+          return (await runVerify(session, network)) ? 0 : 1;
+        } finally {
+          await wallet.stop().catch(() => undefined);
+        }
+      });
+    }
+
     case 'mcp': {
       const network = networkArg(values.network);
       const record = readRecord(network);
@@ -630,6 +708,7 @@ const main = async (argv: string[]): Promise<number> => {
         const backend = midnightBackend(network, record, indexerPublicDataProvider(session.config.indexer, session.config.indexerWS), {
           secret,
           providers,
+          refundTo: wallet.then(walletBytes),
           onSubmitted: () => watchdog.submitted(),
           onSubmitError: (err) => {
             session.logger.warn(`A request failed: ${err instanceof Error ? err.message : String(err)}`);
@@ -663,6 +742,8 @@ const main = async (argv: string[]): Promise<number> => {
             deadlineSecs: Math.floor(mins * 60),
             // a raffle's list fingerprint (listCommitment), or random
             seed: values.seed ? fromHex(values.seed) : undefined,
+            // a missed request's fee and collateral come back to this wallet
+            refundTo: walletBytes(wallet),
           });
           const tagText = values.tag ?? 'nightcast-test';
           process.stdout.write(
@@ -769,7 +850,7 @@ const main = async (argv: string[]): Promise<number> => {
 
           // 1. A request the oracle answers.
           process.stdout.write('\n1/2  A request for the oracle to answer (the oracle must be running)\n');
-          const answered = await submitRequest(providers, address, requesterSecret, { tag: 'nightcast-selftest', deadlineSecs: 30 * 60 });
+          const answered = await submitRequest(providers, address, requesterSecret, { tag: 'nightcast-selftest', deadlineSecs: 30 * 60, refundTo: walletBytes(wallet) });
           process.stdout.write(`     id ${toHex(answered.id)}, waiting for the answer...\n`);
           const r1 = await waitForResult(providers, address, answered.id, { timeoutMs: 31 * 60_000 });
           const c1 = checkRequest(record, await stateNow(), answered.id, r1, {
@@ -791,6 +872,7 @@ const main = async (argv: string[]): Promise<number> => {
               skipped = await submitRequest(providers, address, requesterSecret, {
                 tag: 'nightcast-selftest-expire',
                 deadlineSecs: minWindow + 50 + 30 * attempt,
+                refundTo: walletBytes(wallet),
               });
             } catch (err) {
               // Usually the proof took long enough that the deadline was too soon by the time it landed.

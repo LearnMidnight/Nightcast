@@ -218,6 +218,10 @@ describe('selectWork', () => {
         oracleKey: k,
         deadline,
         output: new Uint8Array(32),
+        fee: 0n,
+        collateral: 0n,
+        refundTo: { bytes: new Uint8Array(32) },
+        payout: { bytes: new Uint8Array(32) },
       },
     });
     const { todo, tooLate } = selectWork(

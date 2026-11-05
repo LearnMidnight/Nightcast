@@ -25,9 +25,52 @@ export type SimulatorOptions = {
   now?: number;
   /** Activate the oracle key right after deployment (default true). */
   acceptKey?: boolean;
+  /** What each request pays the oracle, in NIGHT atoms (default 0). */
+  requestFee?: bigint;
+  /** How much of the oracle's bond each request sets aside, in NIGHT atoms (default 0). */
+  collateralPerRequest?: bigint;
+  /** The oracle's payout address (default 32 bytes of 0x0a). */
+  oraclePayout?: Uint8Array;
+  /** The requesters' default refund address (default 32 bytes of 0x0b). */
+  refundTo?: Uint8Array;
+  /** Called with every successful call's proof data (to check it against the circuit's zkir in tests). */
+  onProof?: (circuit: string, proofData: unknown) => void;
 };
 
+/** NIGHT moving in or out of the contract in one call: `to` is the recipient's 32 bytes (hex), or "contract" for a payment in. */
+export type Transfer = { circuit: string; to: string; amount: bigint };
+
 type Result<R> = { result: R; context: CircuitContext<NightcastPrivateState> };
+
+const toHex = (b: Uint8Array): string => Buffer.from(b).toString('hex');
+
+/**
+ * The NIGHT a call moved, from its effects: what it received
+ * (`unshieldedInputs`, to "contract") and what it sent to whom
+ * (`claimedUnshieldedSpends`, keyed by token and recipient).
+ */
+const transfersOf = (circuit: string, context: unknown): Transfer[] => {
+  const effects = (context as { currentQueryContext?: { effects?: Record<string, unknown> } }).currentQueryContext?.effects;
+  if (!effects) return [];
+  const out: Transfer[] = [];
+  const entries = (m: unknown): [unknown, bigint][] => (m instanceof Map ? [...m.entries()] : m ? Object.entries(m as Record<string, bigint>) : []);
+  for (const [, amount] of entries(effects.unshieldedInputs)) out.push({ circuit, to: 'contract', amount: BigInt(amount) });
+  for (const [key, amount] of entries(effects.claimedUnshieldedSpends)) {
+    // (token type, recipient): the recipient is the last 32-byte value in the key
+    const found: string[] = [];
+    const walk = (x: unknown): void => {
+      if (x instanceof Uint8Array) {
+        if (x.length === 32) found.push(toHex(x));
+      } else if (typeof x === 'string') {
+        if (/^[0-9a-f]{64}$/i.test(x)) found.push(x.toLowerCase());
+      } else if (Array.isArray(x)) x.forEach(walk);
+      else if (x !== null && typeof x === 'object') Object.values(x as Record<string, unknown>).forEach(walk);
+    };
+    walk(key);
+    out.push({ circuit, to: found[found.length - 1] ?? 'unknown', amount: BigInt(amount) });
+  }
+  return out;
+};
 
 /**
  * Runs the compiled Nightcast contract in memory. Several actors (requesters,
@@ -50,6 +93,8 @@ export class NightcastSimulator {
       pureCircuits.operatorCommitmentOf(opts.operatorSecret),
       opts.minWindow ?? 60n,
       opts.maxWindow ?? 3_600n,
+      opts.requestFee ?? 0n,
+      opts.collateralPerRequest ?? 0n,
     );
     this.state = result.currentContractState;
     if (opts.acceptKey ?? true) this.acceptOracleKey();
@@ -68,6 +113,20 @@ export class NightcastSimulator {
   }
 
   readonly anyone: NightcastPrivateState = {};
+
+  /** Every NIGHT payment in and out of the contract so far, from each call's effects. */
+  readonly transfers: Transfer[] = [];
+
+  /** Total paid out to an address (32 bytes) so far. */
+  paidTo(address: Uint8Array): bigint {
+    const h = Buffer.from(address).toString('hex');
+    return this.transfers.filter((t) => t.to === h).reduce((a, t) => a + t.amount, 0n);
+  }
+
+  /** NIGHT the contract holds: everything paid in, less everything paid out. */
+  balance(): bigint {
+    return this.transfers.reduce((a, t) => (t.to === 'contract' ? a + t.amount : a - t.amount), 0n);
+  }
 
   advance(seconds: number): void {
     this.now += seconds;
@@ -105,39 +164,69 @@ export class NightcastSimulator {
     );
     const out = call(ctx);
     this.state = out.context.currentQueryContext.state;
+    this.transfers.push(...transfersOf(String(this.lastCircuit), out.context));
+    this.opts.onProof?.(this.lastCircuit, (out as { proofData?: unknown }).proofData);
     return out.result;
   }
 
-  request(tag: Uint8Array, seed: Uint8Array, deadline: bigint, as: NightcastPrivateState = this.requester): Uint8Array {
-    return this.run(as, (ctx) => this.contract.impureCircuits.request(ctx, tag, seed, deadline));
+  private lastCircuit = '';
+  private named<R>(name: string, privateState: NightcastPrivateState, call: (ctx: CircuitContext<NightcastPrivateState>) => Result<R>): R {
+    this.lastCircuit = name;
+    return this.run(privateState, call);
+  }
+
+  get oraclePayout(): Uint8Array {
+    return this.opts.oraclePayout ?? new Uint8Array(32).fill(0x0a);
+  }
+
+  get refundTo(): Uint8Array {
+    return this.opts.refundTo ?? new Uint8Array(32).fill(0x0b);
+  }
+
+  request(tag: Uint8Array, seed: Uint8Array, deadline: bigint, as: NightcastPrivateState = this.requester, refundTo: Uint8Array = this.refundTo): Uint8Array {
+    return this.named('request', as, (ctx) => this.contract.impureCircuits.request(ctx, tag, seed, deadline, { bytes: refundTo }));
   }
 
   fulfil(id: Uint8Array, as: NightcastPrivateState = this.oracle): Uint8Array {
-    return this.run(as, (ctx) => this.contract.impureCircuits.fulfil(ctx, id));
+    return this.named('fulfil', as, (ctx) => this.contract.impureCircuits.fulfil(ctx, id));
   }
 
   expire(id: Uint8Array, as: NightcastPrivateState = this.anyone): void {
-    this.run(as, (ctx) => this.contract.impureCircuits.expire(ctx, id));
+    this.named('expire', as, (ctx) => this.contract.impureCircuits.expire(ctx, id));
   }
 
-  acceptOracleKey(as: NightcastPrivateState = this.oracle): void {
-    this.run(as, (ctx) => this.contract.impureCircuits.acceptOracleKey(ctx));
+  /** The oracle activates the proposed key, naming its payout address (default: the simulator's oraclePayout). */
+  acceptOracleKey(as: NightcastPrivateState = this.oracle, payout: Uint8Array = this.oraclePayout): void {
+    this.named('acceptOracleKey', as, (ctx) => this.contract.impureCircuits.acceptOracleKey(ctx, { bytes: payout }));
+  }
+
+  depositBond(amount: bigint, as: NightcastPrivateState = this.anyone): void {
+    this.named('depositBond', as, (ctx) => this.contract.impureCircuits.depositBond(ctx, amount));
+  }
+
+  /** The current oracle announces a bond withdrawal; `now` defaults to the simulator's clock. */
+  requestBondWithdrawal(amount: bigint, as: NightcastPrivateState = this.oracle, now: bigint = BigInt(this.now)): void {
+    this.named('requestBondWithdrawal', as, (ctx) => this.contract.impureCircuits.requestBondWithdrawal(ctx, amount, now));
+  }
+
+  withdrawBond(as: NightcastPrivateState = this.anyone): void {
+    this.named('withdrawBond', as, (ctx) => this.contract.impureCircuits.withdrawBond(ctx));
   }
 
   /** Propose a new oracle key; `now` defaults to the simulator's clock. */
   proposeOracleKey(key: JubjubPoint, as: NightcastPrivateState = this.operator, now: bigint = BigInt(this.now)): void {
-    this.run(as, (ctx) => this.contract.impureCircuits.proposeOracleKey(ctx, key, now));
+    this.named('proposeOracleKey', as, (ctx) => this.contract.impureCircuits.proposeOracleKey(ctx, key, now));
   }
 
   approveOracleKey(as: NightcastPrivateState = this.oracle): void {
-    this.run(as, (ctx) => this.contract.impureCircuits.approveOracleKey(ctx));
+    this.named('approveOracleKey', as, (ctx) => this.contract.impureCircuits.approveOracleKey(ctx));
   }
 
   proposeOperator(commitment: Uint8Array, as: NightcastPrivateState = this.operator): void {
-    this.run(as, (ctx) => this.contract.impureCircuits.proposeOperator(ctx, commitment));
+    this.named('proposeOperator', as, (ctx) => this.contract.impureCircuits.proposeOperator(ctx, commitment));
   }
 
   acceptOperator(as: NightcastPrivateState): void {
-    this.run(as, (ctx) => this.contract.impureCircuits.acceptOperator(ctx));
+    this.named('acceptOperator', as, (ctx) => this.contract.impureCircuits.acceptOperator(ctx));
   }
 }

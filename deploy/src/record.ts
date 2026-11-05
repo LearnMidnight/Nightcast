@@ -18,6 +18,10 @@ export type DeploymentRecord = {
     operatorCommitment: string;
     minWindow: string;
     maxWindow: string;
+    /** v1: what each request pays the oracle, in NIGHT atoms (absent in v0 records). */
+    requestFee?: string;
+    /** v1: how much of the oracle's bond each request sets aside, in NIGHT atoms (absent in v0 records). */
+    collateralPerRequest?: string;
   };
   transactions: {
     deploy?: string;

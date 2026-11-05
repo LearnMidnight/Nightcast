@@ -27,7 +27,14 @@ export type DeployParams = {
   operatorCommitment: Uint8Array;
   minWindow: bigint;
   maxWindow: bigint;
+  /** What each request pays the oracle, in NIGHT atoms (default 0). */
+  requestFee?: bigint;
+  /** How much of the oracle's bond each request sets aside, in NIGHT atoms (default 0). */
+  collateralPerRequest?: bigint;
 };
+
+const constructorArgs = (p: DeployParams) =>
+  [p.oraclePublicKey, p.operatorCommitment, p.minWindow, p.maxWindow, p.requestFee ?? 0n, p.collateralPerRequest ?? 0n] as const;
 
 /**
  * Deploy Nightcast with a fresh, single-use maintenance key. The caller must
@@ -43,7 +50,7 @@ export const deployNightcast = async (
     privateStateId: NIGHTCAST_PRIVATE_STATE_ID,
     initialPrivateState: {},
     signingKey: maintenanceKey,
-    args: [params.oraclePublicKey, params.operatorCommitment, params.minWindow, params.maxWindow],
+    args: [...constructorArgs(params)] as never,
   });
   const pub = deployed.deployTxData.public;
   return { contractAddress: pub.contractAddress, txId: pub.txId, maintenanceKey };
@@ -68,7 +75,7 @@ export const deployNightcastLocked = async (
     compiledContract: compiledNightcast(),
     initialPrivateState: {},
     signingKey: sampleSigningKey(), // never used: the authority is replaced before anything is sent
-    args: [params.oraclePublicKey, params.operatorCommitment, params.minWindow, params.maxWindow],
+    args: [...constructorArgs(params)] as never,
   });
 
 /**
@@ -102,13 +109,15 @@ export const deployLocked = async <C extends Contract.Any>(
 };
 
 /**
- * The oracle proves it holds the proposed key, activating it. Runs with the
- * oracle secret only in memory.
+ * The oracle proves it holds the proposed key, activating it, and names the
+ * address it's paid at (request fees, and its bond when it withdraws).
+ * Runs with the oracle secret only in memory.
  */
 export const acceptOracleKey = async (
   providers: NightcastProviders,
   contractAddress: string,
   oracleSecretKey: bigint,
+  payout: Uint8Array,
 ): Promise<{ txId: string }> => {
   const expected = oraclePublicKey(oracleSecretKey);
   const nightcast = await findDeployedContract(providers, {
@@ -117,12 +126,53 @@ export const acceptOracleKey = async (
     privateStateId: NIGHTCAST_PRIVATE_STATE_ID,
     initialPrivateState: { oracleSecretKey },
   });
-  const result = await nightcast.callTx.acceptOracleKey();
+  const result = await nightcast.callTx.acceptOracleKey({ bytes: payout });
   const state = await providers.publicDataProvider.queryContractState(contractAddress);
   if (!state) throw new Error(`no contract at ${contractAddress}`);
   const ledger = Nightcast.ledger(state.data);
   if (!ledger.oracleKeyReady || ledger.oracleKey.x !== expected.x || ledger.oracleKey.y !== expected.y) {
     throw new Error('acceptOracleKey was accepted but the ledger does not show the key as active');
   }
+  return { txId: result.public.txId };
+};
+
+/** Add to the current oracle's bond, from this wallet. */
+export const depositBond = async (providers: NightcastProviders, contractAddress: string, amount: bigint): Promise<{ txId: string }> => {
+  const nightcast = await findDeployedContract(providers, {
+    contractAddress,
+    compiledContract: compiledNightcast(),
+    privateStateId: NIGHTCAST_PRIVATE_STATE_ID,
+    initialPrivateState: {},
+  });
+  const result = await nightcast.callTx.depositBond(amount);
+  return { txId: result.public.txId };
+};
+
+/** The current oracle announces a bond withdrawal (it completes after the contract's wait). */
+export const requestBondWithdrawal = async (
+  providers: NightcastProviders,
+  contractAddress: string,
+  oracleSecretKey: bigint,
+  amount: bigint,
+): Promise<{ txId: string }> => {
+  const nightcast = await findDeployedContract(providers, {
+    contractAddress,
+    compiledContract: compiledNightcast(),
+    privateStateId: NIGHTCAST_PRIVATE_STATE_ID,
+    initialPrivateState: { oracleSecretKey },
+  });
+  const result = await nightcast.callTx.requestBondWithdrawal(amount, BigInt(Math.floor(Date.now() / 1000)));
+  return { txId: result.public.txId };
+};
+
+/** Complete an announced withdrawal once its wait is over (anyone may; it pays the oracle's payout). */
+export const withdrawBond = async (providers: NightcastProviders, contractAddress: string): Promise<{ txId: string }> => {
+  const nightcast = await findDeployedContract(providers, {
+    contractAddress,
+    compiledContract: compiledNightcast(),
+    privateStateId: NIGHTCAST_PRIVATE_STATE_ID,
+    initialPrivateState: {},
+  });
+  const result = await nightcast.callTx.withdrawBond();
   return { txId: result.public.txId };
 };
