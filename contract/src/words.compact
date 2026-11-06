@@ -1,0 +1,21 @@
+// Compiles NightcastWords for JavaScript: @nightcast/contract's `words`
+// (and @nightcast/sdk's randomWords with { hash }) call these, so off-chain
+// code computes exactly what a contract importing NightcastWords computes.
+// No ledger and no impure circuits: nothing here is ever deployed.
+
+pragma language_version >= 0.22 && < 0.24;
+
+import CompactStandardLibrary;
+import "NightcastWords" prefix Words$;
+
+export pure circuit randomWord(output: Bytes<32>, index: Uint<32>): Bytes<32> {
+  return Words$randomWord(output, index);
+}
+
+export pure circuit randomWordPoseidon(output: Bytes<32>, index: Uint<32>): Bytes<32> {
+  return Words$randomWordPoseidon(output, index);
+}
+
+export pure circuit randomWordPoseidonField(output: Bytes<32>, index: Uint<32>): Field {
+  return Words$randomWordPoseidonField(output, index);
+}

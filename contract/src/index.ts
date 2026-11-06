@@ -4,3 +4,4 @@ export type { Ledger, Request } from './managed/nightcast/contract/index.js';
 export * from './witnesses.js';
 export * from './keys.js';
 export * from './simulator.js';
+export { words, FIELD_SIZE } from './words.js';

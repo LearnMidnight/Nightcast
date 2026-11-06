@@ -19,7 +19,7 @@ const FORBIDDEN = [
   [/\.tgz$|\.log$/, 'a tarball or log'],
 ];
 const REQUIRED = {
-  '@nightcast/contract': ['package.json', 'README.md', 'LICENSE', 'dist/index.js', 'dist/index.d.ts', 'dist/nightcast.compact', 'dist/managed/nightcast/contract/index.js'],
+  '@nightcast/contract': ['package.json', 'README.md', 'LICENSE', 'dist/index.js', 'dist/index.d.ts', 'dist/nightcast.compact', 'dist/managed/nightcast/contract/index.js', 'dist/NightcastWords.compact', 'dist/words.js', 'dist/managed/words/contract/index.js'],
   '@nightcast/sdk': ['package.json', 'README.md', 'LICENSE', 'dist/index.js', 'dist/index.d.ts', 'dist/pick.js', 'dist/keygen.js'],
 };
 const MAX_UNPACKED = 250 * 2 ** 20;
