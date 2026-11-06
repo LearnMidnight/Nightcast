@@ -1,5 +1,5 @@
 import { createHash } from 'node:crypto';
-import { pureCircuits } from '@nightcast/contract';
+import { FIELD_SIZE, pureCircuits, words } from '@nightcast/contract';
 
 /**
  * Helpers for turning a Nightcast output into the values an application needs.
@@ -9,11 +9,48 @@ import { pureCircuits } from '@nightcast/contract';
 
 const hex = (b: Uint8Array): string => Buffer.from(b).toString('hex');
 
-/** `count` independent 32-byte words from one output (same as the contract's `randomWord`). */
-export const randomWords = (output: Uint8Array, count: number): Uint8Array[] => {
+/**
+ * Which hash expands an output into words.
+ *
+ * - `'sha256'` (the default): the Nightcast contract's own `randomWord`.
+ *   Anyone can recompute it with ordinary SHA-256 tools.
+ * - `'poseidon-internal'`: NightcastWords' `randomWordPoseidon`, about 20
+ *   times cheaper inside a proof. Only for a contract's internal use, in a
+ *   locked deployment, recomputed with the same @nightcast/contract version
+ *   the contract was compiled with; only bytes 0-15 of each word are uniform.
+ *   See docs/GUIDE.md, "Randomness inside your own contract".
+ */
+export type WordHash = 'sha256' | 'poseidon-internal';
+
+const checkCount = (count: number) => {
   if (!Number.isInteger(count) || count < 1 || count > 2 ** 32) throw new RangeError('count must be 1..2^32');
-  return Array.from({ length: count }, (_, i) => pureCircuits.randomWord(output, BigInt(i)));
 };
+
+/**
+ * `count` independent 32-byte words from one output: the same words a
+ * contract gets from `randomWord(output, i)` (or, with
+ * `{ hash: 'poseidon-internal' }`, from NightcastWords'
+ * `randomWordPoseidon(output, i)`), for i = 0, 1, ...
+ */
+export const randomWords = (output: Uint8Array, count: number, opts: { hash?: WordHash } = {}): Uint8Array[] => {
+  checkCount(count);
+  const hash = opts.hash ?? 'sha256';
+  if (hash === 'sha256') return Array.from({ length: count }, (_, i) => pureCircuits.randomWord(output, BigInt(i)));
+  if (hash === 'poseidon-internal') return Array.from({ length: count }, (_, i) => words.randomWordPoseidon(output, BigInt(i)));
+  throw new RangeError(`unknown word hash ${String(hash)}: use 'sha256' or 'poseidon-internal'`);
+};
+
+/**
+ * The Poseidon words as field elements (NightcastWords'
+ * `randomWordPoseidonField`): each uniform in [0, FIELD_SIZE). Reduce them by
+ * rejection against FIELD_SIZE, not against 2^256.
+ */
+export const randomFieldWords = (output: Uint8Array, count: number): bigint[] => {
+  checkCount(count);
+  return Array.from({ length: count }, (_, i) => words.randomWordPoseidonField(output, BigInt(i)));
+};
+
+export { FIELD_SIZE };
 
 /**
  * A uniform integer in [0, n) from a word, by rejection sampling over

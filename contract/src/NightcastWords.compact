@@ -1,0 +1,71 @@
+// Nightcast words: turning one Nightcast output into many random words inside
+// your own contract.
+//
+//   import "NightcastWords" prefix Words$;
+//   ...
+//   const w = Words$randomWord(output, 0);          // SHA-256, the default
+//   const p = Words$randomWordPoseidon(output, 0);  // Poseidon, in-circuit only
+//
+// randomWord is exactly the Nightcast contract's own randomWord (SHA-256 via
+// persistentHash), so anyone can recompute it with ordinary SHA-256 tools.
+//
+// randomWordPoseidon uses Poseidon (transientHash), which is much cheaper
+// inside a proof: about 450 rows a word instead of about 9,600 (some 20 times
+// fewer), measured with Compact 0.31.1 (docs/GUIDE.md, "Randomness inside your
+// own contract"). Read the rules before you use it:
+//
+//   1. Never for anything you publish as the draw's result, and never for the
+//      Nightcast output or request itself. Those stay SHA-256.
+//   2. Only in a contract deployed locked (no maintenance authority). Compact
+//      says transientHash "is not guaranteed to persist between upgrades" and
+//      "should not be used to derive state data". A locked contract's circuits
+//      never change, so neither does its hash.
+//   3. Off-chain, recompute it only with the @nightcast/contract (and so
+//      @midnight-ntwrk/compact-runtime) version your contract was compiled
+//      with: @nightcast/sdk's randomWords(output, n, { hash: 'poseidon-internal' }).
+//   4. A Poseidon word is a field element, not 256 random bits. As bytes
+//      (randomWordPoseidon) it is the element little-endian with the top byte
+//      dropped: byte 31 is always 0 and bytes 16-30 are not quite uniform
+//      (byte 30 is about 1% off). Use only bytes 0-15 (the low 128 bits,
+//      uniform to within 2^-126), or reduce randomWordPoseidonField by
+//      rejection against the field's size.
+//
+// The two functions give unrelated words for the same (output, index): a
+// contract must use one or the other, never mix them for one decision.
+
+module NightcastWords {
+  import CompactStandardLibrary;
+
+  export { randomWord, randomWordPoseidon, randomWordPoseidonField };
+
+  struct WordPreimage {
+    domain: Bytes<32>;
+    output: Bytes<32>;
+    index: Uint<32>;
+  }
+
+  // SHA-256: identical to the Nightcast contract's randomWord.
+  circuit randomWord(output: Bytes<32>, index: Uint<32>): Bytes<32> {
+    return persistentHash<WordPreimage>(WordPreimage {
+      domain: pad(32, "nightcast:word:v0"),
+      output: output,
+      index: index
+    });
+  }
+
+  // Poseidon, as a field element. A separate domain, so it can never collide
+  // with or be mistaken for a SHA-256 word.
+  circuit randomWordPoseidonField(output: Bytes<32>, index: Uint<32>): Field {
+    return transientHash<WordPreimage>(WordPreimage {
+      domain: pad(32, "nightcast:word:poseidon:v0"),
+      output: output,
+      index: index
+    });
+  }
+
+  // Poseidon, as 32 bytes via upgradeFromTransient: the field element
+  // little-endian, top byte dropped. Only bytes 0-15 are uniform (rule 4).
+  circuit randomWordPoseidon(output: Bytes<32>, index: Uint<32>): Bytes<32> {
+    return upgradeFromTransient(randomWordPoseidonField(output, index));
+  }
+}

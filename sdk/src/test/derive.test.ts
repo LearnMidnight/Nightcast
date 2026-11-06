@@ -1,7 +1,20 @@
 import { describe, it, expect } from 'vitest';
 import { createHash } from 'node:crypto';
-import { generateOracleSecretKey, pureCircuits } from '@nightcast/contract';
-import { cleanHex, combineDrawSeed, drawStarfall, pickMoonball, pickNumbers, randomWords, seedCommitment, uniformInt } from '../derive.js';
+import { generateOracleSecretKey, pureCircuits, words } from '@nightcast/contract';
+import {
+  cleanHex,
+  combineDrawSeed,
+  drawStarfall,
+  FIELD_SIZE,
+  pickMoonball,
+  pickNumbers,
+  randomFieldWords,
+  randomWords,
+  seedCommitment,
+  uniformInt,
+} from '../derive.js';
+
+const hexOf = (b: Uint8Array) => Buffer.from(b).toString('hex');
 
 describe('pickNumbers (Lunardraw rule)', () => {
   it('matches the published test vector', () => {
@@ -69,5 +82,27 @@ describe('randomWords and uniformInt', () => {
     }
     expect(seen.size).toBe(6);
     expect(uniformInt(new Uint8Array(32), 1n)).toBe(0n);
+  });
+});
+
+describe('randomWords with a hash choice (#44)', () => {
+  const out = new Uint8Array(32).map((_, i) => i);
+  it("defaults to SHA-256, the contract's own randomWord", () => {
+    expect(randomWords(out, 3).map(hexOf)).toEqual(randomWords(out, 3, { hash: 'sha256' }).map(hexOf));
+    expect(hexOf(randomWords(out, 1)[0])).toBe(hexOf(pureCircuits.randomWord(out, 0n)));
+  });
+  it("'poseidon-internal' gives NightcastWords' Poseidon words, and fields below FIELD_SIZE", () => {
+    const p = randomWords(out, 4, { hash: 'poseidon-internal' });
+    expect(p.map(hexOf)).toEqual([0n, 1n, 2n, 3n].map((i) => hexOf(words.randomWordPoseidon(out, i))));
+    expect(p.every((w) => w[31] === 0)).toBe(true);
+    const f = randomFieldWords(out, 4);
+    expect(f).toEqual([0n, 1n, 2n, 3n].map((i) => words.randomWordPoseidonField(out, i)));
+    expect(f.every((x) => x < FIELD_SIZE)).toBe(true);
+    expect(hexOf(randomWords(new Uint8Array(32), 1, { hash: 'poseidon-internal' })[0])).toBe(
+      '75d56e50e82f4c56b3d1ef7375e7927eb4f751f25101b68b72d245963305a400',
+    );
+  });
+  it('refuses an unknown hash', () => {
+    expect(() => randomWords(out, 1, { hash: 'md5' as never })).toThrow(/unknown word hash/);
   });
 });
