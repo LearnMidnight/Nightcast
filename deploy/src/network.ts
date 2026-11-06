@@ -43,6 +43,7 @@ export type NightcastProviders = MidnightProviders<NightcastCircuits, typeof NIG
 
 const dockerDir = resolve(dirname(fileURLToPath(import.meta.url)), '..', 'docker');
 
+import { type DustTimeWallet, declareFeesAtDustTime } from './dust-time.js';
 import { redact } from './redact-output.js';
 export { redact };
 
@@ -372,6 +373,12 @@ export type WalletOptions = {
    * uses a remote prover (agents on other people's machines), else off.
    */
   steadySubmit?: boolean;
+  /**
+   * Declare each fee at the time the wallet's DUST view is from (see
+   * dust-time.ts): without it, a wallet whose DUST subscription lags has its
+   * fees refused (node error 1010, custom 170). Default: on.
+   */
+  declareFeesAtDustTime?: boolean;
 };
 
 /** Faucet pages for test NIGHT (from Midnight's "Acquire tokens" guide). */
@@ -417,6 +424,7 @@ export const openWallet = async (session: Session, opts: WalletOptions = {}): Pr
   );
   const wallet = built.provider;
   const address = walletAddress(wallet);
+  if (opts.declareFeesAtDustTime !== false) declareFeesAtDustTime(wallet as unknown as DustTimeWallet, session.logger);
   opts.onAddress?.(address);
   opts.onWallet?.(wallet);
   if (built.restored) session.logger.info('Carrying on from the saved wallet state.');

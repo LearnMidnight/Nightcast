@@ -62,6 +62,9 @@ import {
 import { walletStateFile } from './wallet.js';
 import { currentCommit, type DeploymentRecord, readRecord, recordPath, writeRecord } from './record.js';
 import { checkRequest } from './check.js';
+import { midnightBackend } from './mcp/backend.js';
+import { type McpMode, runMcp, Watchdog } from './mcp/serve.js';
+import { takeStdout } from './mcp/stdio.js';
 import {
   describeRequest,
   expireRequest,
@@ -96,6 +99,10 @@ const USAGE = `usage:
   ./nightcast selftest     --network <network> --requester <requester secret file> --wallet <file> [--proof-server-port <port>]
                            (end-to-end: a request the oracle answers, checked; and one it must skip, expired)
   ./nightcast blockfrost save --network <network> [--out <file>]
+  ./nightcast mcp          --network <network> [--wallet <file> --requester <requester secret file>]
+                           [--http <host:port> [--trust-proxy] [--origins <a,b>]] [--per-hour 6] [--per-day 200] [--proof-server-port <port>]
+                           (an MCP server for AI agents: check requests and derive results; with a wallet and requester,
+                           also make requests. Over stdio by default; --http to host it. See docs/MCP.md)
 
 --oracle, --operator and --requester take files from \`./nightcast keygen\`. --wallet takes a
 file from \`./nightcast wallet new\` (or set NIGHTCAST_WALLET_SEED). Deploy uses only the
@@ -297,6 +304,11 @@ const main = async (argv: string[]): Promise<number> => {
       'maintenance-key-file': { type: 'string' },
       'proof-server-port': { type: 'string' },
       blockfrost: { type: 'string' },
+      http: { type: 'string' },
+      'trust-proxy': { type: 'boolean', default: false },
+      origins: { type: 'string' },
+      'per-hour': { type: 'string' },
+      'per-day': { type: 'string' },
     },
     strict: true,
   });
@@ -575,6 +587,59 @@ const main = async (argv: string[]): Promise<number> => {
           return 0;
         } finally {
           await wallet.stop().catch(() => undefined);
+        }
+      });
+    }
+
+    case 'mcp': {
+      const network = networkArg(values.network);
+      const record = readRecord(network);
+      const stdioOut = values.http ? undefined : (() => {
+        // stdout carries the protocol: the log and everything else go to stderr
+        process.env.NIGHTCAST_LOG_FD = '2';
+        return takeStdout();
+      })();
+      let mode: McpMode;
+      if (stdioOut) mode = { kind: 'stdio', out: stdioOut };
+      else {
+        const m = /^(.+):(\d+)$/.exec(values.http!);
+        if (!m) throw new Error('--http takes host:port, e.g. 127.0.0.1:6350');
+        mode = { kind: 'http', host: m[1], port: Number(m[2]), trustProxy: values['trust-proxy'] ?? false, origins: values.origins?.split(',').map((x) => x.trim()).filter(Boolean) ?? [] };
+      }
+      const limits = {
+        ...(values['per-hour'] ? { requestsPerClientHour: Number(values['per-hour']) } : {}),
+        ...(values['per-day'] ? { requestsPerDay: Number(values['per-day']) } : {}),
+      };
+      if (!values.requester) {
+        if (values.wallet) throw new Error('--wallet needs --requester (the requester secret the requests are made with)');
+        const backend = midnightBackend(network, record, publicDataFor(network));
+        return runMcp({ backend, mode, logger: createLogger(), limits });
+      }
+      const requesterFile = readKeyFile(values.requester, 'requester');
+      if (!requesterFile.secret) throw new Error(`${values.requester} has no secret`);
+      const secret = fromHex(requesterFile.secret);
+      return withSession(network, portArg(values['proof-server-port']), async (session) => {
+        const watchdog = new Watchdog(20);
+        // Serve straight away; the wallet opens in the background (minutes).
+        const wallet = openWallet(session, walletOptions(network, walletSeed(values.wallet)));
+        const providers = wallet.then((w) => {
+          session.logger.info(`Wallet open: requests are on (${walletAddress(w)}).`);
+          return nightcastProviders(session, w);
+        });
+        providers.catch((e: unknown) => session.logger.error(`The wallet could not open: ${e instanceof Error ? e.message : String(e)}`));
+        const backend = midnightBackend(network, record, indexerPublicDataProvider(session.config.indexer, session.config.indexerWS), {
+          secret,
+          providers,
+          onSubmitted: () => watchdog.submitted(),
+          onSubmitError: (err) => {
+            session.logger.warn(`A request failed: ${err instanceof Error ? err.message : String(err)}`);
+            watchdog.failed(err);
+          },
+        });
+        try {
+          return await runMcp({ backend, mode, logger: session.logger, limits, watchdog, walletState: wallet.then((w) => w.wallet.state()) });
+        } finally {
+          await wallet.then((w) => w.stop()).catch(() => undefined);
         }
       });
     }

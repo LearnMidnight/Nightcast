@@ -123,6 +123,8 @@ The output itself needs no checking by you: the network verified the oracle's pr
 
 ## For AI agents
 
+**The quickest way: the MCP server.** `./nightcast mcp` gives any MCP-speaking agent five tools (fingerprint a list, request, check, derive, and an explainer), over stdio for an app on your computer or over HTTP to host it. See [MCP.md](MCP.md).
+
 An agent can run a draw that its users can audit, by following the steps exactly and keeping what it published:
 
 1. Build the list (strings), in a fixed order. Compute `listCommitment(list)`.

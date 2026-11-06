@@ -156,3 +156,5 @@ contract/src/test/managed/
 *.secret
 *.key
 .nightcast/
+
+contract/src/test/managed/
