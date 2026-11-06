@@ -30,13 +30,17 @@ import {
   type Session,
 } from '../network.js';
 import type { DeploymentRecord } from '../record.js';
-import { acceptOracleKey, deployNightcast, deployNightcastLocked } from '../steps.js';
+import { acceptOracleKey, deployNightcast, deployNightcastLocked, depositBond } from '../steps.js';
 import { checkRequest } from '../check.js';
 import { expireRequest, readRequest, startOracleService, type SubmittedRequest, submitRequest, waitForResult } from '../service.js';
 import { verifyDeployment } from '../verify.js';
 
 const enabled = process.env.NIGHTCAST_E2E === '1';
 const hex = (b: Uint8Array) => Buffer.from(b).toString('hex');
+const walletBytes = (w: { unshieldedKeystore: { getAddress(): string } }) => Uint8Array.from(Buffer.from(w.unshieldedKeystore.getAddress(), 'hex'));
+// v1 money: real NIGHT moves on the local network (genesis wallets hold plenty).
+const FEE = 1_000_000n;
+const COLLATERAL = 2_000_000n;
 const label = (s: string) => {
   const b = new Uint8Array(32);
   b.set(new TextEncoder().encode(s).slice(0, 32));
@@ -64,6 +68,8 @@ describe.runIf(enabled)('Nightcast on a local Midnight network', () => {
         operatorCommitment: hex(pureCircuits.operatorCommitmentOf(operatorSecret)),
         minWindow: '60',
         maxWindow: '86400',
+        requestFee: FEE.toString(),
+        collateralPerRequest: COLLATERAL.toString(),
       },
       transactions: {},
       verifierKeys: localFingerprints(),
@@ -96,6 +102,8 @@ describe.runIf(enabled)('Nightcast on a local Midnight network', () => {
       operatorCommitment: pureCircuits.operatorCommitmentOf(operatorSecret),
       minWindow: 60n,
       maxWindow: 86_400n,
+      requestFee: FEE,
+      collateralPerRequest: COLLATERAL,
     });
     address = deployed.contractAddress;
     const state = await providers.publicDataProvider.queryContractState(address);
@@ -135,9 +143,14 @@ describe.runIf(enabled)('Nightcast on a local Midnight network', () => {
     expect(locked.authority.threshold).toBe(1);
   }, 10 * 60_000);
 
-  it('activates the oracle key', async () => {
-    await expect(acceptOracleKey(providers, address, generateOracleSecretKey())).rejects.toThrow();
-    await acceptOracleKey(providers, address, sk);
+  it('activates the oracle key, and takes a bond', async () => {
+    await expect(acceptOracleKey(providers, address, generateOracleSecretKey(), walletBytes(wallet))).rejects.toThrow();
+    await acceptOracleKey(providers, address, sk, walletBytes(wallet));
+    // Room for the four requests below.
+    await depositBond(providers, address, 4n);
+    const l = Nightcast.ledger((await providers.publicDataProvider.queryContractState(address))!.data);
+    expect(l.bondSlots).toBe(4n);
+    expect(hex(l.oraclePayout.bytes)).toBe(hex(walletBytes(wallet)));
   }, 10 * 60_000);
 
   it('matches the published fingerprints', async () => {
@@ -153,6 +166,8 @@ describe.runIf(enabled)('Nightcast on a local Midnight network', () => {
         operatorCommitment: hex(pureCircuits.operatorCommitmentOf(operatorSecret)),
         minWindow: '60',
         maxWindow: '86400',
+        requestFee: FEE.toString(),
+        collateralPerRequest: COLLATERAL.toString(),
       },
       transactions: {},
       verifierKeys: fps,
@@ -161,7 +176,18 @@ describe.runIf(enabled)('Nightcast on a local Midnight network', () => {
     const checks = verifyDeployment(record, state, fps);
     expect(checks.filter((c) => !c.ok)).toEqual([]);
     expect(Object.keys(fps).sort()).toEqual(
-      ['acceptOperator', 'acceptOracleKey', 'approveOracleKey', 'expire', 'fulfil', 'proposeOperator', 'proposeOracleKey', 'request'].sort(),
+      [
+        'acceptOperator',
+        'acceptOracleKey',
+        'approveOracleKey',
+        'depositBond',
+        'expire',
+        'fulfil',
+        'proposeOperator',
+        'proposeOracleKey',
+        'request',
+        'withdrawBond',
+      ].sort(),
     );
   }, 5 * 60_000);
 
@@ -174,13 +200,19 @@ describe.runIf(enabled)('Nightcast on a local Midnight network', () => {
       initialPrivateState: { oracleSecretKey: sk, requesterSecret },
     });
     const deadline = BigInt(Math.floor(Date.now() / 1000) + 3_600);
-    const requested = await nightcast.callTx.request(label('e2e'), label('seed-1'), deadline);
+    const requested = await nightcast.callTx.request(label('e2e'), label('seed-1'), deadline, { bytes: walletBytes(wallet) });
     const id = requested.private.result as Uint8Array;
+    const pending = Nightcast.ledger((await providers.publicDataProvider.queryContractState(address))!.data);
+    expect(pending.requests.lookup(id).fee).toBe(FEE);
+    expect(pending.requests.lookup(id).collateral).toBe(COLLATERAL);
+    expect(pending.bondSlots).toBe(3n);
 
     await nightcast.callTx.fulfil(id);
     const state = await providers.publicDataProvider.queryContractState(address);
     const r = Nightcast.ledger(state!.data).requests.lookup(id);
     expect(r.status).toBe(Status.fulfilled);
+    // The collateral is back in the bond; the fee went to the oracle's payout.
+    expect(Nightcast.ledger(state!.data).bondSlots).toBe(4n);
     expect(hex(r.requester)).toBe(hex(pureCircuits.requesterCommitmentOf(requesterSecret)));
     expect(hex(r.output)).toBe(hex(pureCircuits.evaluateAt(sk, r.point)));
     expect(hex(r.output)).toBe(hex(pureCircuits.evaluate(sk, id)));
@@ -193,7 +225,7 @@ describe.runIf(enabled)('Nightcast on a local Midnight network', () => {
     const running = await startOracleService(providers, address, sk, session.logger, { pollMs: 2_000, safetyMarginSecs: 60 });
     try {
       const requesterSecret = label('service-requester');
-      const req = await submitRequest(requesterProviders, address, requesterSecret, { tag: 'e2e-service', deadlineSecs: 1_800 });
+      const req = await submitRequest(requesterProviders, address, requesterSecret, { tag: 'e2e-service', deadlineSecs: 1_800, refundTo: walletBytes(requesterWallet) });
       const r = await waitForResult(requesterProviders, address, req.id, { pollMs: 2_000, timeoutMs: 10 * 60_000 });
       expect(r?.status).toBe(Status.fulfilled);
       expect(hex(r!.requester)).toBe(hex(pureCircuits.requesterCommitmentOf(requesterSecret)));
@@ -213,7 +245,7 @@ describe.runIf(enabled)('Nightcast on a local Midnight network', () => {
     let req: SubmittedRequest | undefined;
     // As short a deadline as the contract allows, with room for the proof.
     for (let attempt = 0; attempt < 3 && !req; attempt++) {
-      req = await submitRequest(providers, address, requesterSecret, { tag: 'e2e-expire', deadlineSecs: 120 + 60 * attempt }).catch(
+      req = await submitRequest(providers, address, requesterSecret, { tag: 'e2e-expire', deadlineSecs: 120 + 60 * attempt, refundTo: walletBytes(wallet) }).catch(
         () => undefined,
       );
     }
@@ -239,5 +271,7 @@ describe.runIf(enabled)('Nightcast on a local Midnight network', () => {
     const state = await providers.publicDataProvider.queryContractState(address);
     const checks = checkRequest(recordNow(), state, id, r, { inputs: { tag: req!.tag, seed: req!.seed }, expect: 'expired' });
     expect(checks.filter((c) => !c.ok)).toEqual([]);
+    // The skipped request's collateral left with its fee (to the refund address), so the bond is smaller.
+    expect(Nightcast.ledger(state!.data).bondSlots <= 3n).toBe(true);
   }, 20 * 60_000);
 });

@@ -36,6 +36,9 @@ export interface RandomnessBackend {
   /** Request windows allowed by the contract, in seconds. */
   minWindow: number;
   maxWindow: number;
+  /** What each request pays the oracle, and how much of its bond each sets aside (NIGHT atoms; 0 for v0 contracts). */
+  requestFee?: bigint;
+  collateralPerRequest?: bigint;
   /** Whether this server can make requests (it has a wallet and a requester secret). */
   canRequest: boolean;
   /** Why requests can't be made just now (the wallet is still opening, say), or undefined when they can. */
@@ -108,6 +111,10 @@ const items = (v: unknown, name = 'items'): string[] => {
 };
 
 const STATUS = ['pending', 'fulfilled', 'expired'];
+const night = (atoms: bigint): string => {
+  const frac = (atoms % 1_000_000n).toString().padStart(6, '0').replace(/0+$/, '');
+  return `${atoms / 1_000_000n}${frac ? `.${frac}` : ''}`;
+};
 const iso = (secs: bigint | number) => new Date(Number(secs) * 1000).toISOString();
 const formatChecks = (checks: Check[]) => checks.map((c) => `${c.ok ? 'PASS' : 'FAIL'}  ${c.name}: ${c.detail}`).join('\n');
 
@@ -151,6 +158,10 @@ export const nightcastTools = (backend: RandomnessBackend, limits: Partial<Limit
         `- ${backend.network === 'preprod' || backend.network === 'preview' ? 'This is a test network: the values are real randomness, but nothing here has money value. ' : ''}Unaudited.`,
         '- Outputs, purposes and seeds are public. Never put secrets in them.',
         '- One answer decides one thing. For another decision, make another request (or use "from" in nightcast_derive).',
+        (backend.requestFee ?? 0n) > 0n || (backend.collateralPerRequest ?? 0n) > 0n
+          ? `- Each request pays the oracle ${night(backend.requestFee ?? 0n)} NIGHT, and sets aside ${night(backend.collateralPerRequest ?? 0n)} NIGHT of the oracle's bond. ` +
+            "If the oracle doesn't answer in time, both go to the request's refund address once anyone marks it expired. A request is refused when the oracle's bond is too small."
+          : '- Requests are free on this deployment, and the oracle has no bond at stake.',
         backend.canRequest
           ? `- This server makes requests from its own wallet: at most ${L.requestsPerClientHour} an hour for you, ${L.requestsPerDay} a day in all.`
           : '- This server has no wallet, so it cannot make requests; it can still check requests and derive results.',
@@ -278,6 +289,11 @@ export const nightcastTools = (backend: RandomnessBackend, limits: Partial<Limit
       }
       const status = STATUS[r.status] ?? String(r.status);
       const lines: (string | false)[] = [`request ${idHex}`, `status: ${status}`, `deadline: ${iso(r.deadline)}`];
+      const fee = (r as { fee?: bigint }).fee ?? 0n;
+      const collateral = (r as { collateral?: bigint }).collateral ?? 0n;
+      if (fee > 0n || collateral > 0n) {
+        lines.push(`fee ${night(fee)} NIGHT, oracle collateral ${night(collateral)} NIGHT: ${r.status === Status.expired ? 'both paid to the refund address' : r.status === Status.fulfilled ? 'fee paid to the oracle, collateral back in its bond' : 'paid to the refund address if it expires'}`);
+      }
       if (r.status === Status.fulfilled) {
         lines.push(`output: ${hex(r.output)}`, '', 'Turn it into the result with nightcast_derive (same list, same order).');
       } else if (r.status === Status.pending) {

@@ -94,9 +94,9 @@ describe('deployment', () => {
     const c = new Contract(witnesses);
     const ctx = () => createConstructorContext({}, '0'.repeat(64));
     const key = oraclePublicKey(generateOracleSecretKey());
-    expect(() => c.initialState(ctx(), key, ZERO, 59n, 600n)).toThrow(/at least 60/);
-    expect(() => c.initialState(ctx(), key, ZERO, 600n, 600n)).toThrow(/below maxWindow/);
-    expect(() => c.initialState(ctx(), key, ZERO, 60n, 2_592_001n)).toThrow(/at most 30 days/);
+    expect(() => c.initialState(ctx(), key, ZERO, 59n, 600n, 0n, 0n)).toThrow(/at least 60/);
+    expect(() => c.initialState(ctx(), key, ZERO, 600n, 600n, 0n, 0n)).toThrow(/below maxWindow/);
+    expect(() => c.initialState(ctx(), key, ZERO, 60n, 2_592_001n, 0n, 0n)).toThrow(/at most 30 days/);
   });
 });
 
@@ -280,10 +280,10 @@ describe('key rotation wait', () => {
     const newSk = generateOracleSecretKey();
     expect(() => sim.approveOracleKey()).toThrow(/no key proposed/);
     sim.proposeOracleKey(oraclePublicKey(newSk));
-    expect(sim.getLedger().oracleKeyChangeAt).toBe(BigInt(sim.now) + maxWindow);
+    expect(sim.getLedger().oracleKeyChangeAt).toBe(BigInt(sim.now) + 600n + maxWindow);
     // An operator who made the key itself can't install it straight away...
     expect(() => sim.acceptOracleKey({ oracleSecretKey: newSk })).toThrow(/still waiting/);
-    sim.advance(Number(maxWindow) - 10);
+    sim.advance(Number(maxWindow) + 600 - 10);
     expect(() => sim.acceptOracleKey({ oracleSecretKey: newSk })).toThrow(/still waiting/);
     // ...and proposing again restarts the wait.
     sim.proposeOracleKey(oraclePublicKey(newSk));
@@ -292,7 +292,7 @@ describe('key rotation wait', () => {
     expect(() => sim.proposeOracleKey(oraclePublicKey(newSk), sim.operator, BigInt(sim.now + 1_000))).toThrow(/clock/);
     // Only the current oracle can approve. After the wait, no approval is needed.
     expect(() => sim.approveOracleKey({ oracleSecretKey: newSk })).toThrow(/not the current oracle/);
-    sim.advance(Number(maxWindow));
+    sim.advance(Number(maxWindow) + 600);
     sim.acceptOracleKey({ oracleSecretKey: newSk });
     expect(sim.getLedger().oracleKey).toEqual(oraclePublicKey(newSk));
     expect(sim.getLedger().oracleKeyApproved).toBe(false);

@@ -74,7 +74,7 @@ export const submitRequest = async (
   providers: NightcastProviders,
   contractAddress: string,
   requesterSecret: Uint8Array,
-  opts: { tag?: string; deadlineSecs?: number; seed?: Uint8Array } = {},
+  opts: { tag?: string; deadlineSecs?: number; seed?: Uint8Array; refundTo: Uint8Array },
 ): Promise<SubmittedRequest> => {
   const nightcast = await findDeployedContract(providers, {
     contractAddress,
@@ -85,7 +85,7 @@ export const submitRequest = async (
   const tag = textLabel(opts.tag ?? 'nightcast-test');
   const seed = opts.seed ?? webcrypto.getRandomValues(new Uint8Array(32));
   const deadline = BigInt(Math.floor(Date.now() / 1000) + (opts.deadlineSecs ?? 30 * 60));
-  const result = await nightcast.callTx.request(tag, seed, deadline);
+  const result = await nightcast.callTx.request(tag, seed, deadline, { bytes: opts.refundTo });
   return { id: result.private.result, tag, seed, deadline, txId: result.public.txId };
 };
 
