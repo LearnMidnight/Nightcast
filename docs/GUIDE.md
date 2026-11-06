@@ -53,7 +53,7 @@ weightedPick(output, { gold: 1, silver: 3, bronze: 6 }); // bronze 6 times in 10
 - **Weights are whole numbers**, so the odds are exact. The order you list them in is part of the rule: publish it.
 - **One answer decides one thing.** Two helpers run on the same answer read the same words, so their results are linked. Make a request per decision, or give each a different starting word with `{ from }` (`pick(output, names, { from: 10 })`).
 
-Lower level: `randomWords(output, n)` gives n independent 32-byte words, and `uniformInt(word, n)` an unbiased integer below n. Lotteries: `pickNumbers`, `drawStarfall` and `combineDrawSeed` (the rule [Lunardraw](https://github.com/LearnMidnight/Lunardraw) uses, with the operator's commit-reveal seed).
+Lower level: `randomWords(output, n)` gives n independent 32-byte words (SHA-256; for Poseidon see [Randomness inside your own contract](#randomness-inside-your-own-contract)), and `uniformInt(word, n)` an unbiased integer below n. Lotteries: `pickNumbers`, `drawStarfall` and `combineDrawSeed` (the rule [Lunardraw](https://github.com/LearnMidnight/Lunardraw) uses, with the operator's commit-reveal seed).
 
 ## A fair raffle
 
@@ -158,6 +158,46 @@ Outputs from the simulator come from a throwaway key, so they differ from a live
 ## Randomness inside your own contract
 
 A Compact contract can't call the Nightcast contract or read its state today (cross-contract calls aren't available on Preprod or Mainnet yet). A contract that needs randomness in-circuit embeds the same VRF, as Lunardraw's Starfall contract does: [SPEC §5.1](SPEC.md#51-on-chain-consumers-embed-dont-call-decision-22-oct-2026). `dist/nightcast.compact` in `@nightcast/contract` is the reference.
+
+### Many words from one answer: SHA-256 or Poseidon
+
+Once your contract has an answer, it usually needs many random words from it (one per number drawn, say). `dist/NightcastWords.compact` in `@nightcast/contract` is a module you import for that. Copy it next to your contract and:
+
+```compact
+import "NightcastWords" prefix Words$;
+
+const w = Words$randomWord(output, 0);           // SHA-256: the default
+const p = Words$randomWordPoseidon(output, 0);   // Poseidon: in-circuit only, see below
+```
+
+The same words off-chain, from the SDK:
+
+```ts
+import { randomWords, randomFieldWords } from '@nightcast/sdk';
+
+randomWords(output, 8);                                  // SHA-256, as randomWord
+randomWords(output, 8, { hash: 'poseidon-internal' });   // as randomWordPoseidon
+randomFieldWords(output, 8);                             // as randomWordPoseidonField (bigints)
+```
+
+**Which to use.** Measured with Compact 0.31.1, one word costs about **9,600 rows** of a circuit with SHA-256 and about **450** with Poseidon. Eight words are k=17 (about 1 GB to prove) with SHA-256 and k=12 with Poseidon. The saving is real, and so are the rules:
+
+| | SHA-256 (`randomWord`) | Poseidon (`randomWordPoseidon`) |
+|---|---|---|
+| Cost in a circuit | ~9,600 rows a word | ~450 rows a word |
+| Anyone can recompute it | Yes, with any SHA-256 tool | Only with Midnight's runtime, same version |
+| Stays the same across Midnight upgrades | Guaranteed | Not guaranteed |
+| For results you publish | Yes | **No** |
+| Uniform bits | All 256 | Bytes 0-15 only (see below) |
+
+Use Poseidon only when **all** of these hold:
+
+1. **It's internal.** The words feed checks or choices inside your own circuits. Anything you publish as the result (the numbers drawn, the winner) can still be worked out by others, but only with Midnight's runtime; if you want anyone to check it with ordinary tools, use SHA-256. The Nightcast output and request stay SHA-256 either way: there's no Poseidon oracle.
+2. **Your contract is deployed locked.** Compact says Poseidon (`transientHash`) "is not guaranteed to persist between upgrades" and "should not be used to derive state data". A locked contract's circuits never change, so neither does its hash.
+3. **Off-chain code uses the same version.** Recompute with the `@nightcast/contract` (and so `@midnight-ntwrk/compact-runtime`) version your contract was compiled with, and pin it.
+4. **You use the right bits.** A Poseidon word is a field element, uniform below `FIELD_SIZE` (about 2^254.9), not 256 random bits. As bytes it is the element little-endian with the top byte dropped: byte 31 is always 0, and byte 30 is about 1% off uniform. **Take numbers from bytes 0-15 only** (the low 128 bits, uniform to within 2^-126), or reduce a field word by rejection against `FIELD_SIZE`.
+
+The two hashes give unrelated words for the same answer and index, so a contract uses one or the other for a decision, never a mix. The off-chain helpers above (`pick`, `shuffle` and the rest) always use SHA-256.
 
 ## What Nightcast can't do
 

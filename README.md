@@ -47,7 +47,8 @@ The construction, ledger layout and threat model are in [docs/SPEC.md](docs/SPEC
 | `contract/src/simulator.ts` | Runs the compiled contract in memory with several actors and a controllable clock |
 | `sdk/src/oracle.ts` | The oracle service: polls, fulfils pending requests bound to its key, retries with backoff, respects deadlines, optional requester allowlist |
 | `sdk/src/chain.ts` | Chain adapters: simulator, and live Midnight via midnight-js |
-| `sdk/src/derive.ts` | Turning an output into numbers: `randomWords`, `uniformInt`, `pickNumbers`, `pickMoonball`, `drawStarfall`, `combineDrawSeed` |
+| `sdk/src/derive.ts` | Turning an output into numbers: `randomWords` (SHA-256 or, for in-circuit use, Poseidon), `randomFieldWords`, `uniformInt`, `pickNumbers`, `pickMoonball`, `drawStarfall`, `combineDrawSeed` |
+| `contract/src/NightcastWords.compact` | A module your contract imports to expand an output into words in-circuit: `randomWord` (SHA-256) or `randomWordPoseidon` (about 20 times cheaper, internal use only) |
 | `sdk/src/keygen.ts` | `./nightcast keygen`: generate oracle, operator and requester secrets |
 | `deploy/` | `./nightcast` commands: deploy (locked from the start), accept the oracle key, verify, wallets, run the oracle, test requests |
 | `nightcast` | Wrapper script that runs the tools from a checkout |
