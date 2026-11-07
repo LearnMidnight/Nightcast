@@ -27,7 +27,8 @@
  *
  * Idempotent. Runs on `npm install` and before every ./nightcast command.
  *   node deploy/scripts/patch-dust-fee-loop.mjs [--quiet] [--check] [--root <dir>]
- * --check exits 1 if an unpatched copy is found (for CI). --root also patches
+ * --check exits 1 if no dust wallet is found, or one lacks either fix (for CI
+ * and the agent kit's packing). --root also patches
  * <dir>/node_modules: a project that uses Nightcast as a submodule (Lunardraw)
  * runs it with --root . from its own folder.
  */
@@ -140,4 +141,5 @@ if (!quiet || patched > 0) {
   if (!parts.length) parts.push('no dust wallet found (run npm install)');
   process.stderr.write(`Dust fee-loop and minimum-fee fixes: ${parts.join(', ')}\n`);
 }
-if (check && total === 0) process.exit(1);
+// --check: every dust wallet found has both fixes (one left alone, e.g. unknown code, fails it too)
+if (check && (total === 0 || unknown > 0)) process.exit(1);
