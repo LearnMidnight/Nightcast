@@ -281,11 +281,20 @@ describe('dust fee-loop patch for other projects', () => {
     const dist = j(project, 'node_modules', '@midnight-ntwrk', 'wallet-sdk-dust-wallet', 'dist', 'v1');
     mkdirSync(dist, { recursive: true });
     const file = j(dist, 'Transacting.js');
-    writeFileSync(file, "const recipe = (currentFee) => fromEntry('dust', currentFee); // computeBalancingRecipe\n");
+    writeFileSync(
+      file,
+      [
+        '// computeBalancingRecipe',
+        "const recipe = (currentFee) => fromEntry('dust', currentFee);",
+        'const spend = (recipeInputs, currentFee) => distributeFeeAcrossInputs(recipeInputs, currentFee);',
+        '',
+      ].join('\n'),
+    );
     const script = fileURLToPath(new URL('../../scripts/patch-dust-fee-loop.mjs', import.meta.url));
     execFileSync(process.execPath, [script, '--quiet', '--root', project, '--root', project]);
     const patched = read(file, 'utf8');
-    expect(patched).toContain('/* nightcast: dust fee-loop fix */ (currentFee > 0n ? -currentFee : currentFee)');
+    expect(patched).toContain('/* nightcast: dust fee-loop fix */ /* nightcast: minimum dust fee */ (currentFee > 0n ? -currentFee : currentFee < 0n ? currentFee : -1n))');
+    expect(patched).toContain('distributeFeeAcrossInputs(recipeInputs, currentFee > 0n ? currentFee : 1n)');
     execFileSync(process.execPath, [script, '--check', '--root', project]);
     expect(read(file, 'utf8')).toBe(patched);
   });
