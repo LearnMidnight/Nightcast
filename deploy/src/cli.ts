@@ -33,11 +33,10 @@ import { chmodSync, existsSync, mkdirSync, readFileSync, realpathSync, renameSyn
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { parseArgs } from 'node:util';
-import { MidnightBech32m } from '@midnight-ntwrk/wallet-sdk-address-format';
+import { MidnightBech32m } from '@midnightntwrk/wallet-sdk-address-format';
 import { fromHex, oraclePublicKey, parseOracleSecretKey, pureCircuits, Status, toHex } from '@nightcast/contract';
 import { drawStarfall } from '@nightcast/sdk';
 import { indexerPublicDataProvider } from '@midnight-ntwrk/midnight-js-indexer-public-data-provider';
-import { setNetworkId } from '@midnight-ntwrk/midnight-js/network-id';
 import { compilerInfo, type Fingerprints, localFingerprints } from './fingerprints.js';
 import { isLocked, lockMaintenanceAuthority } from './lock.js';
 import {
@@ -45,7 +44,9 @@ import {
   blockfrostProjectId,
   connect,
   createLogger,
+  decodedPublicData,
   defaultBlockfrostFile,
+  readContractState,
   redact,
   isNetwork,
   type Network,
@@ -250,8 +251,7 @@ const withSession = async <T>(network: Network, proofServerPort: number | undefi
 const publicDataFor = (network: Network) => {
   if (network === 'local') throw new Error('this command on `local` must run inside the same session as the deploy');
   const config = publicEndpoints(network, createLogger('warn'), projectIdFor(network));
-  setNetworkId(config.networkId);
-  return indexerPublicDataProvider(config.indexer, config.indexerWS);
+  return decodedPublicData(indexerPublicDataProvider(config.indexer, config.indexerWS));
 };
 
 const localFingerprintsOrNone = (): Fingerprints | undefined => {
@@ -295,12 +295,10 @@ const runVerify = async (session: Session | undefined, network: Network, address
   const publicConfig = () => {
     if (network === 'local') throw new Error('verify on `local` must run inside the same session as the deploy');
     const logger = createLogger('warn');
-    const c = publicEndpoints(network, logger, projectIdFor(network));
-    setNetworkId(c.networkId);
-    return c;
+    return publicEndpoints(network, logger, projectIdFor(network));
   };
   const config = session ? session.config : publicConfig();
-  const state = await indexerPublicDataProvider(config.indexer, config.indexerWS).queryContractState(record.contractAddress);
+  const state = await readContractState(indexerPublicDataProvider(config.indexer, config.indexerWS), record.contractAddress);
   let local: Fingerprints | undefined;
   try {
     local = localFingerprints();
@@ -388,7 +386,7 @@ const main = async (argv: string[]): Promise<number> => {
           const deployed = await deployNightcastLocked(providers, params);
           session.logger.info(`Deployed at ${deployed.contractAddress} (tx ${deployed.txId}); nobody can change its code`);
 
-          const onChain = await providers.publicDataProvider.queryContractState(deployed.contractAddress);
+          const onChain = await readContractState(providers.publicDataProvider, deployed.contractAddress);
           const authority = onChain!.maintenanceAuthority;
           const record: DeploymentRecord = {
             network,
@@ -474,7 +472,7 @@ const main = async (argv: string[]): Promise<number> => {
         const wallet = await openWallet(session, walletOptions(network, walletSeed(values.wallet)));
         try {
           const providers = nightcastProviders(session, wallet);
-          const state = await providers.publicDataProvider.queryContractState(record.contractAddress);
+          const state = await readContractState(providers.publicDataProvider, record.contractAddress);
           if (state && isLocked(state.maintenanceAuthority)) {
             session.logger.info('Already locked.');
           } else {
@@ -764,7 +762,7 @@ const main = async (argv: string[]): Promise<number> => {
             process.stdout.write(
               `words    ${words.join(' ')}\nlotto    ${draw.numbers.join(' ')} + Moonball ${draw.moonball} (Starfall example)\n`,
             );
-            const state = await providers.publicDataProvider.queryContractState(record.contractAddress);
+            const state = await readContractState(providers.publicDataProvider, record.contractAddress);
             const checks = checkRequest(record, state, req.id, result, {
               inputs: { tag: req.tag, seed: req.seed },
               deployment: false,
@@ -837,7 +835,7 @@ const main = async (argv: string[]): Promise<number> => {
         try {
           const providers = nightcastProviders(session, wallet);
           const address = record.contractAddress;
-          const stateNow = () => providers.publicDataProvider.queryContractState(address);
+          const stateNow = () => readContractState(providers.publicDataProvider, address);
           const all: Check[] = [];
 
           // The deployment itself, as `verify`.
@@ -936,8 +934,7 @@ const main = async (argv: string[]): Promise<number> => {
       if (network === 'local') throw new Error('status on `local` must run inside the same session');
       const logger = createLogger('warn');
       const config = publicEndpoints(network, logger, projectIdFor(network));
-      setNetworkId(config.networkId);
-      const publicDataProvider = indexerPublicDataProvider(config.indexer, config.indexerWS);
+      const publicDataProvider = decodedPublicData(indexerPublicDataProvider(config.indexer, config.indexerWS));
       const r = await readRequest({ publicDataProvider }, record.contractAddress, id);
       process.stdout.write(describeRequest(id, r) + '\n');
       return 0;

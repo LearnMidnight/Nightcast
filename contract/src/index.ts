@@ -5,3 +5,4 @@ export * from './witnesses.js';
 export * from './keys.js';
 export * from './simulator.js';
 export { words, FIELD_SIZE } from './words.js';
+export * from './state.js';

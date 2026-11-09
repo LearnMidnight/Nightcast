@@ -5,10 +5,10 @@ import { fileURLToPath } from 'node:url';
 import pino, { type Logger } from 'pino';
 import { filter, firstValueFrom, throttleTime } from 'rxjs';
 import { WebSocket as WsWebSocket } from 'ws';
-import { unshieldedToken } from '@midnight-ntwrk/midnight-js-protocol/ledger';
-import { CompiledContract, type ProvableCircuitId } from '@midnight-ntwrk/compact-js';
-import type { MidnightProviders } from '@midnight-ntwrk/midnight-js/types';
-import { setNetworkId } from '@midnight-ntwrk/midnight-js/network-id';
+import { ContractState as Ledger8ContractState } from '@midnight-ntwrk/midnight-js-protocol/v8';
+import { ContractState as Ledger9ContractState, unshieldedToken } from '@midnight-ntwrk/midnight-js-protocol/v9';
+import type { Ledger8CircuitId, Ledger8Contract } from '@midnight-ntwrk/midnight-js/contracts';
+import type { ContractStateRead, MidnightProviders, PublicDataProvider } from '@midnight-ntwrk/midnight-js/types';
 import { httpClientProofProvider } from '@midnight-ntwrk/midnight-js-http-client-proof-provider';
 import { indexerPublicDataProvider } from '@midnight-ntwrk/midnight-js-indexer-public-data-provider';
 import { NodeZkConfigProvider } from '@midnight-ntwrk/midnight-js-node-zk-config-provider';
@@ -38,8 +38,29 @@ export const isNetwork = (s: string): s is Network => (NETWORKS as readonly stri
 export const NIGHTCAST_PRIVATE_STATE_ID = 'nightcast';
 
 export type NightcastContract = Nightcast.Contract<NightcastPrivateState>;
-export type NightcastCircuits = ProvableCircuitId<NightcastContract>;
+export type NightcastCircuits = Ledger8CircuitId<NightcastContract>;
 export type NightcastProviders = MidnightProviders<NightcastCircuits, typeof NIGHTCAST_PRIVATE_STATE_ID, NightcastPrivateState>;
+
+/**
+ * A ledger `ContractState`, decoded from what Midnight.js 5 reads: a ledger 8
+ * state (written before the hard fork) or a ledger 9 one. Both carry the
+ * maintenance authority, the verifier keys (`operations`) and `data`, whose
+ * state value `encode()`s era-neutrally for the contracts' own `ledgerOf`.
+ */
+export type DecodedContractState = Ledger8ContractState | Ledger9ContractState;
+
+/** Decode a Midnight.js 5 contract-state read with the ledger of the era that wrote it. */
+export const decodeContractState = (read: ContractStateRead | null | undefined): DecodedContractState | null =>
+  read ? (read.contractState.deserialize({ v8: Ledger8ContractState, v9: Ledger9ContractState }) as DecodedContractState) : null;
+
+/** A public data provider's `queryContractState`, answering decoded ledger states (for the chain adapters). */
+export const decodedPublicData = (publicData: Pick<PublicDataProvider, 'queryContractState'>) => ({
+  queryContractState: async (address: string): Promise<DecodedContractState | null> => decodeContractState(await publicData.queryContractState(address)),
+});
+
+/** Read a contract's state, decoded (null if there is no contract at the address). */
+export const readContractState = (publicData: Pick<PublicDataProvider, 'queryContractState'>, address: string): Promise<DecodedContractState | null> =>
+  decodedPublicData(publicData).queryContractState(address);
 
 const dockerDir = resolve(dirname(fileURLToPath(import.meta.url)), '..', 'docker');
 
@@ -67,12 +88,13 @@ export const createLogger = (level = process.env.NIGHTCAST_LOG_LEVEL ?? 'info'):
 // any project id) at info level, to the terminal and to ./logs/tests. Quiet it.
 testkitLogger.level = process.env.NIGHTCAST_LOG_LEVEL === 'debug' ? 'debug' : 'warn';
 
-/** The compiled Nightcast contract with its witnesses and proving keys, as midnight-js expects it. */
-export const compiledNightcast = (dir = zkConfigPath()) =>
-  CompiledContract.make('nightcast', Nightcast.Contract<NightcastPrivateState>).pipe(
-    CompiledContract.withWitnesses(witnesses),
-    CompiledContract.withCompiledFileAssets(dir),
-  );
+/**
+ * The Nightcast contract with its witnesses, as Midnight.js 5 takes a contract
+ * compiled by the previous toolchain (Compact 0.31 / compact-runtime 0.16): the
+ * generated contract instance itself, not a `CompiledContract` container. Its
+ * proving keys come from the providers' ZK config provider (`contractProviders`).
+ */
+export const compiledNightcast = (): NightcastContract => new Nightcast.Contract<NightcastPrivateState>(witnesses);
 
 export type Session = {
   network: Network;
@@ -292,14 +314,12 @@ export const connect = async (
   });
 
   if (network === 'local') {
-    setNetworkId('undeployed');
     const env = new LocalTestEnvironment(logger);
     const config = await env.start();
     return { network, logger, config, problems: [], shutdown: () => env.shutdown() };
   }
 
   const base = publicEndpoints(network, logger, opts.projectId);
-  setNetworkId(base.networkId);
   const remote = opts.proofServerUrl?.replace(/\/+$/, '');
   if (remote !== undefined && !/^https?:\/\/[^\s/]+/.test(remote)) throw new Error(`not a prover address: ${opts.proofServerUrl}`);
   logger.info(
@@ -618,22 +638,28 @@ export const proveTimeoutMs = (): number => {
   return Number.isFinite(v) && v > 0 ? v : 60 * 60_000;
 };
 
+/** Transactions are valid for this long after they are built (Midnight.js's `ttlSeconds`). */
+export const TX_TTL_SECONDS = 3600;
+
 export const contractProviders = <C extends string, PSI extends string, PS>(
   session: Session,
   wallet: MidnightWalletProvider,
   dir: string,
 ): MidnightProviders<C, PSI, PS> => {
-  const zkConfigProvider = new NodeZkConfigProvider<C>(dir);
+  // Contracts compiled with Compact 0.31 ship no contract-manifest.json, so
+  // the artifacts are verified only when a manifest is present.
+  const zkConfigProvider = new NodeZkConfigProvider<C>(dir, { verify: 'require-if-present' });
   return {
-    privateStateProvider: inMemoryPrivateStateProvider<PSI, PS>(),
+    privateStateProvider: inMemoryPrivateStateProvider<PSI, PS>() as MidnightProviders<C, PSI, PS>['privateStateProvider'],
     publicDataProvider: indexerPublicDataProvider(session.config.indexer, session.config.indexerWS),
     zkConfigProvider,
     // The proof server is asked over HTTP; midnight-js gives up after 5
     // minutes by default, which a big circuit (Lunardraw's computeNumbers,
     // k=19) exceeds on a home PC. Allow an hour (NIGHTCAST_PROVE_TIMEOUT_MS).
-    proofProvider: httpClientProofProvider(session.config.proofServer, zkConfigProvider, { timeout: proveTimeoutMs() }),
+    proofProvider: httpClientProofProvider({ url: session.config.proofServer, zkConfigProvider, timeout: proveTimeoutMs() }),
     walletProvider: wallet,
     midnightProvider: wallet,
+    config: { networkId: session.config.networkId, ttlSeconds: TX_TTL_SECONDS },
   };
 };
 

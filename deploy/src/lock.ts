@@ -1,15 +1,8 @@
-import {
-  ContractMaintenanceAuthority,
-  Intent,
-  MaintenanceUpdate,
-  ReplaceAuthority,
-  type SigningKey,
-  signData,
-  Transaction,
-} from '@midnight-ntwrk/midnight-js-protocol/ledger';
-import { getNetworkId } from '@midnight-ntwrk/midnight-js/network-id';
+import { ContractMaintenanceAuthority, Intent, MaintenanceUpdate, ReplaceAuthority, signData, Transaction } from '@midnight-ntwrk/midnight-js-protocol/v8';
+import type { SigningKey } from '@midnight-ntwrk/midnight-js-protocol/v9';
 import { ttlOneHour } from '@midnight-ntwrk/midnight-js/utils';
-import type { NightcastProviders } from './network.js';
+import { LedgerTransaction } from '@midnight-ntwrk/midnight-js/types';
+import { type NightcastProviders, readContractState } from './network.js';
 
 /** The parts of a ledger maintenance authority that decide whether it can act. */
 export type AuthorityView = { committee: readonly unknown[]; threshold: number; counter: bigint };
@@ -60,11 +53,11 @@ const withTimeout = <T>(what: string, ms: number, p: Promise<T>): Promise<T> =>
 export const lockMaintenanceAuthority = async (
   providers: NightcastProviders,
   contractAddress: string,
-  currentKey: SigningKey,
+  currentKey: SigningKey | string,
   opts: LockOptions = {},
 ): Promise<{ txId: string; authority: AuthorityView }> => {
   const stage = opts.onStage ?? (() => undefined);
-  const state = await providers.publicDataProvider.queryContractState(contractAddress);
+  const state = await readContractState(providers.publicDataProvider, contractAddress);
   if (!state) throw new Error(`no contract at ${contractAddress}`);
   const current = state.maintenanceAuthority;
   if (isLocked(current)) throw new Error('maintenance authority is already locked');
@@ -74,13 +67,14 @@ export const lockMaintenanceAuthority = async (
 
   const locked = new ContractMaintenanceAuthority([], 1, current.counter + 1n);
   const unsigned = new MaintenanceUpdate(contractAddress, [new ReplaceAuthority(locked)], current.counter);
-  const update = unsigned.addSignature(0n, signData(currentKey, unsigned.dataToSign));
-  const unprovenTx = Transaction.fromParts(
-    getNetworkId(),
-    undefined,
-    undefined,
-    Intent.new(ttlOneHour()).addMaintenanceUpdate(update),
-  );
+  // A ledger 8 maintenance key is a schnorr key as hex; Midnight.js 5 hands keys out tagged.
+  const keyHex = typeof currentKey === 'string' ? currentKey : currentKey.value;
+  const update = unsigned.addSignature(0n, signData(keyHex, unsigned.dataToSign));
+  // The ledger 8 maintenance path: a contract compiled with Compact 0.31 on a
+  // network still on ledger 8. After the ledger 9 hard fork a ledger 8
+  // contract's authority can't be changed this way (`EraMismatchError`).
+  const tx = Transaction.fromParts(providers.config.networkId, undefined, undefined, Intent.new(ttlOneHour()).addMaintenanceUpdate(update));
+  const unprovenTx = LedgerTransaction.seal('v8', 'Unproven', tx);
 
   stage('Lock: preparing the transaction (proof server)...');
   const provenTx = await withTimeout('Preparing the lock transaction', 5 * 60_000, providers.proofProvider.proveTx(unprovenTx));
@@ -94,7 +88,7 @@ export const lockMaintenanceAuthority = async (
   const pollMs = opts.pollMs ?? 10_000;
   const deadline = Date.now() + timeoutMs;
   for (;;) {
-    const after = await providers.publicDataProvider.queryContractState(contractAddress).catch(() => undefined);
+    const after = await readContractState(providers.publicDataProvider, contractAddress).catch(() => undefined);
     if (after && isLocked(after.maintenanceAuthority)) {
       const a = after.maintenanceAuthority;
       return { txId, authority: { committee: a.committee, threshold: a.threshold, counter: a.counter } };

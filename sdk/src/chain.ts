@@ -1,5 +1,5 @@
-import type { ChargedState, JubjubPoint } from '@midnight-ntwrk/compact-runtime';
-import { ledger, type NightcastSimulator, type Request } from '@nightcast/contract';
+import type { JubjubPoint } from '@midnight-ntwrk/compact-runtime';
+import { type EncodableContractState, ledgerOf, type NightcastSimulator, type Request } from '@nightcast/contract';
 
 /** A request as the oracle sees it. */
 export type RequestEntry = { id: Uint8Array; request: Request };
@@ -53,8 +53,13 @@ export interface NightcastCallTx {
   callTx: { fulfil(id: Uint8Array): Promise<unknown> };
 }
 
+/**
+ * Where the contract's public state is read from: a ledger `ContractState` of
+ * any era (see `decodedPublicData` in `@nightcast/deploy`, which adapts a
+ * Midnight.js 5 public data provider).
+ */
 export interface ContractStateSource {
-  queryContractState(address: string): Promise<{ data: ChargedState } | null | undefined>;
+  queryContractState(address: string): Promise<EncodableContractState | null | undefined>;
 }
 
 /**
@@ -81,7 +86,7 @@ export class MidnightChain implements NightcastChain {
   async listRequests(): Promise<RequestEntry[]> {
     const state = await this.publicData.queryContractState(this.contractAddress);
     if (!state) throw new Error(`no Nightcast contract at ${this.contractAddress}`);
-    return entriesOf(ledger(state.data).requests);
+    return entriesOf(ledgerOf(state).requests);
   }
 
   async fulfil(id: Uint8Array): Promise<void> {

@@ -1,26 +1,20 @@
-import {
-  ContractDeploy,
-  ContractMaintenanceAuthority,
-  ContractState as LedgerContractState,
-  Intent,
-  sampleSigningKey,
-  type SigningKey,
-  Transaction,
-} from '@midnight-ntwrk/midnight-js-protocol/ledger';
-import { getNetworkId } from '@midnight-ntwrk/midnight-js/network-id';
+import { ContractDeploy, ContractMaintenanceAuthority, ContractState as LedgerContractState, Intent, Transaction } from '@midnight-ntwrk/midnight-js-protocol/v8';
+import { sampleSigningKey, type SigningKey } from '@midnight-ntwrk/midnight-js-protocol/v9';
 import { ttlOneHour } from '@midnight-ntwrk/midnight-js/utils';
 import {
-  type ContractProviders,
   createUnprovenDeployTx,
-  type DeployTxOptionsWithPrivateState,
   deployContract,
   findDeployedContract,
+  type Ledger8CircuitId,
+  type Ledger8Contract,
+  type Ledger8ContractProviders,
+  type Ledger8DeployContractOptions,
   submitTx,
 } from '@midnight-ntwrk/midnight-js/contracts';
-import type { Contract } from '@midnight-ntwrk/midnight-js-protocol/compact-js/effect/Contract';
-import { Nightcast, oraclePublicKey } from '@nightcast/contract';
+import { LedgerTransaction } from '@midnight-ntwrk/midnight-js/types';
+import { ledgerOf, oraclePublicKey } from '@nightcast/contract';
 import { isLocked } from './lock.js';
-import { compiledNightcast, NIGHTCAST_PRIVATE_STATE_ID, type NightcastProviders } from './network.js';
+import { compiledNightcast, NIGHTCAST_PRIVATE_STATE_ID, type NightcastProviders, readContractState } from './network.js';
 
 export type DeployParams = {
   oraclePublicKey: { x: bigint; y: bigint };
@@ -73,6 +67,7 @@ export const deployNightcastLocked = async (
 ): Promise<{ contractAddress: string; txId: string }> =>
   deployLocked(providers, {
     compiledContract: compiledNightcast(),
+    privateStateId: NIGHTCAST_PRIVATE_STATE_ID,
     initialPrivateState: {},
     signingKey: sampleSigningKey(), // never used: the authority is replaced before anything is sent
     args: [...constructorArgs(params)] as never,
@@ -84,10 +79,17 @@ export const deployNightcastLocked = async (
  * (empty committee, threshold 1), and submit the deploy. For constructors that
  * create no coins (the transaction is only the deploy). Used for Nightcast and
  * for contracts that embed its VRF, such as Lunardraw's.
+ *
+ * This is the ledger 8 pipeline, for contracts compiled with Compact 0.31
+ * (compact-runtime 0.16). A network that has crossed the ledger 9 hard fork
+ * refuses new ledger 8 deployments (Midnight.js raises `EraMismatchError`,
+ * reason `ledger8-deploy-on-ledger9-network`): the contracts already deployed
+ * keep working, and a new deployment needs the contract recompiled with the
+ * ledger 9 toolchain (Compact 0.36) and the ledger 9 deploy path.
  */
-export const deployLocked = async <C extends Contract.Any>(
-  providers: ContractProviders<C, Contract.ProvableCircuitId<C>, unknown> | ContractProviders<C>,
-  options: DeployTxOptionsWithPrivateState<C>,
+export const deployLocked = async <C extends Ledger8Contract>(
+  providers: Ledger8ContractProviders<C, Ledger8CircuitId<C>>,
+  options: Ledger8DeployContractOptions<C>,
 ): Promise<{ contractAddress: string; txId: string }> => {
   const built = await createUnprovenDeployTx(providers, options);
 
@@ -97,10 +99,10 @@ export const deployLocked = async <C extends Contract.Any>(
   if (!isLocked(state.maintenanceAuthority)) throw new Error('internal: locked authority is not locked');
 
   const deploy = new ContractDeploy(state);
-  const unprovenTx = Transaction.fromParts(getNetworkId(), undefined, undefined, Intent.new(ttlOneHour()).addDeploy(deploy));
-  const result = await submitTx(providers, { unprovenTx });
+  const tx = Transaction.fromParts(providers.config.networkId, undefined, undefined, Intent.new(ttlOneHour()).addDeploy(deploy));
+  const result = await submitTx(providers, { unprovenTx: LedgerTransaction.seal('v8', 'Unproven', tx) });
 
-  const onChain = await providers.publicDataProvider.queryContractState(deploy.address);
+  const onChain = await readContractState(providers.publicDataProvider, deploy.address);
   if (!onChain) throw new Error(`deploy transaction ${result.txId} was accepted but no contract at ${deploy.address}`);
   if (!isLocked(onChain.maintenanceAuthority)) {
     throw new Error(`contract ${deploy.address} was deployed but its authority is not locked`);
@@ -127,9 +129,9 @@ export const acceptOracleKey = async (
     initialPrivateState: { oracleSecretKey },
   });
   const result = await nightcast.callTx.acceptOracleKey({ bytes: payout });
-  const state = await providers.publicDataProvider.queryContractState(contractAddress);
+  const state = await readContractState(providers.publicDataProvider, contractAddress);
   if (!state) throw new Error(`no contract at ${contractAddress}`);
-  const ledger = Nightcast.ledger(state.data);
+  const ledger = ledgerOf(state);
   if (!ledger.oracleKeyReady || ledger.oracleKey.x !== expected.x || ledger.oracleKey.y !== expected.y) {
     throw new Error('acceptOracleKey was accepted but the ledger does not show the key as active');
   }

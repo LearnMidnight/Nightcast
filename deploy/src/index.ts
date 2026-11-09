@@ -13,6 +13,9 @@ export {
   connect,
   contractProviders,
   createLogger,
+  type DecodedContractState,
+  decodeContractState,
+  decodedPublicData,
   describeSync,
   FAUCETS,
   isNetwork,
@@ -21,12 +24,14 @@ export {
   NETWORKS,
   openWallet,
   publicEndpoints,
+  readContractState,
   type Session,
   type WalletOptions,
   walletAddress,
   walletAddressOf,
   walletBalances,
   waitForSpendableDust,
+  TX_TTL_SECONDS,
 } from './network.js';
 export { deployLocked } from './steps.js';
 export { isLocked, type AuthorityView } from './lock.js';
@@ -39,5 +44,5 @@ export {
   onChainFingerprints,
   type OperationsSource,
 } from './fingerprints.js';
-export { addressFromSeed, diskKeyMaterialProvider, forgetWalletState, keyCacheDir, walletStateFile } from './wallet.js';
+export { addressFromSeed, forgetWalletState, keyCacheDir, walletStateFile } from './wallet.js';
 export { redact } from './redact-output.js';

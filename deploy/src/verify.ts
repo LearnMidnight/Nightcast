@@ -1,4 +1,4 @@
-import { Nightcast } from '@nightcast/contract';
+import { type EncodableContractState, ledgerOf } from '@nightcast/contract';
 import { compareFingerprints, type Fingerprints, onChainFingerprints, type OperationsSource } from './fingerprints.js';
 import { type AuthorityView, isLocked } from './lock.js';
 import type { DeploymentRecord } from './record.js';
@@ -6,10 +6,10 @@ import type { DeploymentRecord } from './record.js';
 export type Check = { name: string; ok: boolean; detail: string };
 
 /** The parts of an on-chain contract state that verification reads. */
-export type ContractStateView = OperationsSource & {
-  maintenanceAuthority: AuthorityView;
-  data: Parameters<typeof Nightcast.ledger>[0];
-};
+export type ContractStateView = OperationsSource &
+  EncodableContractState & {
+    maintenanceAuthority: AuthorityView;
+  };
 
 /**
  * Check a live deployment against its published record. Needs only public
@@ -57,7 +57,7 @@ export const verifyDeployment = (
     });
   }
 
-  const ledger = Nightcast.ledger(state.data);
+  const ledger = ledgerOf(state);
   const pk = record.parameters.oraclePublicKey;
   const keyMatches = ledger.oracleKey.x.toString() === pk.x && ledger.oracleKey.y.toString() === pk.y;
   checks.push({
