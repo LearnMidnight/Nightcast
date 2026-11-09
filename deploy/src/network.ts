@@ -112,9 +112,17 @@ export type Session = {
 };
 
 /**
- * Networks whose public node and indexer are run by Blockfrost and need a
- * project id. Midnight retired its own Preprod endpoints on 9 October 2026
- * (they now answer 410 Gone); see docs.midnight.network/relnotes/network.
+ * Networks whose indexer is run by Blockfrost and needs a project id. Midnight
+ * decommissioned its own Preprod indexer on 9 October 2026; see
+ * docs.midnight.network/guides/networks-and-environments. The node is
+ * Midnight's public RPC (the testkit's `rpc.preprod.midnight.network`, which
+ * still answers, WebSocket subscriptions included): wallet SDK 2 follows the
+ * chain's protocol version through a node subscription
+ * (`state_subscribeRuntimeVersion`), and Blockfrost's RPC WebSocket drops it
+ * (1006 Abnormal Closure, then "No response received from RPC endpoint in
+ * 60s"), which stalled every wallet after the ledger 9 upgrade (9 Nov 2026).
+ * NIGHTCAST_NODE_URL / NIGHTCAST_NODE_WS override the node; `blockfrost` there
+ * selects Blockfrost's RPC (with the project id) as before.
  */
 export const BLOCKFROST: Partial<Record<Network, { indexer: string; indexerWS: string; node: string; nodeWS: string }>> = {
   preprod: {
@@ -123,6 +131,18 @@ export const BLOCKFROST: Partial<Record<Network, { indexer: string; indexerWS: s
     node: 'https://rpc.midnight-preprod.blockfrost.io',
     nodeWS: 'wss://rpc.midnight-preprod.blockfrost.io',
   },
+};
+
+/** The node endpoints for a Blockfrost-indexed network: Midnight's public RPC unless overridden. */
+const nodeEndpoints = (
+  base: EnvironmentConfiguration,
+  blockfrost: NonNullable<(typeof BLOCKFROST)[Network]>,
+  projectId: string,
+): { node: string; nodeWS: string } => {
+  const url = process.env.NIGHTCAST_NODE_URL?.trim();
+  const ws = process.env.NIGHTCAST_NODE_WS?.trim();
+  if (url === 'blockfrost' || ws === 'blockfrost') return { node: withProjectId(blockfrost.node, projectId), nodeWS: withProjectId(blockfrost.nodeWS, projectId) };
+  return { node: url || base.node, nodeWS: ws || base.nodeWS };
 };
 
 /** Where `./nightcast blockfrost save` keeps the project id by default. */
@@ -164,19 +184,19 @@ export const publicEndpoints = (
   if (blockfrost) {
     if (!projectId) {
       throw new Error(
-        `${network} needs a Blockfrost project id (Midnight's own ${network} servers were retired on 9 October 2026).\n` +
+        `${network} needs a Blockfrost project id (Midnight's own ${network} indexer was decommissioned on 9 October 2026).\n` +
           `  1. Sign up at https://blockfrost.io and create a project for Midnight ${network}.\n` +
           `  2. Run: ./nightcast blockfrost save --network ${network}\n` +
           `     and paste the project id when asked.`,
       );
     }
-    // Network ids from the testkit; endpoints replaced with Blockfrost's.
+    // Network ids and the node from the testkit; the indexer replaced with Blockfrost's.
+    const base = new PreprodTestEnvironment(logger).getEnvironmentConfiguration();
     return {
-      ...new PreprodTestEnvironment(logger).getEnvironmentConfiguration(),
+      ...base,
       indexer: withProjectId(blockfrost.indexer, projectId),
       indexerWS: withProjectId(blockfrost.indexerWS, projectId),
-      node: withProjectId(blockfrost.node, projectId),
-      nodeWS: withProjectId(blockfrost.nodeWS, projectId),
+      ...nodeEndpoints(base, blockfrost, projectId),
       faucet: undefined,
     };
   }
