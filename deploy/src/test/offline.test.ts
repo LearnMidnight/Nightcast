@@ -118,11 +118,16 @@ describe('verifyDeployment', () => {
 describe('Blockfrost endpoints', () => {
   const logger = createLogger('silent');
 
-  it('adds the project id to every Preprod endpoint', () => {
+  it('adds the project id to every Preprod indexer endpoint, and uses Midnight\'s public node', () => {
     const c = publicEndpoints('preprod', logger, 'preprodABC123');
-    for (const url of [c.indexer, c.indexerWS, c.node, c.nodeWS]) {
+    for (const url of [c.indexer, c.indexerWS]) {
       expect(url).toContain('blockfrost.io');
       expect(new URL(url).searchParams.get('project_id')).toBe('preprodABC123');
+    }
+    // wallet SDK 2 follows the runtime version over the node WebSocket, which Blockfrost's RPC drops
+    for (const url of [c.node, c.nodeWS]) {
+      expect(new URL(url).hostname).toBe('rpc.preprod.midnight.network');
+      expect(new URL(url).searchParams.get('project_id')).toBeNull();
     }
     expect(new URL(c.indexerWS).pathname).toBe('/api/v0/ws');
     expect(c.networkId).toBe('preprod');

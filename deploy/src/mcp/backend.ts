@@ -5,10 +5,10 @@
 import { encodeContractAddress } from '@midnight-ntwrk/compact-runtime';
 import type { PublicDataProvider } from '@midnight-ntwrk/midnight-js-types';
 import { findDeployedContract } from '@midnight-ntwrk/midnight-js/contracts';
-import { Nightcast, pureCircuits } from '@nightcast/contract';
+import { ledgerOf, Nightcast, pureCircuits } from '@nightcast/contract';
 import { checkRequest } from '../check.js';
 import { type Fingerprints, localFingerprints } from '../fingerprints.js';
-import { compiledNightcast, NIGHTCAST_PRIVATE_STATE_ID, type NightcastProviders } from '../network.js';
+import { compiledNightcast, NIGHTCAST_PRIVATE_STATE_ID, type NightcastProviders, readContractState } from '../network.js';
 import type { DeploymentRecord } from '../record.js';
 import type { RandomnessBackend } from './tools.js';
 
@@ -53,7 +53,7 @@ export const midnightBackend = (
     } as never).catch((err) => {
       contract = undefined;
       throw err;
-    }));
+    }) as never);
   return {
     network,
     contractAddress: record.contractAddress,
@@ -81,8 +81,8 @@ export const midnightBackend = (
       }
     },
     async read(id, inputs) {
-      const state = await publicData.queryContractState(record.contractAddress);
-      const requests = state ? Nightcast.ledger(state.data).requests : undefined;
+      const state = await readContractState(publicData, record.contractAddress);
+      const requests = state ? ledgerOf(state).requests : undefined;
       const request = requests?.member(id) ? requests.lookup(id) : undefined;
       const checks = checkRequest(record, state as never, id, request, { inputs, local });
       return { request, checks };

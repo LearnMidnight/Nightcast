@@ -248,11 +248,15 @@ const withSession = async <T>(network: Network, proofServerPort: number | undefi
 };
 
 /** A read-only indexer connection for commands that need no wallet. */
-const publicDataFor = (network: Network) => {
+/** The indexer's public data provider for a network, as Midnight.js reads it (raw, era-tagged states). */
+const rawPublicDataFor = (network: Network) => {
   if (network === 'local') throw new Error('this command on `local` must run inside the same session as the deploy');
   const config = publicEndpoints(network, createLogger('warn'), projectIdFor(network));
-  return decodedPublicData(indexerPublicDataProvider(config.indexer, config.indexerWS));
+  return indexerPublicDataProvider(config.indexer, config.indexerWS);
 };
+
+/** The same, answering decoded ledger states. */
+const publicDataFor = (network: Network) => decodedPublicData(rawPublicDataFor(network));
 
 const localFingerprintsOrNone = (): Fingerprints | undefined => {
   try {
@@ -685,7 +689,7 @@ const main = async (argv: string[]): Promise<number> => {
       };
       if (!values.requester) {
         if (values.wallet) throw new Error('--wallet needs --requester (the requester secret the requests are made with)');
-        const backend = midnightBackend(network, record, publicDataFor(network));
+        const backend = midnightBackend(network, record, rawPublicDataFor(network));
         return runMcp({ backend, mode, logger: createLogger(), limits });
       }
       const requesterFile = readKeyFile(values.requester, 'requester');
