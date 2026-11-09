@@ -566,17 +566,21 @@ const describeProgress = (name: string, p: ProgressLike | undefined): string => 
   return `${name} ${Math.min(pct, 100).toFixed(1)}% (${applied}/${target})`;
 };
 
-/** One line on how far each part of the wallet has synced. */
+/** One line on how far each part of the wallet has synced (wallet SDK 2's state, or SDK 1's). */
 export const describeSync = (state: unknown): string => {
-  const s = state as {
-    shielded?: { state?: { progress?: ProgressLike } };
-    dust?: { state?: { progress?: ProgressLike } };
-    unshielded?: { progress?: ProgressLike };
+  type Part = { progress?: ProgressLike; state?: { progress?: ProgressLike } };
+  const s = state as { shielded?: Part; dust?: Part; unshielded?: Part };
+  const progressOf = (p: Part | undefined): ProgressLike | undefined => {
+    try {
+      return p?.progress ?? p?.state?.progress;
+    } catch {
+      return undefined; // a getter that throws before its part has started
+    }
   };
   return [
-    describeProgress('shielded', s.shielded?.state?.progress),
-    describeProgress('unshielded', s.unshielded?.progress),
-    describeProgress('dust', s.dust?.state?.progress),
+    describeProgress('shielded', progressOf(s.shielded)),
+    describeProgress('unshielded', progressOf(s.unshielded)),
+    describeProgress('dust', progressOf(s.dust)),
   ].join(', ');
 };
 
