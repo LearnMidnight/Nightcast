@@ -1,5 +1,7 @@
 import { describe, expect, it } from 'vitest';
-import { declaredTime, declareFeesAtDustTime } from '../dust-time.js';
+import { V2Tag } from '@midnightntwrk/wallet-sdk/dust/v2';
+import { VariantState } from '@midnightntwrk/wallet-sdk-abstractions';
+import { declaredTime, declareFeesAtDustTime, dustLocalOf } from '../dust-time.js';
 
 const at = (iso: string) => new Date(iso);
 const stateAt = (syncTime: Date | undefined, grace: bigint | null = 10_800n) => ({
@@ -21,6 +23,28 @@ describe('declaredTime', () => {
   it('assumes an hour of grace when the parameters are missing', () => {
     expect(declaredTime(stateAt(at('2026-10-31T04:30:00Z'), null), NOW)).toEqual(at('2026-10-31T04:30:00Z'));
     expect(declaredTime(stateAt(at('2026-10-31T04:15:00Z'), null), NOW)).toBeUndefined();
+  });
+});
+
+describe("wallet SDK 2's sealed dust state", () => {
+  // SDK 2 seals the DustLocalState inside the part's state; only coreStateOf (dust wallet v2) reads it back.
+  const sealedAt = (syncTime: Date, grace = 10_800n) => ({
+    dust: { state: VariantState.seal(V2Tag, { state: { syncTime, params: { dustGracePeriodSeconds: grace } } }) },
+  });
+  it('reads the time from the sealed state, as the real library seals it', () => {
+    expect(dustLocalOf(sealedAt(at('2026-11-10T10:00:00Z')))?.syncTime).toEqual(at('2026-11-10T10:00:00Z'));
+    expect(declaredTime(sealedAt(at('2026-10-31T05:07:00Z')), NOW)).toEqual(at('2026-10-31T05:07:00Z'));
+    expect(declaredTime(sealedAt(at('2026-10-31T02:15:00Z')), NOW)).toBeUndefined(); // outside the grace period
+  });
+  it('gives nothing for a state another variant sealed, or none at all', () => {
+    const v1 = { dust: { state: VariantState.seal(Symbol('V1'), { state: { syncTime: at('2026-10-31T05:07:00Z') } }) } };
+    expect(dustLocalOf(v1)).toBeUndefined();
+    expect(declaredTime(v1, NOW)).toBeUndefined();
+    expect(dustLocalOf({ dust: {} })).toBeUndefined();
+    expect(dustLocalOf(undefined)).toBeUndefined();
+  });
+  it('still reads SDK 1\'s open state', () => {
+    expect(dustLocalOf(stateAt(at('2026-10-31T05:07:00Z')))?.syncTime).toEqual(at('2026-10-31T05:07:00Z'));
   });
 });
 
