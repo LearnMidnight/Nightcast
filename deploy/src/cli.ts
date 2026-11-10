@@ -61,7 +61,7 @@ import {
   walletBalances,
   waitForSpendableDust,
 } from './network.js';
-import { walletStateFile } from './wallet.js';
+import { failureText, walletStateFile } from './wallet.js';
 import { currentCommit, type DeploymentRecord, readRecord, recordPath, writeRecord } from './record.js';
 import { checkRequest } from './check.js';
 import { midnightBackend } from './mcp/backend.js';
@@ -598,8 +598,9 @@ const main = async (argv: string[]): Promise<number> => {
       return withSession(network, portArg(values['proof-server-port']), async (session) => {
         const wallet = await openWallet(session, walletOptions(network, seed, true));
         try {
-          const { night, dust } = await walletBalances(wallet);
+          const { night, dust, nightUtxos, nightRegistered, dustCoins } = await walletBalances(wallet);
           process.stdout.write(`NIGHT: ${formatNight(night)} (${night} STAR)\nDUST:  ${dust} (pays transaction fees; it builds up over time)\n`);
+          process.stdout.write(`Coins: ${nightUtxos} NIGHT UTXO(s), ${nightRegistered} generating DUST; ${dustCoins} DUST coin(s)\n`);
           return 0;
         } finally {
           await wallet.stop().catch(() => undefined);
@@ -710,7 +711,7 @@ const main = async (argv: string[]): Promise<number> => {
           refundTo: wallet.then(walletBytes),
           onSubmitted: () => watchdog.submitted(),
           onSubmitError: (err) => {
-            session.logger.warn(`A request failed: ${err instanceof Error ? err.message : String(err)}`);
+            session.logger.warn(`A request failed: ${failureText(err)}`);
             watchdog.failed(err);
           },
         });
@@ -987,7 +988,7 @@ if (invokedDirectly()) {
   main(process.argv.slice(2)).then(
     (code) => process.exit(code),
     (err) => {
-      process.stderr.write(redact(`${err instanceof Error ? err.message : String(err)}`) + '\n');
+      process.stderr.write(redact(failureText(err)) + '\n');
       process.exit(1);
     },
   );
