@@ -275,6 +275,47 @@ describe('checkRequest', () => {
   });
 });
 
+describe('two-DUST-spend option (ledger 9 OutsideTimeToDismiss workaround)', () => {
+  it('adds the option to a 5.x dust wallet under --root, once, and leaves unknown code alone', async () => {
+    const { execFileSync } = await import('node:child_process');
+    const { mkdirSync, mkdtempSync: mkd, readFileSync: read, writeFileSync } = await import('node:fs');
+    const { join: j } = await import('node:path');
+    const { tmpdir: tmp } = await import('node:os');
+    const { fileURLToPath } = await import('node:url');
+    const script = fileURLToPath(new URL('../../scripts/patch-dust-two-spends.mjs', import.meta.url));
+    const project = mkd(j(tmp(), 'two-spends-'));
+    const pkg = j(project, 'node_modules', '@midnightntwrk', 'wallet-sdk-dust-wallet');
+    mkdirSync(j(pkg, 'dist', 'v2'), { recursive: true });
+    const file = j(pkg, 'dist', 'v2', 'Transacting.js');
+    // the two places the patch edits, as dust-wallet 5.0.0 has them
+    const original = [
+      'const distributeFeeAcrossInputs = (inputs, fee) => inputs.reduce(({ result, remaining }, input) => {',
+      '    const deduction = remaining >= input.value ? input.value : remaining;',
+      '    return { result: [...result, { ...input, value: deduction }], remaining: remaining - deduction };',
+      '}, { result: [], remaining: fee }).result;',
+      'const go = () => {',
+      '        if (deficit <= 0n) {',
+      '            return { fee, recipeInputs: distributeFeeAcrossInputs(inputs, fee - existingDust) };',
+      '        }',
+      '};',
+      '',
+    ].join('\n');
+    writeFileSync(file, original);
+    const run = (...args: string[]) => execFileSync(process.execPath, [script, '--root', project, ...args], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] });
+    run();
+    const patched = read(file, 'utf8');
+    expect(patched).toContain('/* nightcast: two dust spends */');
+    expect(patched).toContain('NIGHTCAST_DUST_MIN_SPENDS');
+    expect(patched).toContain('recipeInputs: __nightcastSpread(inputs, fee - existingDust)');
+    run();
+    expect(read(file, 'utf8')).toBe(patched); // once
+    run('--check');
+    writeFileSync(file, 'something else entirely\n');
+    expect(() => run('--check')).toThrow(); // code it doesn't know: left alone, and --check says so
+    expect(read(file, 'utf8')).toBe('something else entirely\n');
+  });
+});
+
 describe('dust fee-loop patch for other projects', () => {
   it('patches the dust wallet under a --root folder, once', async () => {
     const { execFileSync } = await import('node:child_process');

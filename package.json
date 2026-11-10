@@ -19,7 +19,7 @@
     "typecheck": "npm run typecheck -w @nightcast/contract && npm run typecheck -w @nightcast/sdk && npm run typecheck -w @nightcast/deploy",
     "test": "npm test -w @nightcast/contract && npm test -w @nightcast/sdk && npm test -w @nightcast/deploy",
     "deploy": "node deploy/dist/cli.js",
-    "postinstall": "node deploy/scripts/patch-dust-fee-loop.mjs"
+    "postinstall": "node deploy/scripts/patch-dust-fee-loop.mjs && node deploy/scripts/patch-dust-two-spends.mjs --quiet"
   },
   "devDependencies": {
     "@types/node": "^22.0.0",

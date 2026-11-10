@@ -598,8 +598,9 @@ const main = async (argv: string[]): Promise<number> => {
       return withSession(network, portArg(values['proof-server-port']), async (session) => {
         const wallet = await openWallet(session, walletOptions(network, seed, true));
         try {
-          const { night, dust } = await walletBalances(wallet);
+          const { night, dust, nightUtxos, nightRegistered, dustCoins } = await walletBalances(wallet);
           process.stdout.write(`NIGHT: ${formatNight(night)} (${night} STAR)\nDUST:  ${dust} (pays transaction fees; it builds up over time)\n`);
+          process.stdout.write(`Coins: ${nightUtxos} NIGHT UTXO(s), ${nightRegistered} generating DUST; ${dustCoins} DUST coin(s)\n`);
           return 0;
         } finally {
           await wallet.stop().catch(() => undefined);

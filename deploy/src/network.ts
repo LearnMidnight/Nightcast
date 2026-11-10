@@ -508,6 +508,9 @@ export const openWallet = async (session: Session, opts: WalletOptions = {}): Pr
         .pipe(filter((s) => s.isSynced && (s.unshielded.balances[unshieldedToken().raw] ?? 0n) > 0n)),
     );
   }
+  if (process.env.NIGHTCAST_REGISTER_NEW_NIGHT === '1' && state.dust.balance(new Date()) > 0n) {
+    await registerNewNight(wallet, session.logger);
+  }
   if (state.dust.balance(new Date()) === 0n) {
     // Registers any unregistered NIGHT for DUST generation (no faucet calls).
     await waitForFunds(wallet.wallet, { ...session.config, faucet: undefined }, false, wallet.unshieldedKeystore);
@@ -631,12 +634,59 @@ export const waitForSpendableDust = async (
   }
 };
 
-/** NIGHT and DUST balances of a synced wallet. */
-export const walletBalances = async (wallet: MidnightWalletProvider): Promise<{ night: bigint; dust: bigint }> => {
+type NightCoin = { utxo: { type: string }; meta: { registeredForDustGeneration?: boolean } };
+
+/**
+ * Register NIGHT UTXOs that aren't generating DUST yet. openWallet registers only when the wallet has no
+ * DUST at all; this covers NIGHT that arrives later (opt-in: NIGHTCAST_REGISTER_NEW_NIGHT=1). A second
+ * registered UTXO gives the wallet a second DUST coin, which the two-spend fee workaround needs
+ * (deploy/scripts/patch-dust-two-spends.mjs, ledger 9 OutsideTimeToDismiss).
+ */
+export const registerNewNight = async (wallet: MidnightWalletProvider, logger: { info(m: string): void }): Promise<string | undefined> => {
   const state = await firstValueFrom(wallet.wallet.state().pipe(filter((s) => s.isSynced)));
+  const raw = unshieldedToken().raw;
+  const coins = (state.unshielded as unknown as { availableCoins: NightCoin[] }).availableCoins.filter((c) => c.utxo.type === raw);
+  const unregistered = coins.filter((c) => c.meta.registeredForDustGeneration === false);
+  if (unregistered.length === 0) {
+    logger.info(`All ${coins.length} NIGHT UTXO(s) already generate DUST.`);
+    return undefined;
+  }
+  logger.info(`Registering ${unregistered.length} of ${coins.length} NIGHT UTXO(s) for DUST generation...`);
+  const w = wallet.wallet as unknown as {
+    registerNightUtxosForDustGeneration(c: unknown[], key: unknown, sign: (p: Uint8Array) => Promise<unknown>): Promise<unknown>;
+    finalizeRecipe(r: unknown): Promise<unknown>;
+    submitTransaction(t: unknown): Promise<string>;
+  };
+  const ks = wallet.unshieldedKeystore as unknown as { getPublicKey(): unknown; signDataAsync(p: Uint8Array): Promise<unknown> };
+  const recipe = await w.registerNightUtxosForDustGeneration(unregistered, ks.getPublicKey(), (p) => ks.signDataAsync(p));
+  const txId = await w.submitTransaction(await w.finalizeRecipe(recipe));
+  logger.info(`DUST registration sent: ${txId}. The new DUST coin appears once it lands (a minute or two).`);
+  return txId;
+};
+
+/** NIGHT and DUST balances of a synced wallet, and how many coins each is in. */
+export const walletBalances = async (
+  wallet: MidnightWalletProvider,
+): Promise<{ night: bigint; dust: bigint; nightUtxos: number; nightRegistered: number; dustCoins: number }> => {
+  const state = await firstValueFrom(wallet.wallet.state().pipe(filter((s) => s.isSynced)));
+  const raw = unshieldedToken().raw;
+  let nightUtxos = 0;
+  let nightRegistered = 0;
+  let dustCoins = 0;
+  try {
+    const coins = (state.unshielded as unknown as { availableCoins: NightCoin[] }).availableCoins.filter((c) => c.utxo.type === raw);
+    nightUtxos = coins.length;
+    nightRegistered = coins.filter((c) => c.meta.registeredForDustGeneration !== false).length;
+    dustCoins = state.dust.availableCoins.length;
+  } catch {
+    // counts are for information only
+  }
   return {
-    night: state.unshielded.balances[unshieldedToken().raw] ?? 0n,
+    night: state.unshielded.balances[raw] ?? 0n,
     dust: state.dust.balance(new Date()),
+    nightUtxos,
+    nightRegistered,
+    dustCoins,
   };
 };
 
