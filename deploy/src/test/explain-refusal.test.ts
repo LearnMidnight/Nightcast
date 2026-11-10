@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest';
-import { explainRefusals, isRefusal } from '../explain-refusal.js';
+import { balanceReport, explainRefusals, isRefusal } from '../explain-refusal.js';
+import { feeSettings } from '../wallet.js';
 
 const refusal = () => Object.assign(new Error('Transaction submission error'), { cause: new Error('1010: Invalid Transaction: Custom error: 138') });
 
@@ -37,7 +38,8 @@ describe('explaining a refused transaction', () => {
     explainRefusals(wallet, { warn: (m) => logs.push(m) });
     await expect(wallet.wallet.submitTransaction('tx')).rejects.toBe(err);
     expect(checked).toEqual([['tx', { flags: { enforceBalancing: true, verifySignatures: true, enforceLimits: true } }]]);
-    expect(logs).toEqual(["the node refused the transaction; the wallet's own check of it says: WellFormedError: balance check failed: segment 0 overspends Dust by 12"]);
+    expect(logs[0]).toBe("the node refused the transaction; the wallet's own check of it says: WellFormedError: balance check failed: segment 0 overspends Dust by 12");
+    expect(logs).toHaveLength(2);
   });
 
   it("says so when the wallet's own check passes", async () => {
@@ -45,7 +47,7 @@ describe('explaining a refused transaction', () => {
     const { wallet } = walletWith(() => Promise.reject(refusal()), () => Promise.resolve());
     explainRefusals(wallet, { warn: (m) => logs.push(m) });
     await expect(wallet.wallet.submitTransaction('tx')).rejects.toThrow();
-    expect(logs).toHaveLength(1);
+    expect(logs).toHaveLength(2);
     expect(logs[0]).toContain("the wallet's own check of it passes");
   });
 
@@ -62,5 +64,57 @@ describe('explaining a refused transaction', () => {
     expect(ok.checked).toEqual([]);
     undo();
     expect(lost.wallet.wallet.submitTransaction).toBe(original);
+  });
+});
+
+describe('the figures of a refused transaction', () => {
+  const tx = {
+    intents: new Map([[1, { dustActions: { spends: [{}, {}] } }]]),
+    imbalances: (segment: number) =>
+      segment === 0
+        ? new Map<{ tag: string; raw?: string }, bigint>([[{ tag: 'dust' }, 900n], [{ tag: 'unshielded', raw: '0'.repeat(64) }, 0n]])
+        : new Map<{ tag: string; raw?: string }, bigint>([[{ tag: 'unshielded', raw: '0'.repeat(64) }, -100000n]]),
+    fees: () => 1000n,
+    feesWithMargin: (_p: unknown, margin: number) => 1000n + BigInt(margin),
+  };
+
+  it('lists every balance, the spends and the fee at the priced block', () => {
+    const priced = { height: 77, timestamp: new Date(1_000_000), ledgerParameters: { feePrices: { overallPrice: 10 } } };
+    expect(balanceReport(tx, priced, 1_060_000)).toBe(
+      'balances before the fee: DUST 900 in segment 0, NIGHT 0 in segment 0, NIGHT -100000 in segment 1; 2 DUST spend(s); ' +
+        'fee at the block it was priced at (height 77, 60 s old, overall price 10): 1000, or 1005 with a 5-block margin',
+    );
+    expect(balanceReport(tx, undefined, 0)).toBe('balances before the fee: DUST 900 in segment 0, NIGHT 0 in segment 0, NIGHT -100000 in segment 1; 2 DUST spend(s)');
+  });
+
+  it('remembers the block the fee was priced at and reports with it', async () => {
+    const logs: string[] = [];
+    const wallet = {
+      wallet: {
+        submitTransaction: (_tx: unknown) => Promise.reject(Object.assign(new Error('x'), { cause: new Error('1010: Invalid Transaction: Custom error: 138') })),
+        accept: (handle: unknown) => (handle as { inner: unknown }).inner,
+        calculateTransactionFee: () => Promise.resolve(1234n),
+        dust: { balanceTransactions: (..._args: unknown[]) => Promise.resolve({ transaction: 'fee', blockData: { height: 5, ledgerParameters: { feePrices: { overallPrice: 2 } } } }) },
+      },
+    };
+    const undo = explainRefusals(wallet, { warn: (m) => logs.push(m) }, () => 0);
+    await expect(wallet.wallet.dust.balanceTransactions('key', [], new Date(0))).resolves.toMatchObject({ transaction: 'fee' });
+    await expect(wallet.wallet.submitTransaction({ inner: tx })).rejects.toThrow();
+    expect(logs[1]).toContain('the refused transaction: balances before the fee: DUST 900 in segment 0');
+    expect(logs[1]).toContain('fee at the block it was priced at (height 5, overall price 2): 1000, or 1005 with a 5-block margin');
+    expect(logs[1]).toContain("fee at the chain's latest block now, with the wallet's margin: 1234");
+    undo();
+  });
+});
+
+describe('fee settings from the environment', () => {
+  it('defaults to a 5-block margin and no overhead', () => {
+    expect(feeSettings({})).toEqual({ additionalFeeOverhead: 0n, feeBlocksMargin: 5 });
+    expect(feeSettings({ NIGHTCAST_FEE_MARGIN_BLOCKS: 'lots', NIGHTCAST_FEE_OVERHEAD_SPECKS: '-5' })).toEqual({ additionalFeeOverhead: 0n, feeBlocksMargin: 5 });
+    expect(feeSettings({ NIGHTCAST_FEE_MARGIN_BLOCKS: '501' }).feeBlocksMargin).toBe(5);
+  });
+  it('takes a margin in blocks and an overhead in specks', () => {
+    expect(feeSettings({ NIGHTCAST_FEE_MARGIN_BLOCKS: '40', NIGHTCAST_FEE_OVERHEAD_SPECKS: '1000000000000000' })).toEqual({ additionalFeeOverhead: 1000000000000000n, feeBlocksMargin: 40 });
+    expect(feeSettings({ NIGHTCAST_FEE_MARGIN_BLOCKS: '0' }).feeBlocksMargin).toBe(0);
   });
 });

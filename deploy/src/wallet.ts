@@ -241,6 +241,25 @@ const walletConfiguration = (env: EnvironmentConfiguration, prover: 'server' | '
   costParameters: { feeBlocksMargin: 5 },
 });
 
+/**
+ * How much the dust wallet adds to each fee, from the environment.
+ *
+ * The wallet prices a fee at the indexer's latest block and adds a margin of
+ * `feeBlocksMargin` blocks of the largest price rise (default 5), plus a flat
+ * `additionalFeeOverhead` in specks (default 0). If the node's price has moved
+ * further than that, it refuses the transaction as underpaid (1010, custom
+ * error 138). NIGHTCAST_FEE_MARGIN_BLOCKS (0-500) and
+ * NIGHTCAST_FEE_OVERHEAD_SPECKS raise them.
+ */
+export const feeSettings = (env: NodeJS.ProcessEnv = process.env): { additionalFeeOverhead: bigint; feeBlocksMargin: number } => {
+  const blocks = Number(env.NIGHTCAST_FEE_MARGIN_BLOCKS);
+  const overhead = /^\d{1,30}$/.test(env.NIGHTCAST_FEE_OVERHEAD_SPECKS ?? '') ? BigInt(env.NIGHTCAST_FEE_OVERHEAD_SPECKS as string) : undefined;
+  return {
+    additionalFeeOverhead: overhead ?? DEFAULT_DUST_OPTIONS.additionalFeeOverhead,
+    feeBlocksMargin: env.NIGHTCAST_FEE_MARGIN_BLOCKS && Number.isInteger(blocks) && blocks >= 0 && blocks <= 500 ? blocks : DEFAULT_DUST_OPTIONS.feeBlocksMargin,
+  };
+};
+
 const readSaved = (file: string, network: string): SavedWallet | undefined => {
   if (!existsSync(file)) return undefined;
   try {
@@ -285,8 +304,7 @@ export const buildWallet = async (
     ...config,
     costParameters: {
       ledgerParams: DEFAULT_DUST_OPTIONS.ledgerParams,
-      additionalFeeOverhead: DEFAULT_DUST_OPTIONS.additionalFeeOverhead,
-      feeBlocksMargin: DEFAULT_DUST_OPTIONS.feeBlocksMargin,
+      ...feeSettings(),
     },
   };
   const unshieldedConfig = {
