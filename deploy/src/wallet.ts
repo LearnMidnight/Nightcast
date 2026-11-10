@@ -131,6 +131,19 @@ export const errorMessages = (err: unknown): string[] => {
 const errText = (err: unknown): string => errorMessages(err).join(': ');
 
 /**
+ * An error's message with the reasons under it: `message (cause: a: b)`.
+ * Midnight.js 5 reports a failed step as "balanceTx rejected the transaction
+ * ... The provider's own failure is on `cause`", which alone says nothing
+ * about why; the causes' own messages (already redacted by Midnight.js) do.
+ */
+export const failureText = (err: unknown, max = 600): string => {
+  const [first, ...rest] = errorMessages(err);
+  const top = err instanceof Error && err.message ? err.message : (first ?? String(err));
+  const causes = [first, ...rest].filter((m): m is string => !!m && m !== top && !top.includes(m));
+  return causes.length ? `${top} (cause: ${causes.join(': ').slice(0, max)})` : top;
+};
+
+/**
  * Sending transactions to the node, more steadily than the wallet SDK's own
  * service. That one keeps one node connection for the wallet's whole life,
  * and with wallet-sdk-node-client 1.1.x a connection that drops (Blockfrost's

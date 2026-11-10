@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { balanceReport, explainRefusals, isRefusal } from '../explain-refusal.js';
-import { feeSettings } from '../wallet.js';
+import { failureText, feeSettings } from '../wallet.js';
 
 const refusal = () => Object.assign(new Error('Transaction submission error'), { cause: new Error('1010: Invalid Transaction: Custom error: 138') });
 
@@ -116,5 +116,18 @@ describe('fee settings from the environment', () => {
   it('takes a margin in blocks and an overhead in specks', () => {
     expect(feeSettings({ NIGHTCAST_FEE_MARGIN_BLOCKS: '40', NIGHTCAST_FEE_OVERHEAD_SPECKS: '1000000000000000' })).toEqual({ additionalFeeOverhead: 1000000000000000n, feeBlocksMargin: 40 });
     expect(feeSettings({ NIGHTCAST_FEE_MARGIN_BLOCKS: '0' }).feeBlocksMargin).toBe(0);
+  });
+});
+
+describe('an error with its causes', () => {
+  it('adds the reasons under a Midnight.js step failure', () => {
+    const err = Object.assign(new Error("balanceTx rejected the transaction (circuit 'request'). The provider's own failure is on `cause`."), {
+      cause: Object.assign(new Error('Wallet.InsufficientFunds'), { cause: new Error('Insufficient Funds: could not balance dust') }),
+    });
+    expect(failureText(err)).toBe("balanceTx rejected the transaction (circuit 'request'). The provider's own failure is on `cause`. (cause: Wallet.InsufficientFunds: Insufficient Funds: could not balance dust)");
+  });
+  it('leaves a plain error as it is', () => {
+    expect(failureText(new Error('usage: ./nightcast'))).toBe('usage: ./nightcast');
+    expect(failureText('text')).toBe('text');
   });
 });
