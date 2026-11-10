@@ -118,11 +118,16 @@ describe('verifyDeployment', () => {
 describe('Blockfrost endpoints', () => {
   const logger = createLogger('silent');
 
-  it('adds the project id to every Preprod endpoint', () => {
+  it('adds the project id to every Preprod indexer endpoint, and uses Midnight\'s public node', () => {
     const c = publicEndpoints('preprod', logger, 'preprodABC123');
-    for (const url of [c.indexer, c.indexerWS, c.node, c.nodeWS]) {
+    for (const url of [c.indexer, c.indexerWS]) {
       expect(url).toContain('blockfrost.io');
       expect(new URL(url).searchParams.get('project_id')).toBe('preprodABC123');
+    }
+    // wallet SDK 2 follows the runtime version over the node WebSocket, which Blockfrost's RPC drops
+    for (const url of [c.node, c.nodeWS]) {
+      expect(new URL(url).hostname).toBe('rpc.preprod.midnight.network');
+      expect(new URL(url).searchParams.get('project_id')).toBeNull();
     }
     expect(new URL(c.indexerWS).pathname).toBe('/api/v0/ws');
     expect(c.networkId).toBe('preprod');
@@ -283,20 +288,34 @@ describe('dust fee-loop patch for other projects', () => {
     const file = j(dist, 'Transacting.js');
     writeFileSync(
       file,
-      [
-        '// computeBalancingRecipe',
-        "const recipe = (currentFee) => fromEntry('dust', currentFee);",
-        'const spend = (recipeInputs, currentFee) => distributeFeeAcrossInputs(recipeInputs, currentFee);',
-        '',
-      ].join('\n'),
+      "const recipe = (currentFee) => fromEntry('dust', currentFee); // computeBalancingRecipe\n" +
+        'const spread = (recipeInputs, currentFee) => distributeFeeAcrossInputs(recipeInputs, currentFee);\n',
     );
     const script = fileURLToPath(new URL('../../scripts/patch-dust-fee-loop.mjs', import.meta.url));
     execFileSync(process.execPath, [script, '--quiet', '--root', project, '--root', project]);
     const patched = read(file, 'utf8');
-    expect(patched).toContain('/* nightcast: dust fee-loop fix */ /* nightcast: minimum dust fee */ (currentFee > 0n ? -currentFee : currentFee < 0n ? currentFee : -1n))');
+    expect(patched).toContain('/* nightcast: dust fee-loop fix */ /* nightcast: minimum dust fee */ (currentFee > 0n ? -currentFee : currentFee < 0n ? currentFee : -1n)');
     expect(patched).toContain('distributeFeeAcrossInputs(recipeInputs, currentFee > 0n ? currentFee : 1n)');
     execFileSync(process.execPath, [script, '--check', '--root', project]);
     expect(read(file, 'utf8')).toBe(patched);
+  });
+
+  it('leaves dust wallet 5.x (wallet SDK 2, fixed upstream) alone and passes --check', async () => {
+    const { execFileSync } = await import('node:child_process');
+    const { mkdirSync, mkdtempSync: mkd, readFileSync: read, writeFileSync } = await import('node:fs');
+    const { join: j } = await import('node:path');
+    const { tmpdir: tmp } = await import('node:os');
+    const { fileURLToPath } = await import('node:url');
+    const project = mkd(j(tmp(), 'consumer-'));
+    const pkg = j(project, 'node_modules', '@midnightntwrk', 'wallet-sdk-dust-wallet');
+    mkdirSync(j(pkg, 'dist'), { recursive: true });
+    writeFileSync(j(pkg, 'package.json'), JSON.stringify({ name: '@midnightntwrk/wallet-sdk-dust-wallet', version: '5.0.0' }));
+    const file = j(pkg, 'dist', 'Transacting.js');
+    const original = 'const recipe = (currentFee) => somethingElse(currentFee); // computeBalancingRecipe\n';
+    writeFileSync(file, original);
+    const script = fileURLToPath(new URL('../../scripts/patch-dust-fee-loop.mjs', import.meta.url));
+    execFileSync(process.execPath, [script, '--check', '--root', project]);
+    expect(read(file, 'utf8')).toBe(original);
   });
 });
 
@@ -364,45 +383,6 @@ describe('agent support', () => {
     const s5 = steadySubmissionService(url, { settleMs: 0, tries: 2, tryMs: 20, seen: async () => false, make: () => service(async () => (tries++, Promise.reject(new Error('disconnected from wss://node: 1006:: Abnormal Closure')))) });
     await expect(s5.submitTransaction(tx)).rejects.toThrow('1006:: Abnormal Closure');
     expect(tries).toBe(2);
-  });
-
-  it("keeps the in-process prover's keys on disk: downloaded once, refused when the server sends an error", async () => {
-    const { mkdtempSync, existsSync: exists, readFileSync: readBytes } = await import('node:fs');
-    const { tmpdir } = await import('node:os');
-    const { join: joinPath } = await import('node:path');
-    const { diskKeyMaterialProvider } = await import('../wallet.js');
-    const dir = mkdtempSync(joinPath(tmpdir(), 'keys-'));
-    const urls: string[] = [];
-    const fetcher = (async (url: string) => {
-      urls.push(url);
-      return new Response(new TextEncoder().encode(`bytes of ${url.replace('https://s3.example/', '')}`));
-    }) as unknown as typeof fetch;
-    const kmp = diskKeyMaterialProvider(dir, 'https://s3.example', fetcher) as unknown as {
-      lookupKey(l: string): Promise<{ proverKey: Uint8Array; verifierKey: Uint8Array; ir: Uint8Array } | undefined>;
-      getParams(k: number): Promise<Uint8Array>;
-    };
-    const key = await kmp.lookupKey('midnight/dust/spend');
-    expect(new TextDecoder().decode(key!.proverKey)).toBe('bytes of dust/9/spend.prover');
-    expect(urls.sort()).toEqual(['https://s3.example/dust/9/spend.bzkir', 'https://s3.example/dust/9/spend.prover', 'https://s3.example/dust/9/spend.verifier']);
-    expect(new TextDecoder().decode(await kmp.getParams(14))).toBe('bytes of bls_midnight_2p14');
-    expect(exists(joinPath(dir, 'dust/9/spend.prover'))).toBe(true);
-    expect(await kmp.lookupKey('midnight/unknown')).toBeUndefined();
-    // a new provider (a new run) reads the disk, not the network
-    urls.length = 0;
-    const again = diskKeyMaterialProvider(dir, 'https://s3.example', fetcher) as unknown as typeof kmp;
-    expect(new TextDecoder().decode((await again.lookupKey('midnight/dust/spend'))!.ir)).toBe('bytes of dust/9/spend.bzkir');
-    expect(urls).toEqual([]);
-    expect(readBytes(joinPath(dir, 'bls_midnight_2p14'), 'utf8')).toBe('bytes of bls_midnight_2p14');
-    // an error page is not a key
-    const denied = (async () => new Response('AccessDenied', { status: 403 })) as unknown as typeof fetch;
-    const real = globalThis.setTimeout;
-    globalThis.setTimeout = ((fn: () => void) => real(fn, 0)) as typeof setTimeout;
-    try {
-      const bad = diskKeyMaterialProvider(mkdtempSync(joinPath(tmpdir(), 'keys-')), 'https://s3.example', denied) as unknown as typeof kmp;
-      await expect(bad.getParams(10)).rejects.toThrow(/HTTP 403/);
-    } finally {
-      globalThis.setTimeout = real;
-    }
   });
 
   it("gives a wallet's address from its seed without the network", async () => {

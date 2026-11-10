@@ -1,9 +1,9 @@
 import { webcrypto } from 'node:crypto';
 import type { Logger } from 'pino';
 import { findDeployedContract } from '@midnight-ntwrk/midnight-js/contracts';
-import { Nightcast, oraclePublicKey, type Request, Status } from '@nightcast/contract';
+import { ledgerOf, oraclePublicKey, type Request, Status } from '@nightcast/contract';
 import { MidnightChain, NightcastOracle, type OracleOptions } from '@nightcast/sdk';
-import { compiledNightcast, NIGHTCAST_PRIVATE_STATE_ID, type NightcastProviders } from './network.js';
+import { compiledNightcast, decodeContractState, decodedPublicData, NIGHTCAST_PRIVATE_STATE_ID, type NightcastProviders, readContractState } from './network.js';
 
 const hex = (b: Uint8Array): string => Buffer.from(b).toString('hex');
 
@@ -30,9 +30,9 @@ export const startOracleService = async (
   logger: Logger,
   options: Pick<OracleOptions, 'pollMs' | 'safetyMarginSecs' | 'requesters'> = {},
 ): Promise<RunningOracle> => {
-  const state = await providers.publicDataProvider.queryContractState(contractAddress);
+  const state = await readContractState(providers.publicDataProvider, contractAddress);
   if (!state) throw new Error(`no Nightcast contract at ${contractAddress}`);
-  const ledger = Nightcast.ledger(state.data);
+  const ledger = ledgerOf(state);
   const pk = oraclePublicKey(secretKey);
   if (!ledger.oracleKeyReady) {
     throw new Error('the oracle key is not active yet: run `./nightcast accept-key` first');
@@ -47,7 +47,7 @@ export const startOracleService = async (
     privateStateId: NIGHTCAST_PRIVATE_STATE_ID,
     initialPrivateState: { oracleSecretKey: secretKey },
   });
-  const chain = new MidnightChain(nightcast, providers.publicDataProvider, contractAddress);
+  const chain = new MidnightChain(nightcast, decodedPublicData(providers.publicDataProvider), contractAddress);
   const oracle = new NightcastOracle({
     chain,
     secretKey,
@@ -107,19 +107,20 @@ export const expireRequest = async (
 
 /** Read a request from public chain data. */
 export const readRequest = async (
-  providers: Pick<NightcastProviders, 'publicDataProvider'>,
+  providers: { publicDataProvider: Pick<NightcastProviders['publicDataProvider'], 'queryContractState'> | ReturnType<typeof decodedPublicData> },
   contractAddress: string,
   id: Uint8Array,
 ): Promise<Request | undefined> => {
-  const state = await providers.publicDataProvider.queryContractState(contractAddress);
+  const read = await providers.publicDataProvider.queryContractState(contractAddress);
+  const state = read && 'contractState' in read ? decodeContractState(read) : read;
   if (!state) throw new Error(`no Nightcast contract at ${contractAddress}`);
-  const requests = Nightcast.ledger(state.data).requests;
+  const requests = ledgerOf(state).requests;
   return requests.member(id) ? requests.lookup(id) : undefined;
 };
 
 /** Poll until the request is fulfilled or expired (or `timeoutMs` passes). */
 export const waitForResult = async (
-  providers: Pick<NightcastProviders, 'publicDataProvider'>,
+  providers: Parameters<typeof readRequest>[0],
   contractAddress: string,
   id: Uint8Array,
   opts: { pollMs?: number; timeoutMs?: number; onPoll?: (r: Request | undefined) => void } = {},

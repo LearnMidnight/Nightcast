@@ -14,20 +14,20 @@ import { chmodSync, existsSync, mkdirSync, readFileSync, renameSync, rmSync, wri
 import { homedir } from 'node:os';
 import { dirname, join } from 'node:path';
 import type { Logger } from 'pino';
-import { DustSecretKey, LedgerParameters, ZswapSecretKeys } from '@midnight-ntwrk/midnight-js-protocol/ledger';
 import {
   Capabilities,
   createKeystore,
-  type DefaultConfiguration,
+  DefaultForkSchedule,
   DustWallet,
   InMemoryTransactionHistoryStorage,
   mergeWalletEntries,
   PublicKey,
+  type ResolvedConfiguration,
   ShieldedWallet,
   UnshieldedWallet,
   WalletEntrySchema,
   WalletFacade,
-} from '@midnight-ntwrk/wallet-sdk';
+} from '@midnightntwrk/wallet-sdk';
 import {
   DEFAULT_DUST_OPTIONS,
   type EnvironmentConfiguration,
@@ -36,7 +36,8 @@ import {
 } from '@midnight-ntwrk/testkit-js';
 
 type SavedWallet = {
-  version: 1;
+  /** 2 since the ledger 9 hard fork (wallet SDK 2); a version 1 save is from the ledger 8 wallet and is not used. */
+  version: 2;
   network: string;
   savedAt: string;
   shielded: string;
@@ -46,76 +47,16 @@ type SavedWallet = {
 
 /** A wallet's unshielded address (mn_addr_...) from its seed, offline. */
 export const addressFromSeed = (seed: string, walletNetworkId: Parameters<typeof createKeystore>[1]): string =>
-  createKeystore(WalletSeeds.fromMasterSeed(seed).unshielded, walletNetworkId).getBech32Address().asString();
-
-type KeyMaterialProvider = NonNullable<NonNullable<Parameters<typeof Capabilities.makeWasmProvingService>[0]>['keyMaterialProvider']>;
+  createKeystore({ kind: 'schnorr', secret: WalletSeeds.fromMasterSeed(seed).unshielded }, walletNetworkId).getBech32Address().asString();
 
 /**
- * Where the in-process prover keeps the keys and parameters it downloads
- * (NIGHTCAST_KEY_CACHE overrides it). They are public, about 100 MB, and the
- * same for every wallet, so they live outside the secrets folder.
+ * Where the wallet SDK's in-process prover keeps the keys and parameters it
+ * downloads (NIGHTCAST_KEY_CACHE overrides it). Since wallet SDK 2 the SDK's
+ * own key material provider fetches ledger 9's keys from srs.midnight.network,
+ * checksummed, so Nightcast no longer keeps its own copy on disk; the folder
+ * is only cleaned up by `wallet forget`.
  */
 export const keyCacheDir = (): string => process.env.NIGHTCAST_KEY_CACHE ?? join(homedir(), '.cache', 'nightcast', 'keys');
-
-/**
- * The wallet SDK's key material for in-process (WASM) proving, kept on disk.
- * Same files and addresses as the SDK's own provider
- * (wallet-sdk-prover-client 1.2.2, WasmProver.makeDefaultKeyMaterialProvider),
- * which keeps them in memory only, so every run downloaded them again; and
- * this one refuses an error page instead of caching it as a key.
- */
-export const diskKeyMaterialProvider = (
-  dir: string = keyCacheDir(),
-  base = 'https://midnight-s3-fileshare-dev-eu-west-1.s3.eu-west-1.amazonaws.com',
-  fetcher: typeof fetch = fetch,
-): KeyMaterialProvider => {
-  const ver = 9;
-  const paths: Record<string, string> = {
-    'midnight/zswap/spend': `zswap/${ver}/spend`,
-    'midnight/zswap/output': `zswap/${ver}/output`,
-    'midnight/zswap/sign': `zswap/${ver}/sign`,
-    'midnight/dust/spend': `dust/${ver}/spend`,
-  };
-  const memory = new Map<string, Promise<Uint8Array>>();
-  const file = (name: string): Promise<Uint8Array> => {
-    let p = memory.get(name);
-    if (!p) {
-      p = (async () => {
-        const path = join(dir, name);
-        if (existsSync(path)) return new Uint8Array(readFileSync(path));
-        let last: unknown;
-        for (let i = 0; i < 5; i++) {
-          try {
-            const r = await fetcher(`${base}/${name}`);
-            if (!r.ok) throw new Error(`HTTP ${r.status}`);
-            const bytes = new Uint8Array(await r.arrayBuffer());
-            if (bytes.length === 0) throw new Error('empty');
-            mkdirSync(dirname(path), { recursive: true });
-            writeFileSync(`${path}.tmp`, bytes);
-            renameSync(`${path}.tmp`, path);
-            return bytes;
-          } catch (err) {
-            last = err;
-            await new Promise((res) => setTimeout(res, 1000 * 2 ** (i + 1)));
-          }
-        }
-        memory.delete(name);
-        throw new Error(`could not download ${base}/${name}: ${last instanceof Error ? last.message : String(last)}`);
-      })();
-      memory.set(name, p);
-    }
-    return p;
-  };
-  return {
-    lookupKey: async (keyLocation: string) => {
-      const pth = paths[keyLocation];
-      if (pth === undefined) return undefined;
-      const [proverKey, verifierKey, ir] = await Promise.all([file(`${pth}.prover`), file(`${pth}.verifier`), file(`${pth}.bzkir`)]);
-      return { proverKey, verifierKey, ir };
-    },
-    getParams: (k: number) => file(`bls_midnight_2p${k}`),
-  } as unknown as KeyMaterialProvider;
-};
 
 /** Folder for saved wallet state (NIGHTCAST_STATE_DIR overrides it). */
 export const walletStateDir = (): string =>
@@ -281,11 +222,19 @@ export const steadySubmissionService = (relayURL: URL, o: SteadySubmitOptions = 
   }
 };
 
-/** Same mapping as the testkit's (not exported there), plus larger sync batches. */
-const walletConfiguration = (env: EnvironmentConfiguration): DefaultConfiguration => ({
+/**
+ * Same mapping as the testkit's (not exported there), plus larger sync batches.
+ * `forks` is where this chain moved from ledger 8 to ledger 9: the SDK's
+ * default schedule (the version a 2.x node reports), which Preprod, Preview and
+ * Mainnet all follow. `provers` names a proof server per ledger era; the
+ * wallet only builds ledger 9 transactions now, so one (ledger 9) server is
+ * named, or the in-process prover.
+ */
+const walletConfiguration = (env: EnvironmentConfiguration, prover: 'server' | 'wasm'): ResolvedConfiguration => ({
+  forks: DefaultForkSchedule,
   batchUpdates: { size: syncBatchSize(), timeout: 100, spacing: 0 },
   indexerClientConnection: { indexerHttpUrl: env.indexer, indexerWsUrl: env.indexerWS },
-  provingServerUrl: new URL(env.proofServer),
+  provers: { v9: prover === 'wasm' ? { kind: 'wasm' } : { kind: 'server', url: new URL(env.proofServer) } },
   networkId: env.walletNetworkId,
   relayURL: new URL(env.nodeWS),
   txHistoryStorage: new InMemoryTransactionHistoryStorage(WalletEntrySchema, mergeWalletEntries),
@@ -296,7 +245,7 @@ const readSaved = (file: string, network: string): SavedWallet | undefined => {
   if (!existsSync(file)) return undefined;
   try {
     const saved = JSON.parse(readFileSync(file, 'utf8')) as SavedWallet;
-    return saved.version === 1 && saved.network === network ? saved : undefined;
+    return saved.version === 2 && saved.network === network ? saved : undefined;
   } catch {
     return undefined;
   }
@@ -331,7 +280,7 @@ export const buildWallet = async (
   steady?: SteadySubmitOptions,
 ): Promise<PersistentWallet> => {
   const seeds = WalletSeeds.fromMasterSeed(seed);
-  const config = walletConfiguration(env);
+  const config = walletConfiguration(env, prover);
   const dustConfig = {
     ...config,
     costParameters: {
@@ -344,23 +293,23 @@ export const buildWallet = async (
     ...config,
     txHistoryStorage: new InMemoryTransactionHistoryStorage(WalletEntrySchema, mergeWalletEntries),
   };
-  const keystore = createKeystore(seeds.unshielded, env.walletNetworkId);
+  const keystore = createKeystore({ kind: 'schnorr', secret: seeds.unshielded }, env.walletNetworkId);
 
-  const fresh = () => ({
-    shielded: ShieldedWallet(config).startWithSeed(seeds.shielded),
-    unshielded: UnshieldedWallet(unshieldedConfig).startWithPublicKey(PublicKey.fromKeyStore(keystore)),
-    dust: DustWallet(dustConfig).startWithSeed(seeds.dust, LedgerParameters.initialParameters().dust),
+  const fresh = async () => ({
+    shielded: await ShieldedWallet(config).startWithSeed(seeds.shielded),
+    unshielded: await UnshieldedWallet(unshieldedConfig).startWithPublicKey(PublicKey.fromKeyStore(keystore)),
+    dust: await DustWallet(dustConfig).startWithSeed(seeds.dust),
   });
 
   const file = walletStateFile(network, seed);
   const saved = persist ? readSaved(file, network) : undefined;
-  let parts: ReturnType<typeof fresh> | undefined;
+  let parts: Awaited<ReturnType<typeof fresh>> | undefined;
   if (saved) {
     try {
       parts = {
-        shielded: ShieldedWallet(config).restore(saved.shielded),
-        unshielded: UnshieldedWallet(unshieldedConfig).restore(saved.unshielded),
-        dust: DustWallet(dustConfig).restore(saved.dust),
+        shielded: await ShieldedWallet(config).restore(saved.shielded),
+        unshielded: await UnshieldedWallet(unshieldedConfig).restore(saved.unshielded),
+        dust: await DustWallet(dustConfig).restore(saved.dust),
       };
     } catch (err) {
       logger.warn(`Saved wallet state could not be used (${err instanceof Error ? err.message : String(err)}); syncing from the start.`);
@@ -368,25 +317,17 @@ export const buildWallet = async (
     }
   }
   const restored = parts !== undefined;
-  parts ??= fresh();
+  parts ??= await fresh();
 
   const { shielded, unshielded, dust } = parts;
   const facade = await WalletFacade.init({
     configuration: config,
-    ...(prover === 'wasm' ? { provingService: () => Capabilities.makeWasmProvingService({ keyMaterialProvider: diskKeyMaterialProvider() }) } : {}),
     ...(steady ? { submissionService: () => steadySubmissionService(new URL(env.nodeWS), steady) as never } : {}),
     shielded: () => shielded,
     unshielded: () => unshielded,
     dust: () => dust,
   });
-  const provider = await MidnightWalletProvider.withWallet(
-    logger,
-    env,
-    facade,
-    ZswapSecretKeys.fromSeed(seeds.shielded),
-    DustSecretKey.fromSeed(seeds.dust),
-    keystore,
-  );
+  const provider = await MidnightWalletProvider.withWallet(logger, env, facade, seeds, keystore);
 
   let saving: Promise<void> | undefined;
   const save = async (): Promise<void> => {
@@ -398,7 +339,7 @@ export const buildWallet = async (
         facade.unshielded.serializeState(),
         facade.dust.serializeState(),
       ]);
-      const data: SavedWallet = { version: 1, network, savedAt: new Date().toISOString(), shielded: s, unshielded: u, dust: d };
+      const data: SavedWallet = { version: 2, network, savedAt: new Date().toISOString(), shielded: s, unshielded: u, dust: d };
       mkdirSync(walletStateDir(), { recursive: true, mode: 0o700 });
       const tmp = `${file}.tmp`;
       writeFileSync(tmp, JSON.stringify(data), { mode: 0o600 });

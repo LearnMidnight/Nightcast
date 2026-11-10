@@ -6,12 +6,12 @@ import { describe, it, expect, beforeAll, afterAll, afterEach } from 'vitest';
 import { mkdtempSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { sampleSigningKey } from '@midnight-ntwrk/midnight-js-protocol/ledger';
+import { sampleSigningKey } from '@midnight-ntwrk/midnight-js-protocol/v9';
 import { findDeployedContract } from '@midnight-ntwrk/midnight-js/contracts';
 import {
   generateOperatorSecret,
   generateOracleSecretKey,
-  Nightcast,
+  ledgerOf,
   oraclePublicKey,
   pureCircuits,
   Status,
@@ -27,6 +27,7 @@ import {
   nightcastProviders,
   type NightcastProviders,
   openWallet,
+  readContractState,
   type Session,
 } from '../network.js';
 import type { DeploymentRecord } from '../record.js';
@@ -106,12 +107,12 @@ describe.runIf(enabled)('Nightcast on a local Midnight network', () => {
       collateralPerRequest: COLLATERAL,
     });
     address = deployed.contractAddress;
-    const state = await providers.publicDataProvider.queryContractState(address);
+    const state = await readContractState(providers.publicDataProvider, address);
     expect(state).toBeTruthy();
     expect(isLocked(state!.maintenanceAuthority)).toBe(true);
     expect(state!.maintenanceAuthority.committee).toHaveLength(0);
     expect(state!.maintenanceAuthority.threshold).toBe(1);
-    expect(Nightcast.ledger(state!.data).oracleKeyReady).toBe(false);
+    expect(ledgerOf(state!).oracleKeyReady).toBe(false);
   }, 10 * 60_000);
 
   it('cannot be changed by anyone, and the old-style lock is refused', async () => {
@@ -136,7 +137,7 @@ describe.runIf(enabled)('Nightcast on a local Midnight network', () => {
       minWindow: 60n,
       maxWindow: 86_400n,
     });
-    const before = await providers.publicDataProvider.queryContractState(deployed.contractAddress);
+    const before = await readContractState(providers.publicDataProvider, deployed.contractAddress);
     expect(isLocked(before!.maintenanceAuthority)).toBe(false);
     const locked = await lockMaintenanceAuthority(providers, deployed.contractAddress, deployed.maintenanceKey);
     expect(locked.authority.committee).toHaveLength(0);
@@ -148,7 +149,7 @@ describe.runIf(enabled)('Nightcast on a local Midnight network', () => {
     await acceptOracleKey(providers, address, sk, walletBytes(wallet));
     // Room for the four requests below.
     await depositBond(providers, address, 4n);
-    const l = Nightcast.ledger((await providers.publicDataProvider.queryContractState(address))!.data);
+    const l = ledgerOf((await readContractState(providers.publicDataProvider, address))!);
     expect(l.bondSlots).toBe(4n);
     expect(hex(l.oraclePayout.bytes)).toBe(hex(walletBytes(wallet)));
   }, 10 * 60_000);
@@ -172,7 +173,7 @@ describe.runIf(enabled)('Nightcast on a local Midnight network', () => {
       transactions: {},
       verifierKeys: fps,
     };
-    const state = await providers.publicDataProvider.queryContractState(address);
+    const state = await readContractState(providers.publicDataProvider, address);
     const checks = verifyDeployment(record, state, fps);
     expect(checks.filter((c) => !c.ok)).toEqual([]);
     expect(Object.keys(fps).sort()).toEqual(
@@ -202,17 +203,17 @@ describe.runIf(enabled)('Nightcast on a local Midnight network', () => {
     const deadline = BigInt(Math.floor(Date.now() / 1000) + 3_600);
     const requested = await nightcast.callTx.request(label('e2e'), label('seed-1'), deadline, { bytes: walletBytes(wallet) });
     const id = requested.private.result as Uint8Array;
-    const pending = Nightcast.ledger((await providers.publicDataProvider.queryContractState(address))!.data);
+    const pending = ledgerOf((await readContractState(providers.publicDataProvider, address))!);
     expect(pending.requests.lookup(id).fee).toBe(FEE);
     expect(pending.requests.lookup(id).collateral).toBe(COLLATERAL);
     expect(pending.bondSlots).toBe(3n);
 
     await nightcast.callTx.fulfil(id);
-    const state = await providers.publicDataProvider.queryContractState(address);
-    const r = Nightcast.ledger(state!.data).requests.lookup(id);
+    const state = await readContractState(providers.publicDataProvider, address);
+    const r = ledgerOf(state!).requests.lookup(id);
     expect(r.status).toBe(Status.fulfilled);
     // The collateral is back in the bond; the fee went to the oracle's payout.
-    expect(Nightcast.ledger(state!.data).bondSlots).toBe(4n);
+    expect(ledgerOf(state!).bondSlots).toBe(4n);
     expect(hex(r.requester)).toBe(hex(pureCircuits.requesterCommitmentOf(requesterSecret)));
     expect(hex(r.output)).toBe(hex(pureCircuits.evaluateAt(sk, r.point)));
     expect(hex(r.output)).toBe(hex(pureCircuits.evaluate(sk, id)));
@@ -231,7 +232,7 @@ describe.runIf(enabled)('Nightcast on a local Midnight network', () => {
       expect(hex(r!.requester)).toBe(hex(pureCircuits.requesterCommitmentOf(requesterSecret)));
       expect(hex(r!.output)).toBe(hex(pureCircuits.evaluate(sk, req.id)));
       // Everything `check` confirms from public data, on a real deployment.
-      const state = await requesterProviders.publicDataProvider.queryContractState(address);
+      const state = await readContractState(requesterProviders.publicDataProvider, address);
       const checks = checkRequest(recordNow(), state, req.id, r, { inputs: { tag: req.tag, seed: req.seed } });
       expect(checks.filter((c) => !c.ok)).toEqual([]);
     } finally {
@@ -268,10 +269,10 @@ describe.runIf(enabled)('Nightcast on a local Midnight network', () => {
       r = await read(`after expire attempt ${attempt + 1}`);
     }
     expect(r?.status).toBe(Status.expired);
-    const state = await providers.publicDataProvider.queryContractState(address);
+    const state = await readContractState(providers.publicDataProvider, address);
     const checks = checkRequest(recordNow(), state, id, r, { inputs: { tag: req!.tag, seed: req!.seed }, expect: 'expired' });
     expect(checks.filter((c) => !c.ok)).toEqual([]);
     // The skipped request's collateral left with its fee (to the refund address), so the bond is smaller.
-    expect(Nightcast.ledger(state!.data).bondSlots <= 3n).toBe(true);
+    expect(ledgerOf(state!).bondSlots <= 3n).toBe(true);
   }, 20 * 60_000);
 });

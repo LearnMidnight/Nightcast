@@ -1,7 +1,8 @@
 #!/usr/bin/env node
 /**
  * Fix an endless loop in Midnight's dust wallet (wallet-sdk-dust-wallet 4.x)
- * when it works out a transaction's fee.
+ * when it works out a transaction's fee. Dust wallet 5.x (wallet SDK 2, since
+ * the ledger 9 hard fork) has both fixes and is left alone.
  *
  * `computeBalancingRecipe` seeds its first pass with the transaction's dust
  * imbalance (a deficit, negative) and every later pass with the fee it just
@@ -75,8 +76,22 @@ const walkModules = (nmDir, out, depth = 0) => {
   return out;
 };
 
+/** Midnight fixed both problems in dust-wallet 5.0 (wallet SDK 2, ledger 9): nothing to patch there. */
+const fixedUpstream = (pkgDir) => {
+  try {
+    const major = Number.parseInt(String(JSON.parse(readFileSync(join(pkgDir, 'package.json'), 'utf8')).version).split('.')[0], 10);
+    return Number.isFinite(major) && major >= 5;
+  } catch {
+    return false;
+  }
+};
+
+let upstream = 0;
 const visitPackage = (pkgDir, out, depth) => {
-  if (pkgDir.endsWith('wallet-sdk-dust-wallet')) collectTransacting(join(pkgDir, 'dist'), out);
+  if (pkgDir.endsWith('wallet-sdk-dust-wallet')) {
+    if (fixedUpstream(pkgDir)) upstream += 1;
+    else collectTransacting(join(pkgDir, 'dist'), out);
+  }
   walkModules(join(pkgDir, 'node_modules'), out, depth + 1);
 };
 
@@ -138,8 +153,9 @@ if (!quiet || patched > 0) {
   if (patched) parts.push(`fixed ${patched} file(s)`);
   if (already) parts.push(`${already} already fixed`);
   if (unknown) parts.push(`${unknown} with different code left alone`);
+  if (upstream) parts.push(`${upstream} dust wallet(s) 5.x or later, fixed upstream`);
   if (!parts.length) parts.push('no dust wallet found (run npm install)');
   process.stderr.write(`Dust fee-loop and minimum-fee fixes: ${parts.join(', ')}\n`);
 }
 // --check: every dust wallet found has both fixes (one left alone, e.g. unknown code, fails it too)
-if (check && (total === 0 || unknown > 0)) process.exit(1);
+if (check && ((total === 0 && upstream === 0) || unknown > 0)) process.exit(1);
