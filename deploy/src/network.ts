@@ -65,6 +65,7 @@ export const readContractState = (publicData: Pick<PublicDataProvider, 'queryCon
 const dockerDir = resolve(dirname(fileURLToPath(import.meta.url)), '..', 'docker');
 
 import { type DustTimeWallet, declareFeesAtDustTime } from './dust-time.js';
+import { type RefusalWallet, explainRefusals } from './explain-refusal.js';
 import { redact } from './redact-output.js';
 export { redact };
 
@@ -465,6 +466,7 @@ export const openWallet = async (session: Session, opts: WalletOptions = {}): Pr
   const wallet = built.provider;
   const address = walletAddress(wallet);
   if (opts.declareFeesAtDustTime !== false) declareFeesAtDustTime(wallet as unknown as DustTimeWallet, session.logger);
+  explainRefusals(wallet as unknown as RefusalWallet, session.logger);
   opts.onAddress?.(address);
   opts.onWallet?.(wallet);
   if (built.restored) session.logger.info('Carrying on from the saved wallet state.');
