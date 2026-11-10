@@ -149,7 +149,7 @@ describe.runIf(enabled)('Nightcast on a local Midnight network', () => {
     await acceptOracleKey(providers, address, sk, walletBytes(wallet));
     // Room for the four requests below.
     await depositBond(providers, address, 4n);
-    const l = Nightcast.ledger((await providers.publicDataProvider.queryContractState(address))!.data);
+    const l = ledgerOf((await readContractState(providers.publicDataProvider, address))!);
     expect(l.bondSlots).toBe(4n);
     expect(hex(l.oraclePayout.bytes)).toBe(hex(walletBytes(wallet)));
   }, 10 * 60_000);
@@ -203,7 +203,7 @@ describe.runIf(enabled)('Nightcast on a local Midnight network', () => {
     const deadline = BigInt(Math.floor(Date.now() / 1000) + 3_600);
     const requested = await nightcast.callTx.request(label('e2e'), label('seed-1'), deadline, { bytes: walletBytes(wallet) });
     const id = requested.private.result as Uint8Array;
-    const pending = Nightcast.ledger((await providers.publicDataProvider.queryContractState(address))!.data);
+    const pending = ledgerOf((await readContractState(providers.publicDataProvider, address))!);
     expect(pending.requests.lookup(id).fee).toBe(FEE);
     expect(pending.requests.lookup(id).collateral).toBe(COLLATERAL);
     expect(pending.bondSlots).toBe(3n);
@@ -213,7 +213,7 @@ describe.runIf(enabled)('Nightcast on a local Midnight network', () => {
     const r = ledgerOf(state!).requests.lookup(id);
     expect(r.status).toBe(Status.fulfilled);
     // The collateral is back in the bond; the fee went to the oracle's payout.
-    expect(Nightcast.ledger(state!.data).bondSlots).toBe(4n);
+    expect(ledgerOf(state!).bondSlots).toBe(4n);
     expect(hex(r.requester)).toBe(hex(pureCircuits.requesterCommitmentOf(requesterSecret)));
     expect(hex(r.output)).toBe(hex(pureCircuits.evaluateAt(sk, r.point)));
     expect(hex(r.output)).toBe(hex(pureCircuits.evaluate(sk, id)));
@@ -273,6 +273,6 @@ describe.runIf(enabled)('Nightcast on a local Midnight network', () => {
     const checks = checkRequest(recordNow(), state, id, r, { inputs: { tag: req!.tag, seed: req!.seed }, expect: 'expired' });
     expect(checks.filter((c) => !c.ok)).toEqual([]);
     // The skipped request's collateral left with its fee (to the refund address), so the bond is smaller.
-    expect(Nightcast.ledger(state!.data).bondSlots <= 3n).toBe(true);
+    expect(ledgerOf(state!).bondSlots <= 3n).toBe(true);
   }, 20 * 60_000);
 });
