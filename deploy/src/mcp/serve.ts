@@ -32,11 +32,24 @@ export type McpMode = { kind: 'stdio'; out: (s: string) => boolean } | { kind: '
 type Subscribable = { subscribe(next: (s: unknown) => void): { unsubscribe(): void } };
 
 type Progress = { appliedIndex?: bigint; appliedId?: bigint };
-/** How far each part of the wallet has applied the chain's events (changes as it follows the chain). */
+/** A wallet part: wallet SDK 2 has `progress` on the part itself, SDK 1 had it under `state`. */
+type Part = { progress?: Progress; state?: { progress?: Progress } };
+const progressOf = (p: Part | undefined): Progress | undefined => {
+  try {
+    return p?.progress ?? p?.state?.progress;
+  } catch {
+    return undefined; // a getter that throws before its part has started
+  }
+};
+/**
+ * How far each part of the wallet has applied the chain's events (changes as it follows the chain).
+ * Reads wallet SDK 2's state (and SDK 1's): with SDK 1's paths only the unshielded part showed on
+ * SDK 2, so a long DUST sync looked stalled and the watchdog restarted the server.
+ */
 export const positionsOf = (state: unknown): string => {
-  const s = state as { shielded?: { state?: { progress?: Progress } }; dust?: { state?: { progress?: Progress } }; unshielded?: { progress?: Progress } };
+  const s = state as { shielded?: Part; dust?: Part; unshielded?: Part };
   const pos = (p: Progress | undefined) => String(p?.appliedIndex ?? p?.appliedId ?? '?');
-  return `shielded:${pos(s.shielded?.state?.progress)}|unshielded:${pos(s.unshielded?.progress)}|dust:${pos(s.dust?.state?.progress)}`;
+  return `shielded:${pos(progressOf(s.shielded))}|unshielded:${pos(progressOf(s.unshielded))}|dust:${pos(progressOf(s.dust))}`;
 };
 
 /** Whether an error is the node's stale-fee refusal (it's often only in the error's text, not its message). */
