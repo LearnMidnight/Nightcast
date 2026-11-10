@@ -8,7 +8,7 @@ import { listCommitment, pick } from '@nightcast/sdk';
 import { checkRequest } from '../check.js';
 import { clientOf, serveHttp } from '../mcp/http.js';
 import { handle, type Tool } from '../mcp/rpc.js';
-import { isStaleFee, SERVER_INFO, Watchdog } from '../mcp/serve.js';
+import { isStaleFee, positionsOf, SERVER_INFO, Watchdog } from '../mcp/serve.js';
 import { INSTRUCTIONS, nightcastTools, type RandomnessBackend } from '../mcp/tools.js';
 import type { DeploymentRecord } from '../record.js';
 
@@ -281,5 +281,19 @@ describe('the watchdog', () => {
     expect(v.check()).toBeUndefined();
     v.failed(stale);
     expect(v.check()).toMatch(/three requests in a row/);
+  });
+
+  it("follows wallet SDK 2's state, where each part has its own progress", () => {
+    let now = 0;
+    const w = new Watchdog(20, () => now);
+    const sdk2 = (d: number) => ({ shielded: { progress: { appliedIndex: 5n } }, unshielded: { progress: { appliedId: 7n } }, dust: { progress: { appliedIndex: BigInt(d) } } });
+    expect(positionsOf(sdk2(9))).toBe('shielded:5|unshielded:7|dust:9');
+    w.see(sdk2(1));
+    now = 19 * 60_000;
+    w.see(sdk2(50_000)); // only DUST moves, as in a long DUST sync
+    now += 19 * 60_000;
+    expect(w.check()).toBeUndefined();
+    const early = { shielded: { get progress(): never { throw new Error('not started'); } }, dust: {} };
+    expect(positionsOf(early)).toBe('shielded:?|unshielded:?|dust:?');
   });
 });
