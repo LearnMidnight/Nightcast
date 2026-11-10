@@ -4,17 +4,20 @@ Nightcast is an independent, experimental verifiable randomness protocol for Mid
 
 It works like [Chainlink VRF](https://docs.chain.link/vrf): you request randomness, an oracle answers, and the answer comes with a proof. On Midnight the proof is the transaction itself. The oracle's `fulfil` circuit evaluates the VRF with its secret key as a private input, so the network only accepts the one output that key can produce for that request, and the key is never revealed.
 
-> **Status: v0, experimental and unaudited.** Don't secure real value with it yet. Read the [threat model](docs/SPEC.md#4-threat-model) first, especially [withholding](docs/SPEC.md#42-withholding-and-aborts).
+> **Status: v1, experimental and unaudited.** Don't secure real value with it yet. Read the [threat model](docs/SPEC.md#4-threat-model) first, especially [withholding](docs/SPEC.md#42-withholding-and-aborts).
 
 ## Live deployment
 
 | Network | Contract | Status |
 |---|---|---|
-| Preprod | `f3083513bae7010e32acac41e3f3dbfdfa0516c6ca80382c5847dd3529cf158e` | Deployed locked (no admin key ever existed) on 24 Oct 2026 with the key-change wait (#37); oracle key active. Replaces `67e02b18…49d4a1f` (21 Oct), which runs the code before the fix and is no longer served. |
+| Preprod | `eaae909ead81a20f6a8873aec8bdcd0c428424672771991550c483b044a73adb` | **v1** (request fees and oracle bonds). Deployed locked (no admin key ever existed) on 9 Nov 2026 from `9e7203e`, compiled with Compact 0.31.1; it carried over the ledger 9 fork the same day and is called through Midnight.js 5. Oracle key active; payout to the operator's treasury. Fee **0.1 tNIGHT** a request, collateral **1 tNIGHT** a request. |
+| Preprod (v0, retired) | `f3083513bae7010e32acac41e3f3dbfdfa0516c6ca80382c5847dd3529cf158e` | 24 Oct 2026, v0. Still on chain; no oracle answers it any more. |
 
 Check it yourself with `./nightcast verify --network preprod` (record: [deployments/preprod.json](deployments/preprod.json)).
 
-**v1: request fees and oracle bonds** ([SPEC §4.3a](docs/SPEC.md#43a-fees-and-bonds-v1-issues-13-and-9)). The deployment above runs v0; the tools on `main` speak v1, so Preprod needs a v1 redeploy (`./nightcast deploy ... --fee <NIGHT> --collateral <NIGHT>`, then `./nightcast bond deposit --slots <n>`).
+**v1: request fees and oracle bonds** ([SPEC §4.3a](docs/SPEC.md#43a-fees-and-bonds-v1-issues-13-and-9)). Each request pays the fee to the oracle when it's answered and holds one slot of the oracle's bond as collateral; if the oracle misses the deadline, `expire` returns the fee and the collateral to the requester. `./nightcast verify` reports the free bond slots.
+
+**Ledger 9.** Preprod moved to ledger 9 on 9 Nov 2026 (in place: contracts and balances carried over). `main` is on the ledger 9 stack (Midnight.js 5, wallet SDK 2, proof server 9.0.0, Midnight's public Preprod node). Contracts compiled with Compact 0.31.1, like the one above, keep working; a *new* deployment on ledger 9 needs a Compact 0.36 compile (#58).
 
 ## How it works
 

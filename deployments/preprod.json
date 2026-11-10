@@ -1,8 +1,8 @@
 {
   "network": "preprod",
-  "contractAddress": "f3083513bae7010e32acac41e3f3dbfdfa0516c6ca80382c5847dd3529cf158e",
-  "deployedAt": "2026-10-23T20:00:44.664Z",
-  "sourceCommit": "2ffbbab6c8f933991d546d2652a314d50f81fd3f",
+  "contractAddress": "eaae909ead81a20f6a8873aec8bdcd0c428424672771991550c483b044a73adb",
+  "deployedAt": "2026-11-09T05:16:47.965Z",
+  "sourceCommit": "9e7203eded399e7abfeb9e80a1500f97efb14b84",
   "compiler": {
     "compiler": "0.31.1",
     "language": "0.23.0",
@@ -10,17 +10,19 @@
   },
   "parameters": {
     "oraclePublicKey": {
-      "x": "27529532667968748056603372703879612308505926628444998694499750979362460766241",
-      "y": "50661387062445323488102493309705488128982534701400847572781234995192670515198"
+      "x": "32993920963106060157182722391396204195876652346556573714871675241262963030490",
+      "y": "2970426460907353687275298249844606722016022192568680380589640846132638876538"
     },
-    "operatorCommitment": "b3c154bc87f682680e310808321833524d9ffc88e6a8f8be732f1ec9de36a696",
+    "operatorCommitment": "89f1a882432db870982f84c6f4fdc5912afdaf2d129428bf990a215a722f58b7",
     "minWindow": "60",
-    "maxWindow": "86400"
+    "maxWindow": "86400",
+    "requestFee": "100000",
+    "collateralPerRequest": "1000000"
   },
   "transactions": {
-    "deploy": "00d1c04125f15c764feac9eea8adf9050525a536771de1b1dea6e3ff7b756c4109",
-    "lockAuthority": "00d1c04125f15c764feac9eea8adf9050525a536771de1b1dea6e3ff7b756c4109",
-    "acceptOracleKey": "00863652bcb9fc1fd51dbca710d210dc319633ac40480ca1df1496a6ca5c6669b4"
+    "deploy": "00524a4e653a2b84b786b4e083f5ab427ec3c592ff4c3fceb7f84ffc2d891f4e84",
+    "lockAuthority": "00524a4e653a2b84b786b4e083f5ab427ec3c592ff4c3fceb7f84ffc2d891f4e84",
+    "acceptOracleKey": "00c68f98738ba93cb2372d30afacf78a2eadeb892e99084cb7845ec8dacdc75f50"
   },
   "maintenanceAuthority": {
     "committeeSize": 0,
@@ -28,13 +30,15 @@
     "counter": "0"
   },
   "verifierKeys": {
-    "acceptOperator": "d151560a2d98896fceaef4cff2ada0925c3b89b39bfce281ad61f7cf67c32df7",
-    "acceptOracleKey": "a319454c17db9759a1178dc1edec34fe9068296aa0499cedd650906849293461",
-    "approveOracleKey": "6f8391382ef7c88fb5a6295ebdb735d15607f087f2d82464a556264aaf5d7aa2",
-    "expire": "1868be4b8c67e7cca62230828c331d6917aa86a5303a4cca2c24258cea3673eb",
-    "fulfil": "05e1555bb1a2c5ef3a1c3edd4a32cf1ab18a3a3e2b0864ad987dfcfb45f78a6d",
-    "proposeOperator": "d9f52236641501109fe6461ff08a7bd295289177c10f18f1a8d2c6d556ece444",
-    "proposeOracleKey": "8d495b3ecd759923b704497a1fd1f1d74675ef5d3b02db44906d00449efd3f26",
-    "request": "e844d86255d62a3f7464fef3f2847fefa0d8cc2a09ee089aba34720a1051353e"
+    "acceptOperator": "52a8515668ce9bf472933718c08aff380c32c678faa7ecfe0b9255894f5c1343",
+    "acceptOracleKey": "3eda94811e667804dd8dfeac221b56e28c2e2b6ae35a29595fbc97b483bcb4f6",
+    "approveOracleKey": "f25de67a42b9fbec09f19b0cf1a5913eaf9cbeb149e869668a3d47dd147053f3",
+    "depositBond": "059bcdd0b3aeafe87b9fbd464ba3bb2f499a8f5eeaa8b1fd9cd61e637d130995",
+    "expire": "e8f321964fb02538d0d1b7c3123fb29e26d9c965e95ec073930960b2ffc5a9d6",
+    "fulfil": "44018392e7c761a0f65dd625cd0641074ef06e633cf2d4d85e0ea615ee4c995c",
+    "proposeOperator": "7a4eaa936c701f48193ab5b31f77e115d509899d2bf6719a03d821d180669778",
+    "proposeOracleKey": "c307f6a68a95832e7c9d5181a914935034fc2743c19d7cc12f2096c6aa84f057",
+    "request": "2399d4de537132cd2b5f6f7a1473e37a7c931fe70e432b36bf7a053299e104bc",
+    "withdrawBond": "382186770c73f25e6d3a69d796de4c5bee5d3b7bf6bad2ee062a7ee6819ad063"
   }
 }
