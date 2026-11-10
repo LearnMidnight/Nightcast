@@ -21,6 +21,8 @@
  * `declareFeesAtDustTime: false`).
  */
 
+import { coreStateOf } from '@midnightntwrk/wallet-sdk/dust/v2';
+
 type Logger = { info(msg: string): void };
 
 export interface DustTimeWallet {
@@ -30,9 +32,32 @@ export interface DustTimeWallet {
   };
 }
 
+type DustLocal = { syncTime?: unknown; params?: { dustGracePeriodSeconds?: unknown } };
+
+/**
+ * The dust part's ledger-level state (the DustLocalState, with `syncTime` and `params`).
+ *
+ * Wallet SDK 2 seals it inside the part's state (only `coreStateOf` from the dust wallet's
+ * v2 entry reads it back, as an Option); SDK 1 had it in the open at `dust.state.state`.
+ * Reading only SDK 1's place left this whole fix off on SDK 2 (10 Nov 2026: draw 3's
+ * numbers step failed "No Dust spend can be dated yet" on every attempt).
+ */
+export const dustLocalOf = (state: unknown, unwrap: (dust: never) => unknown = coreStateOf as never): DustLocal | undefined => {
+  const dust = (state as { dust?: { state?: unknown } } | undefined)?.dust;
+  const open = (dust?.state as { state?: DustLocal } | undefined)?.state;
+  if (open && typeof open === 'object' && 'syncTime' in open) return open;
+  if (!dust?.state) return undefined;
+  try {
+    const core = unwrap(dust as never) as { _tag?: string; value?: { state?: DustLocal } } | undefined;
+    return core?._tag === 'Some' ? core.value?.state : undefined;
+  } catch {
+    return undefined; // not a dust wallet state this SDK can read
+  }
+};
+
 /** The DUST state's time and grace period, if the wallet state has them. */
-export const dustClock = (state: unknown): { syncTime?: Date; graceSecs?: number } => {
-  const local = (state as { dust?: { state?: { state?: { syncTime?: unknown; params?: { dustGracePeriodSeconds?: unknown } } } } })?.dust?.state?.state;
+export const dustClock = (state: unknown, unwrap?: (dust: never) => unknown): { syncTime?: Date; graceSecs?: number } => {
+  const local = dustLocalOf(state, unwrap);
   const t = local?.syncTime;
   const g = local?.params?.dustGracePeriodSeconds;
   return {
@@ -45,8 +70,8 @@ export const dustClock = (state: unknown): { syncTime?: Date; graceSecs?: number
  * The time to declare: the DUST view's syncTime when it is in the past and
  * comfortably inside the grace period, else undefined (library default).
  */
-export const declaredTime = (state: unknown, nowMs: number, marginSecs = 600): Date | undefined => {
-  const { syncTime, graceSecs } = dustClock(state);
+export const declaredTime = (state: unknown, nowMs: number, marginSecs = 600, unwrap?: (dust: never) => unknown): Date | undefined => {
+  const { syncTime, graceSecs } = dustClock(state, unwrap);
   if (!syncTime) return undefined;
   const ageSecs = (nowMs - syncTime.getTime()) / 1000;
   if (ageSecs < 0) return undefined;
