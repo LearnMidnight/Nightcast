@@ -111,6 +111,8 @@ export const runMcp = async (o: {
   /** The open wallet's state stream, for the watchdog (HTTP mode). */
   walletState?: Promise<Subscribable>;
   watchdog?: Watchdog;
+  /** The wallet's address and NIGHT (atoms), once it is open: shown on /health for whoever tops it up. */
+  walletInfo?: () => { address: string; night: string } | undefined;
 }): Promise<number> => {
   const tools = nightcastTools(o.backend, o.limits);
   const limits = { ...DEFAULT_LIMITS, ...o.limits };
@@ -129,6 +131,7 @@ export const runMcp = async (o: {
       contract: o.backend.contractAddress,
       canRequest: o.backend.canRequest && !o.backend.notReady?.(),
       version: MCP_VERSION,
+      ...(o.walletInfo?.() ?? {}),
     }),
   });
   o.logger.info(

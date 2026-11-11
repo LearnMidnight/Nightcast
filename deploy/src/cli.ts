@@ -52,6 +52,7 @@ import {
   type Network,
   NETWORKS,
   nightcastProviders,
+  nightIn,
   openWallet,
   FAUCETS,
   publicEndpoints,
@@ -67,6 +68,8 @@ import { checkRequest } from './check.js';
 import { midnightBackend } from './mcp/backend.js';
 import { type McpMode, RESTART, runMcp, Watchdog } from './mcp/serve.js';
 import { healthOptions, noticingFailures, WalletHealth } from './wallet-health.js';
+import { OracleTally, upkeepConfig, upkeepWanted } from './upkeep.js';
+import { startUpkeep, talking } from './upkeep-run.js';
 import { takeStdout } from './mcp/stdio.js';
 import {
   describeRequest,
@@ -626,11 +629,16 @@ const main = async (argv: string[]): Promise<number> => {
           // A stuck wallet (wallet-health.ts) is fixed by a restart: exit 75 and systemd starts the oracle again.
           const health = new WalletHealth(healthOptions());
           const watch = wallet.wallet.state().subscribe((s) => health.see(s));
-          const logger = noticingFailures(session.logger, (msg) => health.failed(msg));
+          const tally = new OracleTally();
+          const logger = talking(noticingFailures(session.logger, (msg) => health.failed(msg)), (line) => tally.see(line));
           const running = await startOracleService(providers, record.contractAddress, secretKey, logger, {
             pollMs: Number(values.poll) * 1000,
             requesters,
           });
+          const upkeep = upkeepConfig();
+          const stopUpkeep = upkeepWanted(upkeep)
+            ? startUpkeep({ config: upkeep, session, wallet, providers, contractAddress: record.contractAddress, secretKey, oracle: running.oracle, tally })
+            : () => undefined;
           session.logger.info('Press Ctrl+C to stop.');
           let check: NodeJS.Timeout | undefined;
           const code = await new Promise<number>((resolve) => {
@@ -645,6 +653,7 @@ const main = async (argv: string[]): Promise<number> => {
             }, 15_000);
           });
           clearInterval(check);
+          stopUpkeep();
           watch.unsubscribe();
           session.logger.info('Stopping the oracle...');
           await running.stop();
@@ -730,8 +739,22 @@ const main = async (argv: string[]): Promise<number> => {
             watchdog.failed(err);
           },
         });
+        // The wallet's address and NIGHT on /health, so the oracle can top it up when it runs low (upkeep.ts).
+        let walletInfo: { address: string; night: string } | undefined;
+        void wallet
+          .then((w) => {
+            const address = walletAddress(w);
+            w.wallet.state().subscribe((s) => {
+              try {
+                walletInfo = { address, night: String(nightIn(s)) };
+              } catch {
+                // a part that hasn't started yet
+              }
+            });
+          })
+          .catch(() => undefined);
         try {
-          return await runMcp({ backend, mode, logger: session.logger, limits, watchdog, walletState: wallet.then((w) => w.wallet.state()) });
+          return await runMcp({ backend, mode, logger: session.logger, limits, watchdog, walletState: wallet.then((w) => w.wallet.state()), walletInfo: () => walletInfo });
         } finally {
           await wallet.then((w) => w.stop()).catch(() => undefined);
         }
