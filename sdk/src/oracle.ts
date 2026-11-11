@@ -41,6 +41,13 @@ export type OracleOptions = {
    * to answer everyone. Useful against spam, since v0 requests are free.
    */
   requesters?: Iterable<string>;
+  /**
+   * Mark a request this oracle missed as expired once its deadline has passed
+   * (one a tick, retried every 5 minutes), so the requester gets the fee and
+   * the collateral back without having to ask. Off by default; needs a chain
+   * with `expire`.
+   */
+  expireMissed?: boolean;
   /** Clock in seconds; defaults to the chain's clock if it has one, else the local clock. */
   now?: () => Promise<number> | number;
   logger?: OracleLogger;
@@ -53,6 +60,10 @@ export type TickReport = {
 };
 
 type Retry = { failures: number; nextTryAt: number };
+
+/** How long after its deadline a missed request is marked expired, and how long before another try. */
+const EXPIRE_AFTER_SECS = 60;
+const EXPIRE_RETRY_MS = 5 * 60_000;
 
 const hex = (b: Uint8Array): string => Buffer.from(b).toString('hex');
 const silent: OracleLogger = { info() {}, warn() {}, error() {} };
@@ -113,6 +124,8 @@ export class NightcastOracle {
   readonly publicKey: { x: bigint; y: bigint };
   private readonly retries = new Map<string, Retry>();
   private readonly warnedLate = new Set<string>();
+  /** Missed requests this oracle has tried to mark expired, and when to try each again. */
+  private readonly expireTries = new Map<string, number>();
   /** When each pending request was first seen (ms, local clock). */
   private readonly firstSeen = new Map<string, number>();
   /** When each request was last fulfilled successfully (ms, local clock). */
@@ -189,6 +202,23 @@ export class NightcastOracle {
         this.logger.warn(`request ${id} is too close to its deadline (${e.request.deadline}); leaving it to expire`);
       }
       report.skipped.push({ id, reason: 'too close to deadline' });
+    }
+
+    if (this.options.expireMissed && chain.expire) {
+      // A minute past the deadline, so the node's clock agrees it has passed.
+      const passed = BigInt(Math.floor(await this.nowSecs()) - EXPIRE_AFTER_SECS);
+      for (const id of this.expireTries.keys()) if (!late.has(id)) this.expireTries.delete(id);
+      const due = tooLate.find((e) => e.request.deadline <= passed && Date.now() >= (this.expireTries.get(hex(e.id)) ?? 0));
+      if (due) {
+        const id = hex(due.id);
+        this.expireTries.set(id, Date.now() + EXPIRE_RETRY_MS);
+        try {
+          await chain.expire(due.id);
+          this.logger.info(`marked ${id} expired: its fee and collateral go back to the requester`);
+        } catch (err) {
+          this.logger.warn(`could not mark ${id} expired (trying again in ${EXPIRE_RETRY_MS / 60_000} minutes): ${withCauses(err)}`);
+        }
+      }
     }
 
     for (const e of todo) {

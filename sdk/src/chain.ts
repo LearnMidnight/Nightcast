@@ -14,6 +14,8 @@ export interface NightcastChain {
   listRequests(): Promise<RequestEntry[]>;
   /** Submit `fulfil(id)`. Resolves once the transaction is final. */
   fulfil(id: Uint8Array): Promise<void>;
+  /** Submit `expire(id)` for a request whose deadline has passed (anyone may). Resolves once the transaction is final. */
+  expire?(id: Uint8Array): Promise<void>;
   /** Current chain time in seconds (defaults to the local clock). */
   now?(): Promise<number>;
 }
@@ -36,6 +38,10 @@ export class SimulatorChain implements NightcastChain {
     this.sim.fulfil(id, { oracleSecretKey: this.oracleSecretKey });
   }
 
+  async expire(id: Uint8Array): Promise<void> {
+    this.sim.expire(id);
+  }
+
   async now(): Promise<number> {
     return this.sim.now;
   }
@@ -50,7 +56,7 @@ export class SimulatorChain implements NightcastChain {
  * doesn't pin a midnight-js version.
  */
 export interface NightcastCallTx {
-  callTx: { fulfil(id: Uint8Array): Promise<unknown> };
+  callTx: { fulfil(id: Uint8Array): Promise<unknown>; expire?(id: Uint8Array): Promise<unknown> };
 }
 
 /**
@@ -91,6 +97,11 @@ export class MidnightChain implements NightcastChain {
 
   async fulfil(id: Uint8Array): Promise<void> {
     await this.contract.callTx.fulfil(id);
+  }
+
+  async expire(id: Uint8Array): Promise<void> {
+    if (!this.contract.callTx.expire) throw new Error('this contract handle has no expire circuit');
+    await this.contract.callTx.expire(id);
   }
 }
 
