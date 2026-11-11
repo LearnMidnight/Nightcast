@@ -14,9 +14,11 @@
  * The dust wallet (5.x, wallet SDK 2) picks the fewest coins that cover the
  * fee, which is always one, and has no setting for more. This patch adds one:
  * with `NIGHTCAST_DUST_MIN_SPENDS=2` in the environment, once the fee is
- * covered by fewer coins than that, the smallest other coins are added (as
- * long as the wallet has them), and every coin pays at least 1 speck so each
- * is a real spend. Without the variable nothing changes. A wallet with one
+ * covered by fewer coins than that, the largest other coins that hold DUST
+ * are added (as long as the wallet has them), and every coin pays at least 1
+ * speck so each is a real spend. (The first version added the smallest other
+ * coins: an empty one can't pay its speck, and on 11 Nov 2026 three of the
+ * oracle's answers failed that way.) Without the variable nothing changes. A wallet with one
  * DUST coin still pays with one: give it a second NIGHT UTXO registered for
  * DUST (see `NIGHTCAST_REGISTER_NEW_NIGHT` in network.ts).
  *
@@ -48,7 +50,7 @@ const __nightcastMinSpends = () => {
 const __nightcastSpread = (inputs, fee) => {
     if (__nightcastMinSpends() < 2 || inputs.length < 2 || fee < BigInt(inputs.length)) return distributeFeeAcrossInputs(inputs, fee);
     const first = fee - BigInt(inputs.length - 1);
-    if (first > inputs[0].value) return distributeFeeAcrossInputs(inputs, fee);
+    if (first > inputs[0].value || inputs.slice(1).some((input) => input.value < 1n)) return distributeFeeAcrossInputs(inputs, fee);
     return inputs.map((input, i) => ({ ...input, value: i === 0 ? first : 1n }));
 };
 `;
@@ -56,8 +58,9 @@ const __nightcastSpread = (inputs, fee) => {
 export const NEW_BASE_CASE = `        if (deficit <= 0n) {
             ${MARKER}
             const wanted = __nightcastMinSpends();
-            if (inputs.length > 0 && inputs.length < wanted && remaining.length > 0) {
-                const extra = [...remaining].sort((a, b) => (a.value < b.value ? -1 : a.value > b.value ? 1 : 0)).slice(0, wanted - inputs.length);
+            const spare = remaining.filter((coin) => coin.value > 0n);
+            if (inputs.length > 0 && inputs.length < wanted && spare.length > 0) {
+                const extra = [...spare].sort((a, b) => (a.value > b.value ? -1 : a.value < b.value ? 1 : 0)).slice(0, wanted - inputs.length);
                 const nextInputs = EArray.appendAll(inputs, extra);
                 const nextFee = yield* feeWith(nextInputs);
                 const rest = remaining.filter((coin) => !extra.some((taken) => taken.token.nonce === coin.token.nonce));

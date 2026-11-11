@@ -48,9 +48,14 @@ export const startOracleService = async (
     initialPrivateState: { oracleSecretKey: secretKey },
   });
   const chain = new MidnightChain(nightcast, decodedPublicData(providers.publicDataProvider), contractAddress);
+  // `expire` is a small call: on ledger 9 its fee needs two DUST spends (see withTwoDustSpends).
+  const expire = chain.expire.bind(chain);
+  chain.expire = (id) => withTwoDustSpends(() => expire(id));
   const oracle = new NightcastOracle({
     chain,
     secretKey,
+    // The oracle hands back what it owes for a request it missed (NIGHTCAST_EXPIRE_MISSED=0 turns that off).
+    expireMissed: process.env.NIGHTCAST_EXPIRE_MISSED !== '0',
     logger: {
       info: (m) => logger.info(m),
       warn: (m) => logger.warn(m),
@@ -61,6 +66,23 @@ export const startOracleService = async (
   oracle.start();
   logger.info(`Oracle running for ${contractAddress}; polling every ${(options.pollMs ?? 5_000) / 1000}s`);
   return { oracle, stop: () => oracle.stop() };
+};
+
+/**
+ * Run one transaction with its fee paid by two DUST spends where the wallet
+ * has two coins (NIGHTCAST_DUST_MIN_SPENDS=2, patch-dust-two-spends.mjs).
+ * Ledger 9 refuses a small call paid with exactly one spend (1010, custom
+ * error 231). For the small calls only: expire and the bond's deposit and
+ * withdrawal. The setting is the process's, so callers run one at a time.
+ */
+export const withTwoDustSpends = async <T>(run: () => Promise<T>): Promise<T> => {
+  const before = process.env.NIGHTCAST_DUST_MIN_SPENDS;
+  if (before === undefined) process.env.NIGHTCAST_DUST_MIN_SPENDS = '2';
+  try {
+    return await run();
+  } finally {
+    if (before === undefined) delete process.env.NIGHTCAST_DUST_MIN_SPENDS;
+  }
 };
 
 export type SubmittedRequest = { id: Uint8Array; tag: Uint8Array; seed: Uint8Array; deadline: bigint; txId: string };

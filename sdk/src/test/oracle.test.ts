@@ -281,3 +281,48 @@ describe('withCauses', () => {
     expect(withCauses('text')).toBe('text');
   });
 });
+
+describe('a missed request', () => {
+  it('is marked expired by the oracle once its deadline has passed, when asked to', async () => {
+    const { sim, chain, sk } = setup();
+    const logs: string[] = [];
+    const oracle = new NightcastOracle({
+      chain,
+      secretKey: sk,
+      safetyMarginSecs: 30,
+      newRequestDelayMs: 0,
+      expireMissed: true,
+      logger: { info: (m) => logs.push(m), warn: (m) => logs.push(m), error: (m) => logs.push(m) },
+    });
+    const id = sim.request(label('g'), label('missed'), BigInt(sim.now + 100));
+    sim.advance(90); // inside the safety margin: too late to answer
+    await oracle.tick();
+    expect(sim.getLedger().requests.lookup(id).status).toBe(Status.pending);
+    sim.advance(30); // 20 s past the deadline: not yet a minute
+    await oracle.tick();
+    expect(sim.getLedger().requests.lookup(id).status).toBe(Status.pending);
+    sim.advance(60);
+    await oracle.tick();
+    expect(sim.getLedger().requests.lookup(id).status).toBe(Status.expired);
+    expect(logs.some((l) => l.includes(`marked ${hex(id)} expired`))).toBe(true);
+    await oracle.tick(); // nothing left to do
+    expect(logs.filter((l) => l.includes('marked')).length).toBe(1);
+  });
+
+  it('is left alone by default, and a failed try waits before the next', async () => {
+    const { sim, oracle, chain, sk } = setup();
+    const id = sim.request(label('g'), label('left'), BigInt(sim.now + 100));
+    sim.advance(200);
+    await oracle.tick();
+    expect(sim.getLedger().requests.lookup(id).status).toBe(Status.pending);
+
+    let tries = 0;
+    const failing = { listRequests: () => chain.listRequests(), fulfil: (i: Uint8Array) => chain.fulfil(i), now: () => chain.now(), expire: async () => { tries += 1; throw new Error('refused'); } };
+    const logs: string[] = [];
+    const stubborn = new NightcastOracle({ chain: failing, secretKey: sk, newRequestDelayMs: 0, expireMissed: true, logger: { info: () => undefined, warn: (m) => logs.push(m), error: () => undefined } });
+    await stubborn.tick();
+    await stubborn.tick();
+    expect(tries).toBe(1);
+    expect(logs.some((l) => l.includes('could not mark') && l.includes('refused'))).toBe(true);
+  });
+});

@@ -314,6 +314,30 @@ describe('two-DUST-spend option (ledger 9 OutsideTimeToDismiss workaround)', () 
     expect(() => run('--check')).toThrow(); // code it doesn't know: left alone, and --check says so
     expect(read(file, 'utf8')).toBe('something else entirely\n');
   });
+
+  it('adds coins that hold DUST, largest first, and never asks an empty coin for a speck', async () => {
+    const { pathToFileURL } = await import('node:url');
+    const { fileURLToPath } = await import('node:url');
+    const script = fileURLToPath(new URL('../../scripts/patch-dust-two-spends.mjs', import.meta.url));
+    const { HELPERS, NEW_BASE_CASE } = (await import(pathToFileURL(script).href)) as { HELPERS: string; NEW_BASE_CASE: string };
+    expect(NEW_BASE_CASE).toContain('remaining.filter((coin) => coin.value > 0n)');
+    expect(NEW_BASE_CASE).toContain('(a.value > b.value ? -1 : a.value < b.value ? 1 : 0)');
+
+    type Coin = { id: string; value: bigint };
+    const spread = new Function(
+      'process',
+      `const distributeFeeAcrossInputs = (inputs, fee) => inputs.reduce(({ result, remaining }, input) => {
+         const deduction = remaining >= input.value ? input.value : remaining;
+         return { result: [...result, { ...input, value: deduction }], remaining: remaining - deduction };
+       }, { result: [], remaining: fee }).result;
+       ${HELPERS}
+       return __nightcastSpread;`,
+    )({ env: { NIGHTCAST_DUST_MIN_SPENDS: '2' } }) as (inputs: Coin[], fee: bigint) => Coin[];
+    // two coins with DUST: the first pays all but a speck, the second a speck
+    expect(spread([{ id: 'a', value: 500n }, { id: 'b', value: 300n }], 100n)).toEqual([{ id: 'a', value: 99n }, { id: 'b', value: 1n }]);
+    // an empty second coin can't pay a speck: the fee is spread the wallet's own way (nothing from it)
+    expect(spread([{ id: 'a', value: 500n }, { id: 'b', value: 0n }], 100n)).toEqual([{ id: 'a', value: 100n }, { id: 'b', value: 0n }]);
+  });
 });
 
 describe('dust fee-loop patch for other projects', () => {
