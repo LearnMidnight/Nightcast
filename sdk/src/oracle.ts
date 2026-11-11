@@ -169,6 +169,33 @@ export class NightcastOracle {
     return Date.now() / 1000;
   }
 
+  /**
+   * Run `work` between passes, never during one: for another transaction from
+   * the oracle's wallet (a bond deposit, a transfer), which would otherwise
+   * compete with an answer for the same fee coins.
+   */
+  async between<T>(work: () => Promise<T>): Promise<T> {
+    while (this.busy) await this.busy.catch(() => undefined);
+    let out: { value: T } | { error: unknown } | undefined;
+    const idle: TickReport = { fulfilled: [], failed: [], skipped: [] };
+    this.busy = work()
+      .then(
+        (value) => {
+          out = { value };
+        },
+        (error: unknown) => {
+          out = { error };
+        },
+      )
+      .then(() => idle)
+      .finally(() => {
+        this.busy = undefined;
+      });
+    await this.busy;
+    if (out && 'error' in out) throw out.error;
+    return (out as { value: T }).value;
+  }
+
   /** One pass: find work, fulfil it, report. Never runs twice at once. */
   tick(): Promise<TickReport> {
     if (!this.busy) {

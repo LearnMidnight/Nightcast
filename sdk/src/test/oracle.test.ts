@@ -326,3 +326,23 @@ describe('a missed request', () => {
     expect(logs.some((l) => l.includes('could not mark') && l.includes('refused'))).toBe(true);
   });
 });
+
+describe('work between passes', () => {
+  it('runs alone, hands back its result or its error, and lets the next pass run', async () => {
+    const { sim, oracle } = setup();
+    const id = sim.request(label('g'), label('between'), BigInt(sim.now + 600));
+    const order: string[] = [];
+    const work = oracle.between(async () => {
+      order.push('work starts');
+      await new Promise((r) => setTimeout(r, 20));
+      order.push('work ends');
+      return 7;
+    });
+    const tick = oracle.tick().then((r) => order.push(`tick sees ${r.fulfilled.length}`));
+    expect(await work).toBe(7);
+    await tick;
+    expect(order).toEqual(['work starts', 'work ends', 'tick sees 0']); // the pass that overlapped did nothing
+    await expect(oracle.between(() => Promise.reject(new Error('no')))).rejects.toThrow('no');
+    expect((await oracle.tick()).fulfilled).toEqual([hex(id)]);
+  });
+});

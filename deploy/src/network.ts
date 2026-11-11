@@ -26,6 +26,7 @@ import {
   StaticProofServerContainer,
   waitForFunds,
 } from '@midnight-ntwrk/testkit-js';
+import { MidnightBech32m, UnshieldedAddress } from '@midnightntwrk/wallet-sdk-address-format';
 import { Nightcast, type NightcastPrivateState, witnesses } from '@nightcast/contract';
 import { zkConfigPath } from './fingerprints.js';
 import { addressFromSeed, buildWallet } from './wallet.js';
@@ -634,6 +635,29 @@ export const waitForSpendableDust = async (
     clearTimeout(timer);
     status.unsubscribe();
   }
+};
+
+/** The NIGHT (atoms) in a wallet state's unshielded part. */
+export const nightIn = (state: { unshielded: { balances: Record<string, bigint> } }): bigint => state.unshielded.balances[unshieldedToken().raw] ?? 0n;
+
+/**
+ * Send NIGHT from this wallet to an unshielded address (`mn_addr_...`).
+ * Returns the transaction id once the node has taken it.
+ */
+export const sendNight = async (wallet: MidnightWalletProvider, to: string, atoms: bigint, networkId: string): Promise<string> => {
+  const receiverAddress = MidnightBech32m.parse(to.trim()).decode(UnshieldedAddress, networkId as never);
+  const w = wallet.wallet as unknown as {
+    transferTransaction(outputs: unknown[], options: { ttl: Date }): Promise<unknown>;
+    signRecipe(recipe: unknown, sign: (payload: Uint8Array) => Promise<unknown>): Promise<unknown>;
+    finalizeRecipe(recipe: unknown): Promise<unknown>;
+    submitTransaction(tx: unknown): Promise<string>;
+  };
+  const ks = wallet.unshieldedKeystore as unknown as { signDataAsync(p: Uint8Array): Promise<unknown> };
+  const recipe = await w.transferTransaction([{ type: 'unshielded', outputs: [{ amount: atoms, receiverAddress, type: unshieldedToken().raw }] }], {
+    ttl: new Date(Date.now() + TX_TTL_SECONDS * 1000),
+  });
+  const signed = await w.signRecipe(recipe, (payload) => ks.signDataAsync(payload));
+  return w.submitTransaction(await w.finalizeRecipe(signed));
 };
 
 type NightCoin = { utxo: { type: string }; meta: { registeredForDustGeneration?: boolean } };
