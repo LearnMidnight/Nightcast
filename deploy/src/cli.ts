@@ -65,7 +65,8 @@ import { failureText, walletStateFile } from './wallet.js';
 import { currentCommit, type DeploymentRecord, readRecord, recordPath, writeRecord } from './record.js';
 import { checkRequest } from './check.js';
 import { midnightBackend } from './mcp/backend.js';
-import { type McpMode, runMcp, Watchdog } from './mcp/serve.js';
+import { type McpMode, RESTART, runMcp, Watchdog } from './mcp/serve.js';
+import { healthOptions, noticingFailures, WalletHealth } from './wallet-health.js';
 import { takeStdout } from './mcp/stdio.js';
 import {
   describeRequest,
@@ -622,18 +623,32 @@ const main = async (argv: string[]): Promise<number> => {
           const { night, dust } = await walletBalances(wallet);
           session.logger.info(`Wallet ${walletAddress(wallet)}: ${formatNight(night)} NIGHT, ${dust} DUST`);
           const providers = nightcastProviders(session, wallet);
-          const running = await startOracleService(providers, record.contractAddress, secretKey, session.logger, {
+          // A stuck wallet (wallet-health.ts) is fixed by a restart: exit 75 and systemd starts the oracle again.
+          const health = new WalletHealth(healthOptions());
+          const watch = wallet.wallet.state().subscribe((s) => health.see(s));
+          const logger = noticingFailures(session.logger, (msg) => health.failed(msg));
+          const running = await startOracleService(providers, record.contractAddress, secretKey, logger, {
             pollMs: Number(values.poll) * 1000,
             requesters,
           });
           session.logger.info('Press Ctrl+C to stop.');
-          await new Promise<void>((resolve) => {
-            process.once('SIGINT', resolve);
-            process.once('SIGTERM', resolve);
+          let check: NodeJS.Timeout | undefined;
+          const code = await new Promise<number>((resolve) => {
+            process.once('SIGINT', () => resolve(0));
+            process.once('SIGTERM', () => resolve(0));
+            check = setInterval(() => {
+              const why = health.stuck();
+              if (why) {
+                session.logger.error(`Restarting the oracle: ${why}.`);
+                resolve(RESTART);
+              }
+            }, 15_000);
           });
+          clearInterval(check);
+          watch.unsubscribe();
           session.logger.info('Stopping the oracle...');
           await running.stop();
-          return 0;
+          return code;
         } finally {
           await wallet.stop().catch(() => undefined);
         }
@@ -697,7 +712,7 @@ const main = async (argv: string[]): Promise<number> => {
       if (!requesterFile.secret) throw new Error(`${values.requester} has no secret`);
       const secret = fromHex(requesterFile.secret);
       return withSession(network, portArg(values['proof-server-port']), async (session) => {
-        const watchdog = new Watchdog(20);
+        const watchdog = new Watchdog(20, Date.now, healthOptions());
         // Serve straight away; the wallet opens in the background (minutes).
         const wallet = openWallet(session, walletOptions(network, walletSeed(values.wallet)));
         const providers = wallet.then((w) => {

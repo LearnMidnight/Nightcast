@@ -13,7 +13,7 @@ import {
   Status,
 } from '@nightcast/contract';
 import { SimulatorChain } from '../chain.js';
-import { NightcastOracle, selectWork } from '../oracle.js';
+import { NightcastOracle, selectWork, withCauses } from '../oracle.js';
 import { generateSecret } from '../keygen.js';
 import { uniformInt } from '../derive.js';
 
@@ -266,5 +266,18 @@ describe('uniformInt bounds', () => {
   it('rejects ranges it cannot sample', () => {
     expect(() => uniformInt(new Uint8Array(32), (1n << 256n) + 1n)).toThrow();
     expect(() => uniformInt(new Uint8Array(32), 0n)).toThrow();
+  });
+});
+
+describe('withCauses', () => {
+  it("adds the reasons under Midnight.js's step failure", () => {
+    const err = Object.assign(new Error("balanceTx rejected the transaction (circuit 'fulfil'). The provider's own failure is on `cause`"), {
+      cause: Object.assign(new Error('Wallet.InsufficientFunds: Insufficient funds'), { cause: new Error('Insufficient funds') }),
+    });
+    expect(withCauses(err)).toBe("balanceTx rejected the transaction (circuit 'fulfil'). The provider's own failure is on `cause` <- Wallet.InsufficientFunds: Insufficient funds");
+  });
+  it('leaves a plain error alone', () => {
+    expect(withCauses(new Error('no'))).toBe('no');
+    expect(withCauses('text')).toBe('text');
   });
 });

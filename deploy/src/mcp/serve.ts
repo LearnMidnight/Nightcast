@@ -10,8 +10,8 @@
  * WebSocket (Preprod, via Blockfrost, every few hours): its fees are then
  * refused (node error 1010, custom 170) until a restart. So in HTTP mode the
  * server exits with code 75 (for systemd to restart it) when the wallet's sync
- * hasn't moved for `stallMinutes`, or after three requests in a row fail
- * with 170.
+ * hasn't moved for `stallMinutes`, after three requests in a row fail
+ * with 170, or when its DUST coins are stuck as booked (wallet-health.ts).
  */
 import type { Server } from 'node:http';
 import { inspect } from 'node:util';
@@ -20,6 +20,7 @@ import { serveHttp } from './http.js';
 import type { ServerInfo } from './rpc.js';
 import { serveStdio } from './stdio.js';
 import { DEFAULT_LIMITS, INSTRUCTIONS, type Limits, MCP_VERSION, nightcastTools, type RandomnessBackend } from './tools.js';
+import { type HealthOptions, WalletHealth } from '../wallet-health.js';
 
 export const SERVER_INFO: ServerInfo = { name: 'nightcast', title: 'Nightcast: verifiable randomness', version: MCP_VERSION };
 
@@ -62,14 +63,20 @@ export class Watchdog {
   private staleInARow = 0;
   restartFor?: string;
 
+  /** Only when asked for (the HTTP server's wallet): restarts for coins stuck as booked, wallet-health.ts. */
+  private readonly health?: WalletHealth;
+
   constructor(
     private readonly stallMinutes: number,
     private readonly clock: () => number = Date.now,
+    health?: HealthOptions,
   ) {
     this.movedAt = clock();
+    if (health) this.health = new WalletHealth(health, clock);
   }
 
   see(state: unknown): void {
+    this.health?.see(state);
     const p = positionsOf(state);
     if (p !== this.positions) {
       this.positions = p;
@@ -82,6 +89,7 @@ export class Watchdog {
   }
 
   failed(err: unknown): void {
+    this.health?.failed(err);
     if (isStaleFee(err)) this.staleInARow += 1;
     if (this.staleInARow >= 3) this.restartFor ??= 'three requests in a row were refused for a stale fee (node error 170)';
   }
@@ -90,6 +98,7 @@ export class Watchdog {
   check(): string | undefined {
     const stalled = (this.clock() - this.movedAt) / 60_000;
     if (this.positions !== '' && stalled >= this.stallMinutes) this.restartFor ??= `the wallet's sync hasn't moved for ${Math.floor(stalled)} minutes`;
+    this.restartFor ??= this.health?.stuck();
     return this.restartFor;
   }
 }

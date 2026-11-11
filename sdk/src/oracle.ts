@@ -95,6 +95,20 @@ export const selectWork = (
  * request's stored point. Its only power is to answer or not, which is why
  * requests carry deadlines and anyone can `expire` a missed one.
  */
+
+/**
+ * An error's message followed by its causes' (`message <- cause <- cause`).
+ * Midnight.js reports a failed step as "balanceTx rejected the transaction
+ * ... The provider's own failure is on `cause`"; the reason is in the causes
+ * (redacted by Midnight.js of transaction and witness material).
+ */
+export const withCauses = (err: unknown, depth = 0): string => {
+  if (err === undefined || err === null || depth > 6) return '';
+  const message = err instanceof Error ? err.message : String(err);
+  const cause = typeof err === 'object' && 'cause' in err ? withCauses((err as { cause?: unknown }).cause, depth + 1) : '';
+  return cause && !message.includes(cause) ? `${message} <- ${cause}` : message;
+};
+
 export class NightcastOracle {
   readonly publicKey: { x: bigint; y: bigint };
   private readonly retries = new Map<string, Retry>();
@@ -207,7 +221,7 @@ export class NightcastOracle {
         report.fulfilled.push(id);
         this.logger.info(`fulfilled ${id} -> ${hex(this.expectedOutput(e))}`);
       } catch (err) {
-        const message = err instanceof Error ? err.message : String(err);
+        const message = withCauses(err);
         const failures = (retry?.failures ?? 0) + 1;
         const delay = Math.min(backoffMs * 2 ** (failures - 1), maxBackoffMs);
         this.retries.set(id, { failures, nextTryAt: Date.now() + delay });
