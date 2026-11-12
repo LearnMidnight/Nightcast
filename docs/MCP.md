@@ -105,4 +105,4 @@ To make requests too, add a wallet with tNIGHT and a requester secret:
 
 ## Payment (later)
 
-Issue #39 suggests charging the caller per request (x402). The contract has had request fees since v1, paid by the server's wallet; passing that cost on to the agent waits for a way to pay on Midnight. For now a hosted server is free to call and limited by the counts above.
+Issue [#56](https://github.com/LearnMidnight/Nightcast/issues/56) suggests charging the caller per request (x402). The contract has had request fees since v1, paid by the server's wallet; passing that cost on to the agent waits for a way to pay on Midnight. For now a hosted server is free to call and limited by the counts above.
