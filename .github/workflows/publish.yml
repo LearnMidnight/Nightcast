@@ -108,8 +108,18 @@ jobs:
           set -o pipefail
           flags="--access public --provenance"
           if [ "${{ inputs.dry_run }}" = "true" ]; then flags="$flags --dry-run"; fi
-          npm stage publish -w @nightcast/contract $flags | tee stage-contract.txt
-          npm stage publish -w @nightcast/sdk $flags | tee stage-sdk.txt
+          # When npm refuses, say why: its log records how the trusted-publishing exchange went
+          # ("need auth" alone doesn't say whether npmjs.com has no trusted publisher for the package,
+          # or one that names another repository or workflow).
+          stage() {
+            npm stage publish -w "$1" $flags | tee "$2" && return 0
+            echo "::error title=$1::npm refused it. What npm's log says about trusted publishing (nothing below means it never tried):"
+            grep -h -i "oidc" "$HOME"/.npm/_logs/*-debug-0.log | sed -E 's/^[0-9]+ //' | tail -12 || true
+            echo "Check on npmjs.com: the package's Settings, Trusted Publisher: GitHub Actions, ${{ github.repository_owner }}, ${{ github.event.repository.name }}, publish.yml, no environment."
+            return 1
+          }
+          stage @nightcast/contract stage-contract.txt
+          stage @nightcast/sdk stage-sdk.txt
           if [ "${{ inputs.dry_run }}" != "true" ]; then
             echo "::notice title=Staged::Approve on npmjs.com → Staged Packages (contract first, then sdk), or: npm stage approve <id>"
           fi
