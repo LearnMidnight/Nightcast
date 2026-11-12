@@ -110,7 +110,7 @@ jobs:
             const fs = require("fs");
             const p = JSON.parse(fs.readFileSync("package.json", "utf8"));
             const packs = process.argv[1];
-            // whatever version was just packed, so a release doesn't have to edit this
+            // whatever version was just packed, so a release needs no edit here
             const packed = (prefix) => `file:${packs}/${fs.readdirSync(packs).find((f) => f.startsWith(prefix) && f.endsWith(".tgz"))}`;
             const c = packed("nightcast-contract-"), s = packed("nightcast-sdk-");
             p.dependencies = { "@nightcast/contract": c, "@nightcast/sdk": s };
