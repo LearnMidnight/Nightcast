@@ -13,13 +13,21 @@
  *   when the wallet behind that MCP server's /health (LunaSpin's) holds less
  *   than NIGHTCAST_TOPUP_BELOW NIGHT (default 1000), send it
  *   NIGHTCAST_TOPUP_AMOUNT (default 2000). The address must be the one
- *   /health reports, so a wrong URL can't redirect the money.
+ *   /health reports, so a wrong URL can't redirect the money. It must read
+ *   low on every look for 10 minutes first: one low reading can be a coin in
+ *   flight (a wallet with one big coin shows 0 while a request of its is
+ *   landing), which sent 2,000 NIGHT that wasn't needed on 12 Nov 2026.
  * - NIGHTCAST_WALLET_FLOOR=<NIGHT> (default 2000): the oracle's wallet never
  *   goes below this for either (its NIGHT is what makes its DUST).
  * - NIGHTCAST_STATUS_FILE=<path>: a JSON file rewritten each pass, for the
- *   monitor: balances, the bond, misses and what upkeep did.
+ *   monitor: balances, the bond, misses, what upkeep did and the day's
+ *   Blockfrost requests.
+ * - NIGHTCAST_UPKEEP_READ_SECS=<seconds> (default 300): how often a pass
+ *   reads the contract (the bond). Each read is a Blockfrost request on
+ *   Preprod; the passes in between use the last one.
  */
 import { renameSync, writeFileSync } from 'node:fs';
+import type { Usage } from './blockfrost-meter.js';
 
 const NIGHT = 1_000_000n;
 
@@ -28,6 +36,8 @@ export type UpkeepConfig = {
   walletFloor: bigint;
   topUp?: { address: string; healthUrl: string; below: bigint; amount: bigint };
   statusFile?: string;
+  /** How often to read the contract (ms). */
+  readEveryMs: number;
 };
 
 const nightOf = (v: string | undefined, fallback: bigint): bigint => {
@@ -48,6 +58,7 @@ export const upkeepConfig = (env: NodeJS.ProcessEnv = process.env): UpkeepConfig
         ? { address, healthUrl, below: nightOf(env.NIGHTCAST_TOPUP_BELOW, 1_000n * NIGHT), amount: nightOf(env.NIGHTCAST_TOPUP_AMOUNT, 2_000n * NIGHT) }
         : undefined,
     statusFile: env.NIGHTCAST_STATUS_FILE?.trim() || undefined,
+    readEveryMs: /^\d{1,6}$/.test(env.NIGHTCAST_UPKEEP_READ_SECS ?? '') ? Math.max(Number(env.NIGHTCAST_UPKEEP_READ_SECS), 30) * 1000 : 300_000,
   };
 };
 
@@ -67,11 +78,35 @@ export const bondShortfall = (o: { free: bigint; held: bigint; target?: bigint; 
 /** What /health of the served MCP server says about its wallet. */
 export type ServedWallet = { address?: string; night?: string };
 
-/** NIGHT atoms to send the served wallet now; 0 if it has enough, isn't the address we were told, or we can't spare it. */
-export const topUpDue = (o: { served: ServedWallet | undefined; config: UpkeepConfig['topUp']; night: bigint; floor: bigint }): bigint => {
+/** Whether the served wallet reads low: it is the address we were told, with a balance below the mark. */
+export const readsLow = (served: ServedWallet | undefined, c: UpkeepConfig['topUp']): boolean =>
+  !!c && !!served && served.address === c.address && /^\d+$/.test(served.night ?? '') && BigInt(served.night as string) < c.below;
+
+/** How long the served wallet must read low, on every look, before it is topped up. */
+export const TOPUP_LOW_FOR_MS = 10 * 60_000;
+
+/** Follows the readings: for how long the served wallet has read low without a break. */
+export class LowWatch {
+  private since?: number;
+  constructor(private readonly clock: () => number = Date.now) {}
+  /** Note a reading (true: low; false: not low, or not readable). Returns the ms it has now read low in a row. */
+  see(low: boolean): number {
+    if (!low) {
+      this.since = undefined;
+      return 0;
+    }
+    this.since ??= this.clock();
+    return this.clock() - this.since;
+  }
+}
+
+/**
+ * NIGHT atoms to send the served wallet now; 0 if it has enough, isn't the
+ * address we were told, hasn't read low for long enough, or we can't spare it.
+ */
+export const topUpDue = (o: { served: ServedWallet | undefined; config: UpkeepConfig['topUp']; night: bigint; floor: bigint; lowForMs: number }): bigint => {
   const c = o.config;
-  if (!c || !o.served || o.served.address !== c.address || !/^\d+$/.test(o.served.night ?? '')) return 0n;
-  if (BigInt(o.served.night as string) >= c.below) return 0n;
+  if (!c || !readsLow(o.served, c) || o.lowForMs < TOPUP_LOW_FOR_MS) return 0n;
   return o.night - c.amount >= o.floor ? c.amount : 0n;
 };
 
@@ -86,6 +121,8 @@ export type UpkeepStatus = {
   lastMissedAt?: string;
   lastDeposit?: { at: string; slots: string; ok: boolean; note?: string };
   lastTopUp?: { at: string; night: string; ok: boolean; note?: string };
+  /** The day's requests to Blockfrost from the oracle's process (blockfrost-meter.ts). */
+  blockfrost?: Usage;
 };
 
 /** Write the status file in one step (a reader never sees half of it). */

@@ -33,7 +33,7 @@
   "scripts": {
     "build": "rm -rf dist && tsc -p tsconfig.build.json && chmod +x dist/cli.js",
     "typecheck": "tsc -p tsconfig.json --noEmit",
-    "test": "vitest run src/test/offline.test.ts src/test/mcp.test.ts src/test/dust-time.test.ts src/test/explain-refusal.test.ts src/test/wallet-health.test.ts src/test/upkeep.test.ts",
+    "test": "vitest run src/test/offline.test.ts src/test/mcp.test.ts src/test/dust-time.test.ts src/test/explain-refusal.test.ts src/test/wallet-health.test.ts src/test/upkeep.test.ts src/test/blockfrost-meter.test.ts",
     "test:e2e": "NIGHTCAST_E2E=1 vitest run src/test/e2e.test.ts"
   },
   "dependencies": {

@@ -2,14 +2,14 @@ import { mkdtempSync, readFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
-import { bondShortfall, OracleTally, Pace, topUpDue, upkeepConfig, upkeepWanted, writeStatus } from '../upkeep.js';
+import { bondShortfall, LowWatch, OracleTally, Pace, readsLow, TOPUP_LOW_FOR_MS, topUpDue, upkeepConfig, upkeepWanted, writeStatus } from '../upkeep.js';
 
 const N = 1_000_000n;
 
 describe('upkeep settings', () => {
   it('is off unless asked for', () => {
     const c = upkeepConfig({});
-    expect(c).toEqual({ bondTarget: undefined, walletFloor: 2_000n * N, topUp: undefined, statusFile: undefined });
+    expect(c).toEqual({ bondTarget: undefined, walletFloor: 2_000n * N, topUp: undefined, statusFile: undefined, readEveryMs: 300_000 });
     expect(upkeepWanted(c)).toBe(false);
   });
   it('reads the bond target, the top-up and the floor', () => {
@@ -29,6 +29,9 @@ describe('upkeep settings', () => {
     expect(upkeepConfig({ NIGHTCAST_BOND_TARGET: '0' }).bondTarget).toBeUndefined();
     expect(upkeepConfig({ NIGHTCAST_BOND_TARGET: 'lots' }).bondTarget).toBeUndefined();
     expect(upkeepConfig({ NIGHTCAST_TOPUP_ADDRESS: 'mn_addr_preprod1abc' }).topUp).toBeUndefined(); // needs the health URL too
+    expect(upkeepConfig({ NIGHTCAST_UPKEEP_READ_SECS: '120' }).readEveryMs).toBe(120_000);
+    expect(upkeepConfig({ NIGHTCAST_UPKEEP_READ_SECS: '5' }).readEveryMs).toBe(30_000); // never faster than every 30 s
+    expect(upkeepConfig({ NIGHTCAST_UPKEEP_READ_SECS: 'often' }).readEveryMs).toBe(300_000);
   });
 });
 
@@ -50,7 +53,7 @@ describe('the bond refill', () => {
 
 describe('the top-up of the served wallet', () => {
   const config = { address: 'mn_addr_preprod1spin', healthUrl: 'http://127.0.0.1:6350/health', below: 1_000n * N, amount: 2_000n * N };
-  const ours = { night: 5_950n * N, floor: 2_000n * N };
+  const ours = { night: 5_950n * N, floor: 2_000n * N, lowForMs: TOPUP_LOW_FOR_MS };
   it('sends when the served wallet is low', () => {
     expect(topUpDue({ ...ours, config, served: { address: 'mn_addr_preprod1spin', night: String(999n * N) } })).toBe(2_000n * N);
     expect(topUpDue({ ...ours, config, served: { address: 'mn_addr_preprod1spin', night: String(1_000n * N) } })).toBe(0n);
@@ -60,7 +63,32 @@ describe('the top-up of the served wallet', () => {
     expect(topUpDue({ ...ours, config, served: undefined })).toBe(0n);
     expect(topUpDue({ ...ours, config, served: { address: 'mn_addr_preprod1spin' } })).toBe(0n);
     expect(topUpDue({ ...ours, config: undefined, served: { address: 'mn_addr_preprod1spin', night: '0' } })).toBe(0n);
-    expect(topUpDue({ night: 3_999n * N, floor: 2_000n * N, config, served: { address: 'mn_addr_preprod1spin', night: '0' } })).toBe(0n);
+    expect(topUpDue({ night: 3_999n * N, floor: 2_000n * N, lowForMs: TOPUP_LOW_FOR_MS, config, served: { address: 'mn_addr_preprod1spin', night: '0' } })).toBe(0n);
+  });
+  it('waits until the wallet has read low for 10 minutes on end (12 Nov 2026: one reading of 0 mid-request sent 2,000)', () => {
+    const served = { address: 'mn_addr_preprod1spin', night: '0' };
+    expect(topUpDue({ ...ours, config, served, lowForMs: 0 })).toBe(0n);
+    expect(topUpDue({ ...ours, config, served, lowForMs: TOPUP_LOW_FOR_MS - 1 })).toBe(0n);
+    expect(topUpDue({ ...ours, config, served, lowForMs: TOPUP_LOW_FOR_MS })).toBe(2_000n * N);
+
+    let now = 0;
+    const watch = new LowWatch(() => now);
+    const low = readsLow(served, config);
+    expect(low).toBe(true);
+    expect(watch.see(low)).toBe(0);
+    now = 9 * 60_000;
+    expect(watch.see(low)).toBe(9 * 60_000);
+    // one good reading (the coin's change came back) starts the count again
+    now = 9.5 * 60_000;
+    expect(watch.see(readsLow({ address: 'mn_addr_preprod1spin', night: String(9_999n * N) }, config))).toBe(0);
+    now = 10 * 60_000;
+    expect(watch.see(low)).toBe(0);
+    now = 20 * 60_000;
+    expect(watch.see(low)).toBe(TOPUP_LOW_FOR_MS);
+    // a reading that can't be had is not "low"
+    expect(readsLow(undefined, config)).toBe(false);
+    expect(readsLow({ address: 'mn_addr_preprod1spin' }, config)).toBe(false);
+    expect(readsLow({ address: 'mn_addr_preprod1other', night: '0' }, config)).toBe(false);
   });
 });
 
