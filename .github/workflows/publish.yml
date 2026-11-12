@@ -83,16 +83,26 @@ jobs:
           npm pack -w @nightcast/contract -w @nightcast/sdk --dry-run --json > pack.json
           node scripts/check-pack.mjs pack.json
 
-      - name: Versions not on npm yet
+      # A package whose version is already public is left out, so a release that got halfway (the
+      # contract approved, the SDK refused: 13 Nov 2026) can be finished by running this again.
+      - name: Which versions are not on npm yet
+        id: todo
         run: |
+          todo=""
           for p in contract sdk; do
             name=$(node -p "require('./$p/package.json').name"); version=$(node -p "require('./$p/package.json').version")
             if npm view "$name@$version" version > /dev/null 2>&1; then
-              echo "::error title=$name::$version is already on npm: raise the version in $p/package.json (and sdk's dependency on the contract) first"
-              exit 1
+              echo "::notice title=$name::$version is already on npm: leaving it out"
+            else
+              echo "::notice title=$name::will publish $version"
+              todo="$todo $name"
             fi
-            echo "::notice title=$name::will publish $version"
           done
+          if [ -z "$todo" ]; then
+            echo "::error::Both versions are already on npm: raise the versions in contract/package.json and sdk/package.json (and sdk's dependency on the contract) first"
+            exit 1
+          fi
+          echo "packages=$todo" >> "$GITHUB_OUTPUT"
 
       # Stages both versions for approval; nothing is public until an owner
       # approves them with 2FA. Approve the contract before the SDK (the SDK
@@ -108,8 +118,20 @@ jobs:
           set -o pipefail
           flags="--access public --provenance"
           if [ "${{ inputs.dry_run }}" = "true" ]; then flags="$flags --dry-run"; fi
-          npm stage publish -w @nightcast/contract $flags | tee stage-contract.txt
-          npm stage publish -w @nightcast/sdk $flags | tee stage-sdk.txt
+          # When npm refuses, say why: its log records how the trusted-publishing exchange went
+          # ("need auth" alone doesn't say whether npmjs.com has no trusted publisher for the package,
+          # or one that names another repository or workflow).
+          stage() {
+            npm stage publish -w "$1" $flags | tee "$2" && return 0
+            echo "::error title=$1::npm refused it. What npm's log says about trusted publishing (nothing below means it never tried):"
+            grep -h -i "oidc" "$HOME"/.npm/_logs/*-debug-0.log | sed -E 's/^[0-9]+ //' | tail -12 || true
+            echo "Check on npmjs.com: the package's Settings, Trusted Publisher: GitHub Actions, ${{ github.repository_owner }}, ${{ github.event.repository.name }}, publish.yml, no environment."
+            return 1
+          }
+          # the contract before the SDK, which depends on it
+          for name in ${{ steps.todo.outputs.packages }}; do
+            stage "$name" "stage-${name#@nightcast/}.txt"
+          done
           if [ "${{ inputs.dry_run }}" != "true" ]; then
             echo "::notice title=Staged::Approve on npmjs.com → Staged Packages (contract first, then sdk), or: npm stage approve <id>"
           fi
