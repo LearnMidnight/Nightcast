@@ -113,6 +113,10 @@ export const runMcp = async (o: {
   watchdog?: Watchdog;
   /** The wallet's address and NIGHT (atoms), once it is open: shown on /health for whoever tops it up. */
   walletInfo?: () => { address: string; night: string } | undefined;
+  /** Another reason to exit for a restart (Blockfrost refusing the project: blockfrost-meter.ts). */
+  restartWhen?: () => string | undefined;
+  /** Today's Blockfrost request counts, shown on /health. */
+  usage?: () => unknown;
 }): Promise<number> => {
   const tools = nightcastTools(o.backend, o.limits);
   const limits = { ...DEFAULT_LIMITS, ...o.limits };
@@ -133,6 +137,7 @@ export const runMcp = async (o: {
       canRequest: o.backend.canRequest && !o.backend.notReady?.(),
       version: MCP_VERSION,
       ...(o.walletInfo?.() ?? {}),
+      ...(o.usage ? { blockfrost: o.usage() } : {}),
     }),
   });
   o.logger.info(
@@ -145,7 +150,7 @@ export const runMcp = async (o: {
   }, () => undefined);
   const code = await new Promise<number>((resolve) => {
     const timer = setInterval(() => {
-      const why = o.watchdog?.check();
+      const why = o.restartWhen?.() ?? o.watchdog?.check();
       if (why) {
         o.logger.error(`Restarting: ${why} (exit ${RESTART}; the service manager starts it again, which resyncs the wallet).`);
         clearInterval(timer);

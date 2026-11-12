@@ -67,6 +67,7 @@ const dockerDir = resolve(dirname(fileURLToPath(import.meta.url)), '..', 'docker
 
 import { type DustTimeWallet, declareFeesAtDustTime } from './dust-time.js';
 import { type RefusalWallet, explainRefusals } from './explain-refusal.js';
+import { blockfrostGate, installMeter, reportUsage } from './blockfrost-meter.js';
 import { redact } from './redact-output.js';
 export { redact };
 
@@ -244,6 +245,22 @@ const answers = async (
   }
 };
 
+/** The HTTP status the indexer gives one small question; undefined if it doesn't answer. */
+const indexerStatus = async (indexer: string): Promise<number | undefined> => {
+  try {
+    const res = await fetch(indexer, {
+      method: 'POST',
+      body: '{"query":"{ __typename }"}',
+      headers: { 'content-type': 'application/json' },
+      signal: AbortSignal.timeout(20_000),
+    });
+    await res.body?.cancel().catch(() => undefined);
+    return res.status;
+  } catch {
+    return undefined;
+  }
+};
+
 const withPath = (base: string, path: string): string => new URL(path, new URL(base).origin).toString();
 
 type WsLike = {
@@ -325,10 +342,22 @@ export const probeIndexerWebSocket = (url: string, timeoutMs = 20_000): Promise<
  */
 export const connect = async (
   network: Network,
-  opts: { proofServerPort?: number; proofServerUrl?: string; logger?: Logger; projectId?: string } = {},
+  opts: {
+    proofServerPort?: number;
+    proofServerUrl?: string;
+    logger?: Logger;
+    projectId?: string;
+    /**
+     * A service: if Blockfrost refuses the project for its request limit, wait
+     * here (asking again every 15 minutes) instead of failing. See blockfrost-meter.ts.
+     */
+    waitForBlockfrost?: boolean;
+  } = {},
 ): Promise<Session> => {
   const logger = opts.logger ?? createLogger();
   const webSocket = installWebSocket();
+  installMeter(WsWebSocket);
+  reportUsage(logger);
   setContainersConfiguration({
     ...defaultContainersConfiguration,
     proofServer: { ...defaultContainersConfiguration.proofServer, path: dockerDir, fileName: 'proof-server.yml' },
@@ -342,6 +371,7 @@ export const connect = async (
   }
 
   const base = publicEndpoints(network, logger, opts.projectId);
+  if (BLOCKFROST[network]) await blockfrostGate({ probe: () => indexerStatus(base.indexer), logger, wait: opts.waitForBlockfrost === true });
   const remote = opts.proofServerUrl?.replace(/\/+$/, '');
   if (remote !== undefined && !/^https?:\/\/[^\s/]+/.test(remote)) throw new Error(`not a prover address: ${opts.proofServerUrl}`);
   logger.info(
@@ -639,6 +669,22 @@ export const waitForSpendableDust = async (
 
 /** The NIGHT (atoms) in a wallet state's unshielded part. */
 export const nightIn = (state: { unshielded: { balances: Record<string, bigint> } }): bigint => state.unshielded.balances[unshieldedToken().raw] ?? 0n;
+
+/**
+ * The NIGHT (atoms) a wallet is in the middle of spending: coins booked for a
+ * transaction that hasn't landed yet. While one is in flight the balance above
+ * drops by the whole coin (a wallet with one 10,000 NIGHT coin shows 0 until
+ * its change comes back), so anything judging "is this wallet low?" adds this.
+ */
+export const pendingNightIn = (state: { unshielded: unknown }): bigint => {
+  try {
+    const raw = unshieldedToken().raw;
+    const pending = (state.unshielded as { pendingCoins?: readonly { utxo?: { type?: string; value?: bigint } }[] }).pendingCoins ?? [];
+    return pending.reduce((sum, c) => (c.utxo?.type === raw && typeof c.utxo.value === 'bigint' ? sum + c.utxo.value : sum), 0n);
+  } catch {
+    return 0n;
+  }
+};
 
 /**
  * Send NIGHT from this wallet to an unshielded address (`mn_addr_...`).

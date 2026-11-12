@@ -46,3 +46,17 @@ export {
 } from './fingerprints.js';
 export { addressFromSeed, forgetWalletState, keyCacheDir, walletStateFile } from './wallet.js';
 export { redact } from './redact-output.js';
+export {
+  blockfrostGate,
+  BlockfrostMeter,
+  installMeter,
+  isOverLimit,
+  meter,
+  overLimitReason,
+  overLimitText,
+  readUsage,
+  reportUsage,
+  type Usage,
+  type UsageCounts,
+  usageLine,
+} from './blockfrost-meter.js';

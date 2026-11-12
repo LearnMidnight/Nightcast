@@ -53,6 +53,7 @@ import {
   NETWORKS,
   nightcastProviders,
   nightIn,
+  pendingNightIn,
   openWallet,
   FAUCETS,
   publicEndpoints,
@@ -68,6 +69,7 @@ import { checkRequest } from './check.js';
 import { midnightBackend } from './mcp/backend.js';
 import { type McpMode, RESTART, runMcp, Watchdog } from './mcp/serve.js';
 import { healthOptions, noticingFailures, WalletHealth } from './wallet-health.js';
+import { meter, overLimitReason } from './blockfrost-meter.js';
 import { OracleTally, upkeepConfig, upkeepWanted } from './upkeep.js';
 import { startUpkeep, talking } from './upkeep-run.js';
 import { takeStdout } from './mcp/stdio.js';
@@ -96,7 +98,7 @@ const USAGE = `usage:
   ./nightcast wallet show  --network <network> --wallet <file> [--proof-server-port <port>]
   ./nightcast wallet forget --network <network> --wallet <file>
                            (set aside the wallet's saved sync state, so the next command syncs it from the start)
-  ./nightcast oracle       --network <network> --oracle <oracle secret file> --wallet <file> [--requesters <hex,...>] [--poll 5] [--proof-server-port <port>]
+  ./nightcast oracle       --network <network> --oracle <oracle secret file> --wallet <file> [--requesters <hex,...>] [--poll <seconds>] [--proof-server-port <port>]
   ./nightcast request      --network <network> --requester <requester secret file> --wallet <file> [--tag <text>] [--seed <64 hex>] [--deadline-mins 30] [--wait] [--proof-server-port <port>]
   ./nightcast status       --network <network> --id <request id>
   ./nightcast check        --network <network> --id <request id> [--tag <text> --seed <hex>]
@@ -242,11 +244,30 @@ const networkArg = (value: string | undefined): Network => {
 
 const portArg = (value: string | undefined): number | undefined => (value ? Number.parseInt(value, 10) : undefined);
 
-const withSession = async <T>(network: Network, proofServerPort: number | undefined, run: (s: Session) => Promise<T>) => {
-  const session = await connect(network, { proofServerPort, projectId: projectIdFor(network) });
+const withSession = async <T>(
+  network: Network,
+  proofServerPort: number | undefined,
+  run: (s: Session) => Promise<T>,
+  /** A long-running service waits out a Blockfrost refusal (over its request limit) instead of failing. */
+  opts: { service?: boolean } = {},
+) => {
+  const session = await connect(network, { proofServerPort, projectId: projectIdFor(network), waitForBlockfrost: opts.service === true });
+  // A service that Blockfrost starts refusing must not sit there knocking (a wallet mid-sync would, for ever):
+  // after five minutes of refusals it exits for a restart, and the new process waits at connect's gate.
+  // The services' own checks get there first (two minutes) where they can stop cleanly.
+  const guard = opts.service
+    ? setInterval(() => {
+        const refused = overLimitReason(meter, Date.now(), 5 * 60_000);
+        if (!refused) return;
+        process.stderr.write(`Stopping to wait: ${refused}.\n`);
+        process.exit(RESTART);
+      }, 30_000)
+    : undefined;
+  guard?.unref();
   try {
     return await run(session);
   } finally {
+    clearInterval(guard);
     await session.shutdown().catch((e) => session.logger.warn(`shutdown: ${e}`));
   }
 };
@@ -327,7 +348,7 @@ const main = async (argv: string[]): Promise<number> => {
       wallet: { type: 'string' },
       requester: { type: 'string' },
       requesters: { type: 'string' },
-      poll: { type: 'string', default: '5' },
+      poll: { type: 'string' },
       tag: { type: 'string' },
       seed: { type: 'string' },
       'deadline-mins': { type: 'string', default: '30' },
@@ -631,8 +652,13 @@ const main = async (argv: string[]): Promise<number> => {
           const watch = wallet.wallet.state().subscribe((s) => health.see(s));
           const tally = new OracleTally();
           const logger = talking(noticingFailures(session.logger, (msg) => health.failed(msg)), (line) => tally.see(line));
+          // Every look is a Blockfrost request on Preprod (17,280 a day at 5 s): look every 15 s there
+          // while nothing is waiting, and every 5 s while a request is.
+          const pollSecs = values.poll !== undefined ? Number(values.poll) : BLOCKFROST[network] ? 15 : 5;
+          if (!(pollSecs >= 1)) throw new Error('--poll must be a number of seconds, 1 or more');
           const running = await startOracleService(providers, record.contractAddress, secretKey, logger, {
-            pollMs: Number(values.poll) * 1000,
+            pollMs: pollSecs * 1000,
+            busyPollMs: Math.min(pollSecs, 5) * 1000,
             requesters,
           });
           const upkeep = upkeepConfig();
@@ -646,7 +672,11 @@ const main = async (argv: string[]): Promise<number> => {
             process.once('SIGTERM', () => resolve(0));
             check = setInterval(() => {
               const why = health.stuck();
-              if (why) {
+              const refused = overLimitReason();
+              if (refused) {
+                session.logger.error(`Stopping the oracle to wait: ${refused}.`);
+                resolve(RESTART);
+              } else if (why) {
                 session.logger.error(`Restarting the oracle: ${why}.`);
                 resolve(RESTART);
               }
@@ -661,7 +691,7 @@ const main = async (argv: string[]): Promise<number> => {
         } finally {
           await wallet.stop().catch(() => undefined);
         }
-      });
+      }, { service: true });
     }
 
     case 'bond': {
@@ -746,7 +776,8 @@ const main = async (argv: string[]): Promise<number> => {
             const address = walletAddress(w);
             w.wallet.state().subscribe((s) => {
               try {
-                walletInfo = { address, night: String(nightIn(s)) };
+                // Counting a coin that is being spent: mid-request the balance alone reads 0 (a wrong top-up, 12 Nov 2026).
+                walletInfo = { address, night: String(nightIn(s) + pendingNightIn(s)) };
               } catch {
                 // a part that hasn't started yet
               }
@@ -754,11 +785,21 @@ const main = async (argv: string[]): Promise<number> => {
           })
           .catch(() => undefined);
         try {
-          return await runMcp({ backend, mode, logger: session.logger, limits, watchdog, walletState: wallet.then((w) => w.wallet.state()), walletInfo: () => walletInfo });
+          return await runMcp({
+            backend,
+            mode,
+            logger: session.logger,
+            limits,
+            watchdog,
+            walletState: wallet.then((w) => w.wallet.state()),
+            walletInfo: () => walletInfo,
+            restartWhen: () => overLimitReason(),
+            usage: () => meter.usage(),
+          });
         } finally {
           await wallet.then((w) => w.stop()).catch(() => undefined);
         }
-      });
+      }, { service: mode.kind === 'http' });
     }
 
     case 'request': {

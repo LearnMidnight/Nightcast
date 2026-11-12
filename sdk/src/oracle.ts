@@ -14,6 +14,13 @@ export type OracleOptions = {
   /** How often to look for new requests, in ms. */
   pollMs?: number;
   /**
+   * How often to look while a request is waiting to be answered (new, or
+   * backing off after a failure), in ms. Default: pollMs. Each look is a read
+   * of the contract, so where reads are metered (Blockfrost) a slow pollMs
+   * with a fast busyPollMs keeps answers quick without reading all day.
+   */
+  busyPollMs?: number;
+  /**
    * Don't start a fulfil with less than this many seconds to the deadline:
    * proving and inclusion have to finish first. Keep it below the contract's
    * minWindow.
@@ -120,6 +127,14 @@ export const withCauses = (err: unknown, depth = 0): string => {
   return cause && !message.includes(cause) ? `${message} <- ${cause}` : message;
 };
 
+/**
+ * Whether a pass left something to do soon: a request just answered or just
+ * failed, one that is new (waiting for the node to catch up) or backing off.
+ * One already answered (waiting for the indexer) or past its time isn't.
+ */
+export const hasWaitingWork = (report: TickReport): boolean =>
+  report.fulfilled.length > 0 || report.failed.length > 0 || report.skipped.some((s) => s.reason.startsWith('new') || s.reason === 'backing off');
+
 export class NightcastOracle {
   readonly publicKey: { x: bigint; y: bigint };
   private readonly retries = new Map<string, Retry>();
@@ -136,6 +151,7 @@ export class NightcastOracle {
   private busy: Promise<TickReport> | undefined;
   private readonly cfg: {
     pollMs: number;
+    busyPollMs: number;
     safetyMarginSecs: number;
     backoffMs: number;
     maxBackoffMs: number;
@@ -148,6 +164,7 @@ export class NightcastOracle {
     this.publicKey = oraclePublicKey(options.secretKey);
     this.cfg = {
       pollMs: options.pollMs ?? 5_000,
+      busyPollMs: Math.min(options.busyPollMs ?? options.pollMs ?? 5_000, options.pollMs ?? 5_000),
       safetyMarginSecs: options.safetyMarginSecs ?? 120,
       backoffMs: options.backoffMs ?? 5_000,
       maxBackoffMs: options.maxBackoffMs ?? 60_000,
@@ -295,12 +312,13 @@ export class NightcastOracle {
     this.running = true;
     const loop = async () => {
       if (!this.running) return;
+      let waiting = false;
       try {
-        await this.tick();
+        waiting = hasWaitingWork(await this.tick());
       } catch (err) {
         this.logger.error(`poll failed: ${err instanceof Error ? err.message : String(err)}`);
       }
-      if (this.running) this.timer = setTimeout(loop, this.cfg.pollMs);
+      if (this.running) this.timer = setTimeout(loop, waiting ? this.cfg.busyPollMs : this.cfg.pollMs);
     };
     void loop();
   }
