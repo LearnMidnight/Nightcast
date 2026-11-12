@@ -243,16 +243,56 @@ export const steadySubmissionService = (relayURL: URL, o: SteadySubmitOptions = 
  * wallet only builds ledger 9 transactions now, so one (ledger 9) server is
  * named, or the in-process prover.
  */
-const walletConfiguration = (env: EnvironmentConfiguration, prover: 'server' | 'wasm'): ResolvedConfiguration => ({
-  forks: DefaultForkSchedule,
-  batchUpdates: { size: syncBatchSize(), timeout: 100, spacing: 0 },
-  indexerClientConnection: { indexerHttpUrl: env.indexer, indexerWsUrl: env.indexerWS },
-  provers: { v9: prover === 'wasm' ? { kind: 'wasm' } : { kind: 'server', url: new URL(env.proofServer) } },
-  networkId: env.walletNetworkId,
-  relayURL: new URL(env.nodeWS),
-  txHistoryStorage: new InMemoryTransactionHistoryStorage(WalletEntrySchema, mergeWalletEntries),
-  costParameters: { feeBlocksMargin: 5 },
-});
+const walletConfiguration = (env: EnvironmentConfiguration, prover: 'server' | 'wasm'): ResolvedConfiguration => {
+  const timers = timerSettings();
+  const configuration = {
+    forks: DefaultForkSchedule,
+    batchUpdates: { size: syncBatchSize(), timeout: 100, spacing: 0 },
+    indexerClientConnection: { indexerHttpUrl: env.indexer, indexerWsUrl: env.indexerWS },
+    // The wallet's own timers, slowed down (see timerSettings). The shielded and DUST parts read versionWatch and
+    // the unshielded part livenessPollInterval from this same object; the facade's type doesn't list them.
+    versionWatch: { intervalMs: timers.versionWatchMs },
+    livenessPollInterval: timers.livenessMs,
+    provers: { v9: prover === 'wasm' ? ({ kind: 'wasm' } as const) : ({ kind: 'server', url: new URL(env.proofServer) } as const) },
+    networkId: env.walletNetworkId,
+    relayURL: new URL(env.nodeWS),
+    txHistoryStorage: new InMemoryTransactionHistoryStorage(WalletEntrySchema, mergeWalletEntries),
+    costParameters: { feeBlocksMargin: 5 },
+  };
+  return configuration as ResolvedConfiguration;
+};
+
+/**
+ * How often an open wallet asks the indexer things on a timer.
+ *
+ * Wallet SDK 2 runs three timers per wallet, each every 30 s by default: the
+ * DUST part and the shielded part each ask the indexer for its latest block
+ * (to notice a protocol upgrade), and the unshielded part compares the
+ * indexer's head with the node's (two indexer reads). That is 8 indexer
+ * requests a minute, 11,520 a day, for every wallet that is merely open. Seven
+ * wallets on one Blockfrost project used 80,000 a day doing nothing, against a
+ * 50,000 limit (measured 12 Nov 2026 with blockfrost-meter.ts: two idle
+ * services each made 8.1 requests a minute).
+ *
+ * Here the upgrade watch runs every 10 minutes (an upgrade is announced days
+ * ahead, and a transaction the wallet is sent carries the version too) and the
+ * head comparison every 2 minutes (it flags an indexer more than 10 blocks
+ * behind; our own watchdogs wait 15 minutes or more): 1.2 requests a minute,
+ * about 1,700 a day per wallet.
+ *
+ * NIGHTCAST_VERSION_WATCH_SECS (0 turns the watch off) and
+ * NIGHTCAST_LIVENESS_SECS (10 or more) change them.
+ */
+export const timerSettings = (env: NodeJS.ProcessEnv = process.env): { versionWatchMs: number; livenessMs: number } => {
+  const secs = (v: string | undefined, fallback: number, min: number): number => {
+    const n = Number(v);
+    return v !== undefined && v.trim() !== '' && Number.isFinite(n) && n >= min ? n : fallback;
+  };
+  return {
+    versionWatchMs: Math.round(secs(env.NIGHTCAST_VERSION_WATCH_SECS, 600, 0) * 1000),
+    livenessMs: Math.round(secs(env.NIGHTCAST_LIVENESS_SECS, 120, 10) * 1000),
+  };
+};
 
 /**
  * How much the dust wallet adds to each fee, from the environment.
