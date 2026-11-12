@@ -36,4 +36,4 @@ const { output } = sim.getLedger().requests.lookup(id);
 - [Specification and threat model](https://github.com/LearnMidnight/Nightcast/blob/main/docs/SPEC.md)
 - [Live deployments and their verifier-key fingerprints](https://github.com/LearnMidnight/Nightcast#live-deployment)
 
-Built with Compact toolchain 0.31.1. MIT licence.
+Built with Compact toolchain 0.31.1. Version 0.1.0 on npm is the v0 contract; the repository's `main` is v1 (request fees and oracle bonds), which is what the live Preprod deployment runs. MIT licence.

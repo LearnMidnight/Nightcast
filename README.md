@@ -17,7 +17,9 @@ Check it yourself with `./nightcast verify --network preprod` (record: [deployme
 
 **v1: request fees and oracle bonds** ([SPEC §4.3a](docs/SPEC.md#43a-fees-and-bonds-v1-issues-13-and-9)). Each request pays the fee to the oracle when it's answered and holds one slot of the oracle's bond as collateral; if the oracle misses the deadline, `expire` returns the fee and the collateral to the requester. `./nightcast verify` reports the free bond slots.
 
-**Ledger 9.** Preprod moved to ledger 9 on 9 Nov 2026 (in place: contracts and balances carried over). `main` is on the ledger 9 stack (Midnight.js 5, wallet SDK 2, proof server 9.0.0, Midnight's public Preprod node). Contracts compiled with Compact 0.31.1, like the one above, keep working; a *new* deployment on ledger 9 needs a Compact 0.36 compile (#58).
+**Ledger 9.** Preprod moved to ledger 9 on 9 Nov 2026 (in place: contracts and balances carried over). `main` is on the ledger 9 stack (Midnight.js 5, wallet SDK 2, proof server 9.0.0, Midnight's public Preprod node). Contracts compiled with Compact 0.31.1, like the one above, keep working; a *new* deployment on ledger 9 needs a Compact 0.36 compile, which is still to do ([#58](https://github.com/LearnMidnight/Nightcast/issues/58)).
+
+**What that means today.** Everything that uses the live deployment works: requests, the oracle, `verify`, `check`, the MCP server. `./nightcast deploy` can't make a *new* deployment on Preprod until #58, and the local test network (ledger 8 images) doesn't work with this stack either, so CI's local end-to-end steps are switched off for now.
 
 ## How it works
 
@@ -50,12 +52,12 @@ The construction, ledger layout and threat model are in [docs/SPEC.md](docs/SPEC
 | `contract/src/nightcast.compact` | The contract: `request`, `fulfil`, `expire`, key management (a replacement key waits the longest request window unless the current oracle approves it) and operator hand-over, and pure circuits for ids, keys and evaluation |
 | `contract/src/keys.ts` | Key generation and parsing |
 | `contract/src/simulator.ts` | Runs the compiled contract in memory with several actors and a controllable clock |
-| `sdk/src/oracle.ts` | The oracle service: polls, fulfils pending requests bound to its key, retries with backoff, respects deadlines, optional requester allowlist |
+| `sdk/src/oracle.ts` | The oracle service: polls, fulfils pending requests bound to its key, retries with backoff, respects deadlines, marks a request it missed as expired (so the requester is refunded), optional requester allowlist |
 | `sdk/src/chain.ts` | Chain adapters: simulator, and live Midnight via midnight-js |
 | `sdk/src/derive.ts` | Turning an output into numbers: `randomWords` (SHA-256 or, for in-circuit use, Poseidon), `randomFieldWords`, `uniformInt`, `pickNumbers`, `pickMoonball`, `drawStarfall`, `combineDrawSeed` |
 | `contract/src/NightcastWords.compact` | A module your contract imports to expand an output into words in-circuit: `randomWord` (SHA-256) or `randomWordPoseidon` (about 20 times cheaper, internal use only) |
 | `sdk/src/keygen.ts` | `./nightcast keygen`: generate oracle, operator and requester secrets |
-| `deploy/` | `./nightcast` commands: deploy (locked from the start), accept the oracle key, verify, wallets, run the oracle, test requests |
+| `deploy/` | `./nightcast` commands: deploy (locked from the start), accept the oracle key, verify, wallets, the oracle's bond, run the oracle, test requests, the MCP server |
 | `nightcast` | Wrapper script that runs the tools from a checkout |
 | `deployments/` | Published records of live deployments |
 | `sdk/src/pick.ts` | Everyday choices from one answer: `pick`, `pickMany`, `shuffle`, `randomInt`, `rollDice`, `weightedPick`, and `listCommitment` for fair draws |
@@ -64,7 +66,8 @@ The construction, ledger layout and threat model are in [docs/SPEC.md](docs/SPEC
 
 ## Built on Nightcast
 
-- [Lunardraw](https://github.com/LearnMidnight/Lunardraw): a self-running lottery for AI agents (weekly Starfall draws). Its contract embeds Nightcast's VRF ([SPEC §5.1](docs/SPEC.md#51-on-chain-consumers-embed-dont-call-decision-22-oct-2026)) and uses this repo as a submodule.
+- [Lunardraw](https://github.com/LearnMidnight/Lunardraw): a self-running lottery for AI agents (daily Starfall draws). Its contract embeds Nightcast's VRF ([SPEC §5.1](docs/SPEC.md#51-on-chain-consumers-embed-dont-call-decision-22-oct-2026)) and uses this repo as a submodule.
+- [LunaSpin](https://lunardraw.io/spin/): a free name draw with a certificate anyone can check. Each spin is a request to the live deployment above, made through the MCP server.
 
 ## For AI agents
 
@@ -83,6 +86,8 @@ const winners = pickMany(output, names, 3); // three fair winners from a Nightca
 ```
 
 Picking names, shuffles, dice, weighted prizes and lottery numbers from one answer, and running a raffle anyone can check: see the **[developer guide](docs/GUIDE.md)** and the [raffle example](examples/raffle). The packages are published from this repository by [GitHub Actions with provenance](docs/PUBLISHING.md).
+
+**Which version is on npm.** 0.1.0 (2 Nov 2026) holds the v0 contract. The picking helpers and the simulator work as described. To call the live v1 deployment from your own code you need the v1 contract, so build `@nightcast/contract` from this repository until the next release is published.
 
 ## Getting started
 
@@ -126,6 +131,10 @@ You need Docker (for a local proof server) and a funded Preprod wallet seed (hex
 ./nightcast deploy --network preprod --oracle oracle.secret --operator operator.secret --wallet wallet.secret --accept
 ```
 
+(A new deployment on Preprod waits for [#58](https://github.com/LearnMidnight/Nightcast/issues/58); see [Ledger 9](#live-deployment) above. The live deployment was made this way on 9 Nov 2026, with `--fee 0.1 --collateral 1`.)
+
+`--fee <NIGHT>` is what each request pays the oracle and `--collateral <NIGHT>` how much of the oracle's bond each request sets aside (paid to the requester if it expires). Both default to 0.
+
 In one run this:
 
 1. starts a proof server in Docker (or use `--proof-server-port 6300` for one you already run);
@@ -135,7 +144,7 @@ In one run this:
 
 Commit `deployments/preprod.json` to publish it. Anyone can then check the live contract with `./nightcast verify --network preprod`; see [deployments/README.md](deployments/README.md). The wallet only pays fees. Only the public parts of the key files are used (plus the oracle secret with `--accept`, kept in memory); no admin key for the contract ever exists.
 
-`--network preview` works the same way. `--network local` starts a throwaway Midnight network in Docker, which is what CI uses for its end-to-end test.
+`--network local` starts a throwaway Midnight network in Docker for the end-to-end tests; those are switched off in CI until #58. `--network preview` hasn't been tested again since the move to the ledger 9 stack.
 
 ### Run an oracle
 
@@ -144,7 +153,9 @@ Commit `deployments/preprod.json` to publish it. Anyone can then check the live 
 ./nightcast request --network preprod --requester requester.secret --wallet other-wallet.secret --wait
 ```
 
-`oracle` joins the deployment in `deployments/preprod.json` and answers every request bound to its key until you press Ctrl+C (`--requesters <hex,...>` limits it to known requesters). `request --wait` makes a test request and prints the result; `status --id <id>` looks one up from public data.
+`oracle` joins the deployment in `deployments/preprod.json` and answers every request bound to its key until you press Ctrl+C (`--requesters <hex,...>` limits it to known requesters). A request it misses, it marks expired a minute after the deadline, so the requester gets the fee and the collateral back. `request --wait` makes a test request and prints the result; `status --id <id>` looks one up from public data.
+
+On a deployment that takes collateral the oracle needs a bond before anyone can request: `./nightcast bond deposit --network preprod --slots 50 --wallet wallet.secret` adds 50 slots (one per open request). `./nightcast verify` shows how many are free.
 
 ### Check a result, end to end
 
@@ -182,11 +193,12 @@ const other = pickNumbers(drawSeed, 6, 45);             // any other pick/pool
 
 `pickNumbers` and `pickMoonball` are the same rules as the Lunardraw verification page (test vectors: 64 zeros gives Starfall 6 7 13 23 26 31 35 + Moonball 14, and 6 from 45 gives 1 3 7 21 31 35). If a request expires or the seed is never revealed, void the round and refund it rather than drawing again ([SPEC §4.2](docs/SPEC.md#42-withholding-and-aborts)).
 
-## Limitations of v0
+## Limitations
 
-- One oracle. It can withhold an answer until the deadline and, if it can influence a request's input, grind for favourable outputs ([SPEC §4.1](docs/SPEC.md#41-grinding)).
+- One oracle. It can withhold an answer until the deadline and, if it can influence a request's input, grind for favourable outputs ([SPEC §4.1](docs/SPEC.md#41-grinding)). Its collateral makes withholding cost it something, up to the collateral's value.
 - Results are read off-chain; on-chain consumer callbacks come with cross-contract calls.
-- Requests are free, so an oracle open to everyone can be spammed; use the requester allowlist.
+- The number of open requests is bounded by the oracle's bond, and each one pays the fee ([SPEC §4.3](docs/SPEC.md#43-spam)); the requester allowlist is still there for an oracle that shouldn't serve everyone.
+- A new deployment needs the Compact 0.36 recompile ([#58](https://github.com/LearnMidnight/Nightcast/issues/58)).
 - Not audited.
 
 ## Licence

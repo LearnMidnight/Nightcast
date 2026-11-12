@@ -13,12 +13,12 @@
 A fair draw takes four calls:
 1. `nightcast_list_fingerprint` with the entries;
 2. `nightcast_request_random` with a purpose and the fingerprint as seed (publish the id now);
-3. `nightcast_check_request` until it's fulfilled (1–3 minutes);
+3. `nightcast_check_request` until it's fulfilled (usually within a minute or two);
 4. `nightcast_derive` with the output and the same list.
 
 Anyone can repeat steps 3 and 4 and get the same winner. The id check (with purpose and seed) shows the list was fixed before the answer existed.
 
-**Test network only.** It runs against the Preprod deployment (`deployments/preprod.json`). The values are real randomness, but tNIGHT has no value, and Nightcast is unaudited.
+**Test network only.** It runs against the Preprod deployment (`deployments/preprod.json`). The values are real randomness, but tNIGHT has no value, and Nightcast is unaudited. Each request costs the server's wallet the deployment's fee (0.1 tNIGHT on Preprod), which goes to the oracle.
 
 ## On your own computer (stdio)
 
@@ -58,7 +58,8 @@ To make requests too, add a wallet with tNIGHT and a requester secret:
   --proof-server-port 6300
 ```
 
-- **The address:** `POST /mcp` takes one JSON-RPC message and answers with JSON (MCP's Streamable HTTP transport, without sessions or event streams). `GET /health` reports `{ ok, network, contract, canRequest }`.
+- **The address:** `POST /mcp` takes one JSON-RPC message and answers with JSON (MCP's Streamable HTTP transport, without sessions or event streams). `GET /health` reports `{ ok, network, contract, canRequest, version }`, how many times the contract has been read (`stateReads`), the day's requests to Blockfrost (`blockfrost`) and, once the wallet is open, its `address` and `night` balance.
+- **Checks share one read.** Every `nightcast_check_request` within 15 seconds is answered from one read of the contract (`NIGHTCAST_STATE_CACHE_SECS`; 0 turns it off), so an answer can show up to 15 seconds late. It keeps a busy server inside a Blockfrost project's daily request limit ([Preprod guide, step 8](preprod-guide.md#8-get-a-blockfrost-project-id)).
 - **Limits:**
   - requests: 6 an hour per client (`--per-hour`) and 200 a day in all (`--per-day`), because each one is a transaction paid from the server's wallet;
   - 60 calls a minute per client;
@@ -74,7 +75,7 @@ To make requests too, add a wallet with tNIGHT and a requester secret:
   }
   ```
 
-- **Restarts:** a long-running wallet can stop following the chain after a dropped connection, and its fees are then refused (node error 170). The HTTP server exits with code 75 when the wallet's sync hasn't moved for 20 minutes, or after three requests in a row are refused for a stale fee. Run it under systemd with `Restart=always`:
+- **Restarts:** a long-running wallet can stop following the chain after a dropped connection, and its fees are then refused (node error 170) or can't be paid because its coins stay booked. The HTTP server exits with code 75 when the wallet's sync hasn't moved for 20 minutes, after three requests in a row are refused for a stale fee, when the wallet looks stuck in one of those ways, or when Blockfrost refuses the project for its request limit (the restarted server then waits until Blockfrost lets it back in). Run it under systemd with `Restart=always`:
 
   ```ini
   [Unit]
@@ -104,4 +105,4 @@ To make requests too, add a wallet with tNIGHT and a requester secret:
 
 ## Payment (later)
 
-Issue #39 suggests charging per request (x402). That waits for request fees in the contract (#13), and for a way to pay on Midnight. For now a hosted server is free and limited by the counts above.
+Issue #39 suggests charging the caller per request (x402). The contract has had request fees since v1, paid by the server's wallet; passing that cost on to the agent waits for a way to pay on Midnight. For now a hosted server is free to call and limited by the counts above.

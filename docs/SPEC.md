@@ -1,6 +1,6 @@
-# Nightcast v0 specification
+# Nightcast specification
 
-Status: experimental, unaudited. Targets Compact toolchain 0.31.1 (language 0.23), compact-runtime 0.16.0 and ledger 8, the versions on Midnight Preview, Preprod and Mainnet as of October 2026.
+Status: v1 (request fees and oracle bonds, §4.3a), experimental, unaudited. The contract is written for Compact toolchain 0.31.1 (language 0.23) and compact-runtime 0.16.0, the versions of ledger 8. Preprod moved to ledger 9 on 9 Nov 2026: the deployed contract carried over and keeps working, and a new deployment needs a Compact 0.36 recompile ([#58](https://github.com/LearnMidnight/Nightcast/issues/58)). The `v0` in the domain separators below is part of the construction and doesn't change with the contract's version.
 
 ## 1. Goal
 
@@ -93,11 +93,11 @@ Circuits:
 | Oracle | Compute any output in advance for an `alpha` it knows; decline to answer | Choose between outputs; answer late; answer with another key |
 | Operator | Propose keys for future requests | Activate a key without the oracle; change a pending request's key; touch outputs |
 | Maintenance authority | Nothing once locked at deployment (§4.5) | Replace circuits or itself after the lock |
-| Anyone | Read every output; expire missed requests; make requests (free in v0) | Fulfil without `sk` |
+| Anyone | Read every output; expire missed requests; make requests (for the fee, and while the bond has a free slot) | Fulfil without `sk` |
 
 ### 4.1 Grinding
 
-The oracle can evaluate the VRF privately for any input. If the oracle (or someone colluding with it) can influence `alpha` before the request is made, for example by adding entries to a lottery whose state feeds the seed, it can search for an input with a favourable output. Chainlink limits this by mixing in the request's block hash; Compact 0.31 exposes no block hash, so v0 cannot. Consumers should request only after the outcome-relevant state is closed, and combine the output with their own commit-reveal secret (§5).
+The oracle can evaluate the VRF privately for any input. If the oracle (or someone colluding with it) can influence `alpha` before the request is made, for example by adding entries to a lottery whose state feeds the seed, it can search for an input with a favourable output. Chainlink limits this by mixing in the request's block hash; Compact 0.31 exposes no block hash, so Nightcast cannot. Consumers should request only after the outcome-relevant state is closed, and combine the output with their own commit-reveal secret (§5).
 
 ### 4.2 Withholding and aborts
 
@@ -163,13 +163,13 @@ Anyone can check a deployment with `./nightcast verify`: the authority on chain 
 
 A Compact circuit's witnesses, including the oracle's `sk`, the operator secret and a requester secret, are handed to the proof server that builds the proof. A hosted or shared proof server therefore learns them. The oracle and the operator must run their own proof server, on the machine holding the secret, reachable only from that machine; `nightcast-deploy` starts one in Docker bound to `127.0.0.1`.
 
-## 5. Consumer integration (v0)
+## 5. Consumer integration
 
-v0 consumers read results off-chain (indexer or midnight-js `queryContractState`) and derive what they need with the SDK. Anyone can recompute the derivation from public data.
+Consumers read results off-chain (indexer or midnight-js `queryContractState`) and derive what they need with the SDK. Anyone can recompute the derivation from public data.
 
 1. Commit to a secret if you use commit-reveal (e.g. publish `SHA-256(operatorSeedHex)` before ticket sales).
 2. Close the outcome-relevant state.
-3. `request(tag, seed, deadline)` with your requester secret; keep the returned id.
+3. `request(tag, seed, deadline, refundTo)` with your requester secret; keep the returned id. It pays the deployment's fee, and `refundTo` is where the fee and the collateral go if the request expires.
 4. Wait for `requests[id].status`: `fulfilled`, or `expired` (void the round, §4.2).
 5. Check `requests[id].requester` is your commitment and `oracleKey` is the key you expect.
 6. Derive: `randomWords(output, n)`, `uniformInt(word, n)`, or for lotteries `pickNumbers(combineDrawSeed(operatorSeedHex, output), pick, pool)`, where `combineDrawSeed` is `SHA-256(seedHex + ":" + outputHex)`.
@@ -188,6 +188,8 @@ A contract that needs randomness on chain (for example [Lunardraw](https://githu
 - **When cross-contract calls reach ledger 8's successors on Preprod and Mainnet**, the consumer can call Nightcast directly, and the embedded copy goes. The VRF and domain separators stay the same, so outputs don't change.
 
 The Nightcast contract itself is untouched, so its deployed verifier keys still match this checkout.
+
+**Update, 12 Nov 2026.** Preprod moved to ledger 9 on 9 Nov 2026, so the versions named above are no longer what Preprod runs. Nightcast and Lunardraw are still compiled with Compact 0.31.1, which has no cross-contract calls, so the decision stands until both are recompiled ([#58](https://github.com/LearnMidnight/Nightcast/issues/58)). We haven't tried cross-contract calls on Preprod.
 
 ## 6. Roadmap
 

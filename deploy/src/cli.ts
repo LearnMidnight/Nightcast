@@ -15,7 +15,7 @@
  *   ./nightcast status     --network preprod --id <request id>
  *   ./nightcast blockfrost save --network preprod
  *
- * Preprod's public node and indexer are run by Blockfrost and need a project
+ * Preprod's public indexer is run by Blockfrost and needs a project
  * id: `blockfrost save` stores it in ~/nightcast-secrets/blockfrost-preprod.secret,
  * or pass --blockfrost <file> or set NIGHTCAST_BLOCKFROST_PROJECT_ID.
  *
