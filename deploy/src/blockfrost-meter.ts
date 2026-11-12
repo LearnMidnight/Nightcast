@@ -192,16 +192,27 @@ const hostOfFetch = (input: unknown): string | undefined => {
 type Emitterish = { once(event: string, listener: (...args: never[]) => void): unknown };
 type WsClass = { prototype: { emit(event: string, ...rest: unknown[]): boolean; send(...args: unknown[]): unknown } };
 
-let installed = false;
+let requestsCounted = false;
+let socketsCounted = false;
 
 /**
- * Start counting (once per process). `ws` is the `ws` package's WebSocket
- * class, for the message counts. Never throws: a meter that can't be fitted
- * must not stop the service.
+ * Start counting. `ws` is the `ws` package's WebSocket class, for the message
+ * counts. Each part is fitted once per process, so a program may call this
+ * early without the class and `connect` again with it. Never throws: a meter
+ * that can't be fitted must not stop the service.
  */
 export const installMeter = (ws?: unknown, m: BlockfrostMeter = meter): void => {
-  if (installed) return;
-  installed = true;
+  if (!requestsCounted) {
+    requestsCounted = true;
+    countRequests(m);
+  }
+  if (ws && !socketsCounted) {
+    socketsCounted = true;
+    countMessages(ws, m);
+  }
+};
+
+const countRequests = (m: BlockfrostMeter): void => {
   try {
     const wrap = <F extends (...args: never[]) => unknown>(original: F): F =>
       function (this: unknown, ...args: unknown[]) {
@@ -240,6 +251,9 @@ export const installMeter = (ws?: unknown, m: BlockfrostMeter = meter): void => 
   } catch {
     // counting only
   }
+};
+
+const countMessages = (ws: unknown, m: BlockfrostMeter): void => {
   try {
     const proto = (ws as WsClass | undefined)?.prototype;
     if (proto && typeof proto.emit === 'function' && typeof proto.send === 'function') {

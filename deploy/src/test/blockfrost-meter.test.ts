@@ -130,6 +130,8 @@ describe('the Blockfrost meter', () => {
       }
     }
     try {
+      installMeter(undefined, m); // a program without a wallet: requests only
+      installMeter(FakeSocket, m); // and again once there are sockets: nothing is counted twice
       installMeter(FakeSocket, m);
       await fetch('https://midnight-preprod.blockfrost.io/api/v0?project_id=abc', { method: 'POST' });
       await fetch('https://rpc.preprod.midnight.network');
