@@ -8,8 +8,8 @@
     "start": "node raffle.mjs"
   },
   "dependencies": {
-    "@nightcast/contract": "^0.1.0",
-    "@nightcast/sdk": "^0.1.0"
+    "@nightcast/contract": "^0.2.0",
+    "@nightcast/sdk": "^0.2.0"
   },
   "engines": {
     "node": ">=22"

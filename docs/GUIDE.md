@@ -23,7 +23,7 @@ npm install @nightcast/sdk @nightcast/contract
 
 Node 22 or later. `@nightcast/contract` is the compiled contract (with its keys), its helpers and a simulator; `@nightcast/sdk` turns answers into choices and runs an oracle. Both are ES modules with TypeScript types.
 
-The version on npm, 0.1.0, holds the v0 contract. Everything in this guide that turns an answer into choices, and the simulator, works with it. The live Preprod deployment is v1 (each request pays a fee and names a refund address), so to make requests to it from your own code, build `@nightcast/contract` from the repository until the next release is published; the command line and the MCP server in the repository are already v1.
+The version on npm, 0.2.0, holds the v1 contract, the one the live Preprod deployment runs (each request pays a fee and names a refund address). 0.1.0 held the v0 contract and can't make requests to v1, so install 0.2.0 or later.
 
 ## How a draw works
 

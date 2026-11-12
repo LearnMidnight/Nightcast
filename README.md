@@ -87,7 +87,7 @@ const winners = pickMany(output, names, 3); // three fair winners from a Nightca
 
 Picking names, shuffles, dice, weighted prizes and lottery numbers from one answer, and running a raffle anyone can check: see the **[developer guide](docs/GUIDE.md)** and the [raffle example](examples/raffle). The packages are published from this repository by [GitHub Actions with provenance](docs/PUBLISHING.md).
 
-**Which version is on npm.** 0.1.0 (2 Nov 2026) holds the v0 contract. The picking helpers and the simulator work as described. To call the live v1 deployment from your own code you need the v1 contract, so build `@nightcast/contract` from this repository until the next release is published.
+**Which version is on npm.** 0.2.0 (13 Nov 2026) holds the v1 contract, the one the live Preprod deployment runs: the package's verifier-key fingerprints are the ones in [deployments/preprod.json](deployments/preprod.json). 0.1.0 (2 Nov 2026) held the v0 contract and can't make requests to v1.
 
 ## Getting started
 
