@@ -10,6 +10,7 @@ import { checkRequest } from '../check.js';
 import { type Fingerprints, localFingerprints } from '../fingerprints.js';
 import { compiledNightcast, NIGHTCAST_PRIVATE_STATE_ID, type NightcastProviders, readContractState } from '../network.js';
 import type { DeploymentRecord } from '../record.js';
+import { cachedReader, stateCacheSecs } from '../state-cache.js';
 import type { RandomnessBackend } from './tools.js';
 
 const localOrNone = (): Fingerprints | undefined => {
@@ -33,6 +34,8 @@ export const midnightBackend = (
     onSubmitError?: (err: unknown) => void;
     onSubmitted?: () => void;
   },
+  /** How long one read of the contract's state answers every check (NIGHTCAST_STATE_CACHE_SECS, default 15 s; 0 = no sharing). */
+  stateCacheMs: number = stateCacheSecs() * 1000,
 ): RandomnessBackend => {
   let opened: NightcastProviders | undefined;
   let openError: string | undefined;
@@ -43,6 +46,8 @@ export const midnightBackend = (
   const deployment = { bytes: encodeContractAddress(record.contractAddress) };
   const commitment = requester ? pureCircuits.requesterCommitmentOf(requester.secret) : new Uint8Array(32);
   const local = localOrNone();
+  // The state holds every request: one read answers every check in the window (state-cache.ts).
+  const readState = cachedReader(() => readContractState(publicData, record.contractAddress), stateCacheMs);
   let contract: Promise<Awaited<ReturnType<typeof findDeployedContract>>> | undefined;
   const handle = () =>
     (contract ??= findDeployedContract(opened!, {
@@ -81,12 +86,13 @@ export const midnightBackend = (
       }
     },
     async read(id, inputs) {
-      const state = await readContractState(publicData, record.contractAddress);
+      const state = await readState();
       const requests = state ? ledgerOf(state).requests : undefined;
       const request = requests?.member(id) ? requests.lookup(id) : undefined;
       const checks = checkRequest(record, state as never, id, request, { inputs, local });
       return { request, checks };
     },
     now: () => Date.now() / 1000,
+    stateReads: readState.reads,
   };
 };

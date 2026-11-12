@@ -127,6 +127,7 @@ export const runMcp = async (o: {
     trustProxy: o.mode.trustProxy,
     origins: o.mode.origins,
     health: () => ({
+      ...(o.backend.stateReads ? { stateReads: o.backend.stateReads() } : {}),
       network: o.backend.network,
       contract: o.backend.contractAddress,
       canRequest: o.backend.canRequest && !o.backend.notReady?.(),

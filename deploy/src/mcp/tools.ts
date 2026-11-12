@@ -51,6 +51,8 @@ export interface RandomnessBackend {
   read(id: Uint8Array, inputs?: { tag: Uint8Array; seed: Uint8Array }): Promise<{ request: Request | undefined; checks: Check[] }>;
   /** Seconds since the epoch. */
   now(): number;
+  /** How many times the contract's state has been read from the chain (shown on /health). */
+  stateReads?: () => number;
 }
 
 export type Limits = {
