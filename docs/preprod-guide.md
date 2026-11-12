@@ -141,6 +141,13 @@ Since 9 October 2026, Preprod's public servers are run by **Blockfrost**, and ev
 
 Every command finds the ID there automatically. Keep it private like your other secrets: don't paste it into chats or commit it.
 
+**The request limit.** A Blockfrost project may make a set number of requests a day (50,000 on the free plan; the day runs midnight to midnight UTC). Past it, Blockfrost answers everything with `402 Project Over Limit` until the next day. Nightcast counts its own requests and is built to stay well inside the limit:
+
+- the oracle looks for requests every 15 seconds on Preprod (every 5 while one is waiting); `--poll <seconds>` changes it. At 15 seconds that is about 5,800 requests a day;
+- every service logs `Blockfrost today (UTC …): N request(s), …` once an hour, and `./nightcast mcp`'s `/health` and the oracle's status file carry the same counts;
+- set `NIGHTCAST_BLOCKFROST_USAGE=<file>` for a service to keep its count in that file across restarts (one file per service), so a monitor can add them up;
+- if Blockfrost does refuse the project, a service says so, stops, and asks again once every 15 minutes instead of retrying non-stop (which can get the address banned).
+
 ### 9. Check the connection, then fund the wallets
 
 First check your computer can reach Preprod:
@@ -311,6 +318,7 @@ git push
 | `preprod needs a Blockfrost project id` | Do step 8. |
 | `the Blockfrost project id was refused` (401 or 403) | The ID is wrong or for another network. Check the project's network is **Midnight Preprod**, then run `./nightcast blockfrost save --network preprod` again. |
 | A step sits for many minutes with Node at 200–300% CPU, and Ctrl+C does nothing | Ubuntu is short of memory: see step 2. Stop it with Ctrl+\\ and run the command again. |
+| `Blockfrost refuses this project: it is over its daily request limit` | The project has used its day's requests. A service waits and carries on by itself when Blockfrost lets it back in (midnight UTC); a one-off command has to be run again then. Check the usage graph on blockfrost.io: if a normal day is near the limit, slow the oracle down (`--poll 30`) or use a bigger plan. |
 | Repeated `Wallet sync problem: ...` | The wallet retries by itself, so a few are fine. If it keeps repeating, press Ctrl+C and run `./nightcast doctor --network preprod`; it shows which connection fails. If everything answers, check your Blockfrost project's daily request usage on blockfrost.io. |
 | `doctor` reports a problem, or a command says `did not answer` | Check your internet connection and run `./nightcast doctor --network preprod` again; Preprod is sometimes briefly down. |
 | `Cannot connect to the Docker daemon` | Open Docker Desktop and check WSL integration is on for Ubuntu (step 2). |

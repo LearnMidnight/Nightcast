@@ -13,7 +13,7 @@ import {
   Status,
 } from '@nightcast/contract';
 import { SimulatorChain } from '../chain.js';
-import { NightcastOracle, selectWork, withCauses } from '../oracle.js';
+import { hasWaitingWork, NightcastOracle, selectWork, withCauses } from '../oracle.js';
 import { generateSecret } from '../keygen.js';
 import { uniformInt } from '../derive.js';
 
@@ -344,5 +344,19 @@ describe('work between passes', () => {
     expect(order).toEqual(['work starts', 'work ends', 'tick sees 0']); // the pass that overlapped did nothing
     await expect(oracle.between(() => Promise.reject(new Error('no')))).rejects.toThrow('no');
     expect((await oracle.tick()).fulfilled).toEqual([hex(id)]);
+  });
+});
+
+describe('how soon to look again', () => {
+  const none = { fulfilled: [], failed: [], skipped: [] };
+  it('looks again soon only while a request is waiting to be answered', () => {
+    expect(hasWaitingWork(none)).toBe(false);
+    expect(hasWaitingWork({ ...none, fulfilled: ['ab'] })).toBe(true);
+    expect(hasWaitingWork({ ...none, failed: [{ id: 'ab', error: 'x' }] })).toBe(true);
+    expect(hasWaitingWork({ ...none, skipped: [{ id: 'ab', reason: 'new; letting the node catch up' }] })).toBe(true);
+    expect(hasWaitingWork({ ...none, skipped: [{ id: 'ab', reason: 'backing off' }] })).toBe(true);
+    // answered already, or past saving: nothing to hurry for
+    expect(hasWaitingWork({ ...none, skipped: [{ id: 'ab', reason: 'answered; waiting for the indexer' }] })).toBe(false);
+    expect(hasWaitingWork({ ...none, skipped: [{ id: 'ab', reason: 'too close to deadline' }] })).toBe(false);
   });
 });

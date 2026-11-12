@@ -1,6 +1,8 @@
 /**
  * Runs the oracle's upkeep (upkeep.ts) once a minute, between its passes:
  * the bond refill, the top-up of the wallet it serves, and the status file.
+ * The contract is read every few minutes (NIGHTCAST_UPKEEP_READ_SECS), not
+ * every pass.
  */
 import { ledgerOf, oraclePublicKey, Status } from '@nightcast/contract';
 import type { NightcastOracle } from '@nightcast/sdk';
@@ -8,7 +10,8 @@ import type { MidnightWalletProvider } from '@midnight-ntwrk/testkit-js';
 import { type NightcastProviders, readContractState, sendNight, type Session, walletBalances } from './network.js';
 import { withTwoDustSpends } from './service.js';
 import { depositBond } from './steps.js';
-import { bondShortfall, type OracleTally, Pace, type ServedWallet, topUpDue, type UpkeepConfig, type UpkeepStatus, writeStatus } from './upkeep.js';
+import { meter } from './blockfrost-meter.js';
+import { bondShortfall, LowWatch, type OracleTally, Pace, readsLow, type ServedWallet, topUpDue, type UpkeepConfig, type UpkeepStatus, writeStatus } from './upkeep.js';
 import { failureText } from './wallet.js';
 
 type LogFn = (obj: unknown, ...rest: unknown[]) => void;
@@ -71,25 +74,35 @@ export const startUpkeep = (o: {
   ].filter(Boolean);
   log.info(`Upkeep: ${parts.join('; ')} (this wallet keeps at least ${night(config.walletFloor)} NIGHT).`);
 
+  const low = new LowWatch();
+  // The bond as last read from the chain. Read again every few minutes, not every pass: each read is a Blockfrost request.
+  let bond: { free: bigint; held: bigint; collateral: bigint; at: number } | undefined;
+
   const pass = async (): Promise<void> => {
-    const state = await readContractState(providers.publicDataProvider, contractAddress);
-    if (!state) return;
-    const ledger = ledgerOf(state);
-    let held = 0n;
-    for (const [, r] of ledger.requests) {
-      if (r.status === Status.pending && r.collateral > 0n && r.term === ledger.oracleTerm && r.oracleKey.x === key.x && r.oracleKey.y === key.y) held += 1n;
+    if (!bond || Date.now() - bond.at >= config.readEveryMs) {
+      const state = await readContractState(providers.publicDataProvider, contractAddress);
+      if (!state) return;
+      const ledger = ledgerOf(state);
+      let held = 0n;
+      for (const [, r] of ledger.requests) {
+        if (r.status === Status.pending && r.collateral > 0n && r.term === ledger.oracleTerm && r.oracleKey.x === key.x && r.oracleKey.y === key.y) held += 1n;
+      }
+      bond = { free: ledger.bondSlots, held, collateral: ledger.collateralPerRequest, at: Date.now() };
     }
+    const seen = bond;
     let { night: ours, dust } = await walletBalances(wallet);
     const served = config.topUp ? await readServed(config.topUp.healthUrl) : undefined;
+    const lowForMs = low.see(readsLow(served, config.topUp));
 
-    const slots = bondShortfall({ free: ledger.bondSlots, held, target: config.bondTarget, collateral: ledger.collateralPerRequest, night: ours, floor: config.walletFloor });
+    const slots = bondShortfall({ free: seen.free, held: seen.held, target: config.bondTarget, collateral: seen.collateral, night: ours, floor: config.walletFloor });
     if (slots > 0n && pace.due('deposit', 10 * 60_000)) {
       const at = new Date().toISOString();
       try {
         await o.oracle.between(() => withTwoDustSpends(() => depositBond(providers, contractAddress, slots)));
         log.info(`Bond topped up with ${slots} slot(s): back to ${config.bondTarget}.`);
         lastDeposit = { at, slots: String(slots), ok: true };
-        ours -= slots * ledger.collateralPerRequest;
+        ours -= slots * seen.collateral;
+        bond = undefined; // read the bond again on the next pass
       } catch (err) {
         const note = failureText(err, 300);
         log.warn(`The bond could not be topped up (${slots} slot(s); trying again in 10 minutes): ${note}`);
@@ -97,7 +110,7 @@ export const startUpkeep = (o: {
       }
     }
 
-    const send = topUpDue({ served, config: config.topUp, night: ours, floor: config.walletFloor });
+    const send = topUpDue({ served, config: config.topUp, night: ours, floor: config.walletFloor, lowForMs });
     if (config.topUp && send > 0n && pace.due('topup', 30 * 60_000)) {
       const at = new Date().toISOString();
       try {
@@ -120,7 +133,7 @@ export const startUpkeep = (o: {
         writeStatus(config.statusFile, {
           at: new Date().toISOString(),
           wallet: { night: String(fresh.night), dust: String(dust) },
-          bond: { free: String(ledger.bondSlots), held: String(held), ...(config.bondTarget !== undefined ? { target: String(config.bondTarget) } : {}) },
+          bond: { free: String(seen.free), held: String(seen.held), ...(config.bondTarget !== undefined ? { target: String(config.bondTarget) } : {}) },
           ...(served ? { served } : {}),
           fulfilled: o.tally.fulfilled,
           missed: o.tally.missed,
@@ -128,6 +141,7 @@ export const startUpkeep = (o: {
           lastMissedAt: o.tally.lastMissedAt,
           lastDeposit,
           lastTopUp,
+          blockfrost: meter.usage(),
         });
       } catch (err) {
         if (pace.due('status-error', 3_600_000)) log.warn(`Could not write ${config.statusFile}: ${err instanceof Error ? err.message : String(err)}`);

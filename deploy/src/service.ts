@@ -28,7 +28,7 @@ export const startOracleService = async (
   contractAddress: string,
   secretKey: bigint,
   logger: Logger,
-  options: Pick<OracleOptions, 'pollMs' | 'safetyMarginSecs' | 'requesters'> = {},
+  options: Pick<OracleOptions, 'pollMs' | 'busyPollMs' | 'safetyMarginSecs' | 'requesters'> = {},
 ): Promise<RunningOracle> => {
   const state = await readContractState(providers.publicDataProvider, contractAddress);
   if (!state) throw new Error(`no Nightcast contract at ${contractAddress}`);
@@ -64,7 +64,9 @@ export const startOracleService = async (
     ...options,
   });
   oracle.start();
-  logger.info(`Oracle running for ${contractAddress}; polling every ${(options.pollMs ?? 5_000) / 1000}s`);
+  const pollMs = options.pollMs ?? 5_000;
+  const busyPollMs = Math.min(options.busyPollMs ?? pollMs, pollMs);
+  logger.info(`Oracle running for ${contractAddress}; polling every ${pollMs / 1000}s${busyPollMs < pollMs ? ` (every ${busyPollMs / 1000}s while a request is waiting)` : ''}`);
   return { oracle, stop: () => oracle.stop() };
 };
 
