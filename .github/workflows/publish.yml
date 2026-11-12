@@ -98,7 +98,14 @@ jobs:
       # approves them with 2FA. Approve the contract before the SDK (the SDK
       # depends on it).
       - name: Stage for approval ${{ inputs.dry_run && '(dry run)' || '' }}
+        env:
+          # setup-node sets a placeholder token, and npm then sends that instead of asking GitHub who
+          # this workflow is: both packages were refused with E401 on 12 Nov 2026. Empty lets trusted
+          # publishing work; the NPM_TOKEN secret, if one is ever set (docs/PUBLISHING.md), is used.
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN || '' }}
         run: |
+          # a refused package must fail the step, not vanish behind tee
+          set -o pipefail
           flags="--access public --provenance"
           if [ "${{ inputs.dry_run }}" = "true" ]; then flags="$flags --dry-run"; fi
           npm stage publish -w @nightcast/contract $flags | tee stage-contract.txt
