@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { balanceReport, explainRefusals, isRefusal } from '../explain-refusal.js';
-import { failureText, feeSettings } from '../wallet.js';
+import { failureText, feeSettings, timerSettings } from '../wallet.js';
 
 const refusal = () => Object.assign(new Error('Transaction submission error'), { cause: new Error('1010: Invalid Transaction: Custom error: 138') });
 
@@ -116,6 +116,17 @@ describe('fee settings from the environment', () => {
   it('takes a margin in blocks and an overhead in specks', () => {
     expect(feeSettings({ NIGHTCAST_FEE_MARGIN_BLOCKS: '40', NIGHTCAST_FEE_OVERHEAD_SPECKS: '1000000000000000' })).toEqual({ additionalFeeOverhead: 1000000000000000n, feeBlocksMargin: 40 });
     expect(feeSettings({ NIGHTCAST_FEE_MARGIN_BLOCKS: '0' }).feeBlocksMargin).toBe(0);
+  });
+});
+
+describe("the wallet's own timers", () => {
+  it('asks the indexer every 10 and every 2 minutes, not every 30 s (8 requests a minute per open wallet)', () => {
+    expect(timerSettings({})).toEqual({ versionWatchMs: 600_000, livenessMs: 120_000 });
+  });
+  it('can be set, and ignores what makes no sense', () => {
+    expect(timerSettings({ NIGHTCAST_VERSION_WATCH_SECS: '0', NIGHTCAST_LIVENESS_SECS: '30' })).toEqual({ versionWatchMs: 0, livenessMs: 30_000 });
+    expect(timerSettings({ NIGHTCAST_VERSION_WATCH_SECS: 'never', NIGHTCAST_LIVENESS_SECS: '1' })).toEqual({ versionWatchMs: 600_000, livenessMs: 120_000 });
+    expect(timerSettings({ NIGHTCAST_VERSION_WATCH_SECS: '', NIGHTCAST_LIVENESS_SECS: '-5' })).toEqual({ versionWatchMs: 600_000, livenessMs: 120_000 });
   });
 });
 
