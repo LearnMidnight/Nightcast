@@ -7,7 +7,7 @@ One file per network, written by `nightcast-deploy` and committed so anyone can 
 | `contractAddress` | Where Nightcast lives on that network |
 | `sourceCommit` | The commit it was built from (`-dirty` means uncommitted changes) |
 | `compiler` | Compact compiler, language and runtime versions |
-| `parameters` | Constructor arguments: oracle public key, operator commitment, request windows |
+| `parameters` | Constructor arguments: oracle public key, operator commitment, request windows, and since v1 the request fee and the collateral per request (in NIGHT atoms: 1 NIGHT is 1,000,000) |
 | `transactions` | Deploy, authority-lock and key-acceptance transaction ids. The contract is deployed already locked, so `lockAuthority` is the deploy transaction itself |
 | `maintenanceAuthority` | An empty committee with threshold 1, which can never sign, set in the deploy transaction (counter 0) |
 | `verifierKeys` | SHA-256 of each circuit's verifier key (the code's fingerprints) |
@@ -24,7 +24,8 @@ npm install && npm run compact && npm run build
 1. the maintenance authority is locked, so nobody can replace the contract's code;
 2. the verifier keys on chain match the fingerprints in this file;
 3. your own build of this commit produces the same fingerprints;
-4. the oracle key is active and matches the record;
-5. the request windows match.
+4. the oracle key is active and matches the record, and whether a key change is pending;
+5. the request windows match;
+6. the request fee and the collateral match, and how many slots of the oracle's bond are free for new requests.
 
 It needs no wallet and no secrets.

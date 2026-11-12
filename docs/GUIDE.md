@@ -23,13 +23,15 @@ npm install @nightcast/sdk @nightcast/contract
 
 Node 22 or later. `@nightcast/contract` is the compiled contract (with its keys), its helpers and a simulator; `@nightcast/sdk` turns answers into choices and runs an oracle. Both are ES modules with TypeScript types.
 
+The version on npm, 0.1.0, holds the v0 contract. Everything in this guide that turns an answer into choices, and the simulator, works with it. The live Preprod deployment is v1 (each request pays a fee and names a refund address), so to make requests to it from your own code, build `@nightcast/contract` from the repository until the next release is published; the command line and the MCP server in the repository are already v1.
+
 ## How a draw works
 
 1. **Decide what you're drawing for, and fix it.** The entrants, the prizes, the rules. Once randomness exists, nothing it decides may change.
-2. **Request** randomness from the Nightcast contract: `request(tag, seed, deadline)`. The `tag` is your label (32 bytes, e.g. `"raffle #12"`), the `seed` is 32 bytes you choose (for a raffle, the list's fingerprint), and the deadline is when the oracle must have answered. The request's id is fixed by the contract's address, your requester commitment, the tag and the seed.
-3. **The oracle answers** (`fulfil`), usually within a couple of minutes. Its answer, `output`, is 32 bytes stored with the request. The network checked a zero-knowledge proof that it's the one output the oracle's key gives for this request.
+2. **Request** randomness from the Nightcast contract: `request(tag, seed, deadline, refundTo)`. The `tag` is your label (32 bytes, e.g. `"raffle #12"`), the `seed` is 32 bytes you choose (for a raffle, the list's fingerprint), the deadline is when the oracle must have answered, and `refundTo` is the address that gets your money back if it doesn't. The request pays the deployment's fee (0.1 tNIGHT on Preprod). Its id is fixed by the contract's address, your requester commitment, the tag and the seed.
+3. **The oracle answers** (`fulfil`), usually within a minute or two. Its answer, `output`, is 32 bytes stored with the request. The network checked a zero-knowledge proof that it's the one output the oracle's key gives for this request.
 4. **Use the answer**: turn `output` into your result with the SDK. Anyone with the same output and the same inputs gets the same result.
-5. **If the deadline passes unanswered**, anyone can mark the request `expired`. Decide in advance what then happens (usually: cancel that draw and announce a new one), never "ask again until it looks right".
+5. **If the deadline passes unanswered**, anyone can mark the request `expired`, which sends the fee and the oracle's collateral for it to `refundTo`. Decide in advance what then happens (usually: cancel that draw and announce a new one), never "ask again until it looks right".
 
 ## Turning an answer into choices
 
@@ -71,7 +73,7 @@ The point of verifiable randomness is that people who don't trust you can check 
    ./nightcast request --network preprod --requester requester.secret --wallet wallet.secret \
      --tag "raffle #12" --seed <fingerprint> --wait
    ```
-   (or `request(tag, fromHex(fingerprint), deadline)` from your own code; see [Making a request](#making-a-request)). **Publish the request id straight away.** It is the draw: one request per raffle.
+   (or `request(tag, fromHex(fingerprint), deadline, refundTo)` from your own code; see [Making a request](#making-a-request)). **Publish the request id straight away.** It is the draw: one request per raffle.
 4. **When it's answered**, draw:
    ```ts
    const winners = pickMany(output, names, 3);
@@ -84,10 +86,10 @@ Anyone can then check, from public data only, that the request was made with thi
 
 ## Making a request
 
-A request is a transaction on the Nightcast contract, paid in DUST by your wallet, with your requester secret (`./nightcast keygen requester`) as its witness. The published deployments are in the [README](../README.md#live-deployment) and [deployments/](../deployments).
+A request is a transaction on the Nightcast contract, with your requester secret (`./nightcast keygen requester`) as its witness. Your wallet pays the transaction fee in DUST and the deployment's request fee in NIGHT (0.1 tNIGHT on Preprod). The published deployments are in the [README](../README.md#live-deployment) and [deployments/](../deployments).
 
 - **From the command line:** the repository's `./nightcast request` (set up as in the [Preprod guide](preprod-guide.md), Parts 1, 2 and 5). `--seed` sets the seed (a raffle's fingerprint; random otherwise), `--wait` waits for the answer and checks it.
-- **From your own code:** with midnight-js, join the deployment with `findDeployedContract` using the compiled contract from `@nightcast/contract` and a private state holding `{ requesterSecret }`, then call `callTx.request(tag, seed, deadline)`. The request's id is its result. [deploy/src/service.ts](../deploy/src/service.ts) (`submitRequest`, `waitForResult`) is a complete, working example on midnight-js 4.1.1.
+- **From your own code:** with midnight-js, join the deployment with `findDeployedContract` using the compiled contract from `@nightcast/contract` and a private state holding `{ requesterSecret }`, then call `callTx.request(tag, seed, deadline, refundTo)`. The request's id is its result. [deploy/src/service.ts](../deploy/src/service.ts) (`submitRequest`, `waitForResult`) is a complete, working example on Midnight.js 5.
 
 The deadline must be within the deployment's request window (`minWindow` to `maxWindow`, in its deployment record); 30 minutes is a good default.
 
@@ -157,7 +159,7 @@ Outputs from the simulator come from a throwaway key, so they differ from a live
 
 ## Randomness inside your own contract
 
-A Compact contract can't call the Nightcast contract or read its state today (cross-contract calls aren't available on Preprod or Mainnet yet). A contract that needs randomness in-circuit embeds the same VRF, as Lunardraw's Starfall contract does: [SPEC §5.1](SPEC.md#51-on-chain-consumers-embed-dont-call-decision-22-oct-2026). `dist/nightcast.compact` in `@nightcast/contract` is the reference.
+A Compact contract can't call the Nightcast contract or read its state today: Nightcast is compiled with Compact 0.31.1, which has no cross-contract calls. A contract that needs randomness in-circuit embeds the same VRF, as Lunardraw's Starfall contract does: [SPEC §5.1](SPEC.md#51-on-chain-consumers-embed-dont-call-decision-22-oct-2026). `dist/nightcast.compact` in `@nightcast/contract` is the reference.
 
 ### Many words from one answer: SHA-256 or Poseidon
 

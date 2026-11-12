@@ -4,7 +4,9 @@ This walks you through putting Nightcast on Midnight's Preprod test network, run
 
 Preprod uses test tokens with no real value, so nothing here costs money.
 
-**Preview instead of Preprod:** Midnight's other test network, Preview, needs no Blockfrost account. To use it, skip step 8 and write `--network preview` wherever this guide says `--network preprod`; its faucet is <https://midnight-tmnight-preview.nethermind.dev/>. Preprod is the one meant for final testing before Mainnet.
+> **Where things stand (12 Nov 2026).** Preprod moved to ledger 9 on 9 Nov 2026. Parts 1 and 2 work as written, and so does Part 5 against the [live deployment](../README.md#live-deployment), whose oracle is already running. **Part 3, deploying your own copy, has to wait**: on ledger 9 a new deployment of a contract compiled with Compact 0.31.1 is refused, and the 0.36 recompile is still to do ([#58](https://github.com/LearnMidnight/Nightcast/issues/58)). Until then skip Parts 3, 4 and 6: the checkout already points at the live deployment (`deployments/preprod.json`), so go from step 9 straight to step 12. You then need only the requester secret and the requester wallet.
+
+**Preview instead of Preprod:** Midnight's other test network, Preview, needs no Blockfrost account. To use it, skip step 8 and write `--network preview` wherever this guide says `--network preprod`; its faucet is <https://midnight-tmnight-preview.nethermind.dev/>. Preprod is the one meant for final testing before Mainnet. (Preview hasn't been tested again since Nightcast moved to the ledger 9 stack, and there is no published deployment on it.)
 
 **Time:** about an hour of hands-on work, plus up to an hour (unattended) for the wallets' first sync.
 
@@ -76,7 +78,7 @@ compact update 0.31.1
 compact compile --version
 ```
 
-The last line should print `0.31.1`, the version Preprod runs.
+The last line should print `0.31.1`, the version the contract is written for.
 
 ### 5. Download and build Nightcast
 
@@ -128,7 +130,7 @@ The wallets hold test tokens that pay transaction fees. One is for the oracle, o
 
 ### 8. Get a Blockfrost project ID
 
-Since 9 October 2026, Preprod's public servers are run by **Blockfrost**, and every connection needs a free Blockfrost *project ID* (like an API key).
+Since 9 October 2026, Preprod's public indexer (where wallets and tools read the chain) is run by **Blockfrost**, and every connection to it needs a free Blockfrost *project ID* (like an API key).
 
 1. Sign up at <https://blockfrost.io> (the free plan is enough).
 2. In the dashboard, click **Add project**, give it a name (e.g. `nightcast`), and choose the network **Midnight Preprod**.
@@ -143,6 +145,7 @@ Every command finds the ID there automatically. Keep it private like your other 
 
 **The request limit.** A Blockfrost project may make a set number of requests a day (50,000 on the free plan; the day runs midnight to midnight UTC). Past it, Blockfrost answers everything with `402 Project Over Limit` until the next day. Nightcast counts its own requests and is built to stay well inside the limit:
 
+- an open wallet asks about once a minute, around 1,700 requests a day. (Midnight's wallet software asks 8 times a minute by default, 11,500 a day for every wallet that is merely open; Nightcast slows its timers down. `NIGHTCAST_VERSION_WATCH_SECS` and `NIGHTCAST_LIVENESS_SECS` change them.)
 - the oracle looks for requests every 15 seconds on Preprod (every 5 while one is waiting); `--poll <seconds>` changes it. At 15 seconds that is about 5,800 requests a day;
 - every service logs `Blockfrost today (UTC …): N request(s), …` once an hour, and `./nightcast mcp`'s `/health` and the oracle's status file carry the same counts;
 - set `NIGHTCAST_BLOCKFROST_USAGE=<file>` for a service to keep its count in that file across restarts (one file per service), so a monitor can add them up;
@@ -170,7 +173,7 @@ It prints the wallet address (starting `mn_addr_preprod1...`), then starts synci
 2. Paste the address, complete the captcha and click **Request tokens**. You can do this straight away; you don't need to wait for the sync.
 3. Leave the terminal running.
 
-**The first sync takes a while.** A new wallet reads the network's whole history: about 10 minutes on Preview and roughly an hour on Preprod (1.7 million events), depending on your computer and connection. Every 30 seconds it prints progress like:
+**The first sync takes a while.** A new wallet reads the network's whole history: about 10 minutes on Preview and roughly an hour on Preprod (nearly 1.9 million events in November 2026), depending on your computer and connection. Every 30 seconds it prints progress like:
 
 ```
 Syncing: shielded 12.3% (33493/271763), unshielded done, dust 14.2% (38670/272206)
@@ -196,6 +199,8 @@ If the faucet says you're rate-limited, wait a few hours and try again.
 
 ## Part 3: Deploy Nightcast
 
+**Not possible on Preprod at the moment:** see "Where things stand" at the top. This part is how the live deployment was made, and how it will work again after [#58](https://github.com/LearnMidnight/Nightcast/issues/58).
+
 ### 10. Deploy, lock and activate
 
 ```bash
@@ -203,8 +208,11 @@ If the faucet says you're rate-limited, wait a few hours and try again.
   --oracle ~/nightcast-secrets/oracle.secret \
   --operator ~/nightcast-secrets/operator.secret \
   --wallet ~/nightcast-secrets/oracle-wallet.secret \
+  --fee 0.1 --collateral 1 \
   --accept
 ```
+
+`--fee` is what each request pays the oracle, and `--collateral` is how much of the oracle's bond each request sets aside (the requester gets it if the oracle misses the deadline). Leave both out for a deployment with neither.
 
 This takes a few minutes. It:
 
@@ -213,16 +221,31 @@ This takes a few minutes. It:
 3. activates the oracle key;
 4. writes `deployments/preprod.json` and checks everything.
 
-It ends with a checklist. Every line should say **PASS**:
+It ends with a checklist:
 
 ```
 PASS  contract exists: ...
 PASS  maintenance authority locked: committee of 0, threshold 1, 0 update(s) since deploy
-PASS  verifier keys match the published fingerprints: 7 circuits
+PASS  verifier keys match the published fingerprints: 10 circuits
 PASS  this checkout compiles to the deployed code: identical
 PASS  oracle key accepted: active and matches the record
+PASS  no oracle key change pending: a change would wait 86400s
 PASS  request windows match: 60s to 86400s
+PASS  request fee and collateral match: fee 0.1 NIGHT a request (to the oracle), collateral 1 NIGHT a request (to the requester if it expires)
+FAIL  the oracle's bond can back new requests: 0 free slot(s) ...
 ```
+
+Every line should say **PASS** except the last: a deployment that takes collateral starts with an empty bond.
+
+### 10b. Give the oracle its bond
+
+```bash
+./nightcast bond deposit --network preprod --slots 20 \
+  --wallet ~/nightcast-secrets/oracle-wallet.secret
+./nightcast verify --network preprod
+```
+
+Each slot is the collateral for one open request, so 20 slots (20 tNIGHT here) lets 20 requests wait at once. `verify` should now print only PASS lines.
 
 ---
 
@@ -238,6 +261,8 @@ cd ~/nightcast
 ```
 
 When it says `Oracle running for ...` and `Press Ctrl+C to stop.`, it's watching for requests. **Leave this window open.**
+
+(With the live deployment you don't run an oracle: only the holder of its oracle key can answer, and that oracle is already running.)
 
 ---
 
@@ -255,7 +280,7 @@ cd ~/nightcast
   --wait
 ```
 
-It submits a request, prints its id, and waits. In the oracle window you'll see `fulfilled <id> -> <output>`. Back in this window you'll see something like:
+It submits a request, prints its id, and waits. The request pays the deployment's fee (0.1 tNIGHT on the live one) from the requester wallet. In the oracle window, if you run one, you'll see `fulfilled <id> -> <output>`. Back in this window you'll see something like:
 
 ```
 request  4f2c...
@@ -327,5 +352,5 @@ git push
 | Stuck on "Waiting for the NIGHT to arrive" | Check you pasted the `mn_addr_preprod1...` address into the faucet, with no spaces. |
 | Stuck on "Waiting for the first DUST" | Normal for a few minutes after funding; DUST builds up over time. A `Waiting for DUST` line every minute shows what the wallet sees. If a wallet that had DUST before shows 0 for more than 15 minutes, its saved sync state is probably stale: press Ctrl+C, run `./nightcast wallet forget --network preprod --wallet <its wallet file>`, then start again (it syncs from the beginning, which takes a while). |
 | `the oracle key is not active yet` | Run `./nightcast accept-key --network preprod --oracle ~/nightcast-secrets/oracle.secret --wallet ~/nightcast-secrets/oracle-wallet.secret`. |
-| A request shows `expired` | The oracle wasn't running before its deadline. Start the oracle and make a new request. |
+| A request shows `expired` | The oracle didn't answer before its deadline. The fee and the collateral went back to the wallet that made the request. Check the oracle is running and make a new request. |
 | `No compiled contract with proving keys found` | Run `npm run compact` then `npm run build` in `~/nightcast`. |
