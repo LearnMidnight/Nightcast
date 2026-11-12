@@ -1,6 +1,6 @@
 {
   "name": "nightcast",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "private": true,
   "description": "Verifiable randomness for Midnight smart contracts, games, lotteries and AI agents.",
   "license": "MIT",

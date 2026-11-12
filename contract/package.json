@@ -1,6 +1,6 @@
 {
   "name": "@nightcast/contract",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "Nightcast: verifiable randomness for Midnight. The Compact contract (compiled, with proving keys), key helpers and an in-memory simulator. Experimental and unaudited: testnets only.",
   "keywords": [
     "midnight",
