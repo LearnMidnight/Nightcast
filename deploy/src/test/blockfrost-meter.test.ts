@@ -32,7 +32,7 @@ describe('the Blockfrost meter', () => {
     m.message('in');
     m.message('out');
     expect(m.usage()).toEqual({ day: '2026-11-12', at: '2026-11-12T08:00:00.000Z', http: 2, sockets: 1, messagesIn: 2, messagesOut: 1, refused: 0 });
-    expect(usageLine(m.usage())).toBe('Blockfrost today (UTC 2026-11-12): 2 request(s), 1 connection(s), 2 message(s) received and 1 sent');
+    expect(usageLine(m.usage())).toBe('Blockfrost today (UTC 2026-11-12): about 3 counted against the limit (2 request(s) and 1 message(s) sent); 1 connection(s), 2 message(s) received');
     // Blockfrost's day ends at midnight UTC: the counts start again
     now = at(0, 1, 13);
     m.request('http');

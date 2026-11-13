@@ -121,12 +121,20 @@ describe('fee settings from the environment', () => {
 
 describe("the wallet's own timers", () => {
   it('asks the indexer every 10 and every 2 minutes, not every 30 s (8 requests a minute per open wallet)', () => {
-    expect(timerSettings({})).toEqual({ versionWatchMs: 600_000, livenessMs: 120_000 });
+    expect(timerSettings({})).toEqual({ versionWatchMs: 600_000, livenessMs: 120_000, keepAliveMs: 50_000 });
   });
   it('can be set, and ignores what makes no sense', () => {
-    expect(timerSettings({ NIGHTCAST_VERSION_WATCH_SECS: '0', NIGHTCAST_LIVENESS_SECS: '30' })).toEqual({ versionWatchMs: 0, livenessMs: 30_000 });
-    expect(timerSettings({ NIGHTCAST_VERSION_WATCH_SECS: 'never', NIGHTCAST_LIVENESS_SECS: '1' })).toEqual({ versionWatchMs: 600_000, livenessMs: 120_000 });
-    expect(timerSettings({ NIGHTCAST_VERSION_WATCH_SECS: '', NIGHTCAST_LIVENESS_SECS: '-5' })).toEqual({ versionWatchMs: 600_000, livenessMs: 120_000 });
+    expect(timerSettings({ NIGHTCAST_VERSION_WATCH_SECS: '0', NIGHTCAST_LIVENESS_SECS: '30' })).toEqual({ versionWatchMs: 0, livenessMs: 30_000, keepAliveMs: 50_000 });
+    expect(timerSettings({ NIGHTCAST_VERSION_WATCH_SECS: 'never', NIGHTCAST_LIVENESS_SECS: '1' })).toEqual({ versionWatchMs: 600_000, livenessMs: 120_000, keepAliveMs: 50_000 });
+    expect(timerSettings({ NIGHTCAST_VERSION_WATCH_SECS: '', NIGHTCAST_LIVENESS_SECS: '-5' })).toEqual({ versionWatchMs: 600_000, livenessMs: 120_000, keepAliveMs: 50_000 });
+  });
+  it('pings each open indexer connection every 50 s, not every 15 (Blockfrost counts each ping as a request)', () => {
+    expect(timerSettings({}).keepAliveMs).toBe(50_000);
+    expect(timerSettings({ NIGHTCAST_WS_KEEPALIVE_SECS: '300' }).keepAliveMs).toBe(300_000);
+    expect(timerSettings({ NIGHTCAST_WS_KEEPALIVE_SECS: '0' }).keepAliveMs).toBe(0);
+    expect(timerSettings({ NIGHTCAST_WS_KEEPALIVE_SECS: ' 0 ' }).keepAliveMs).toBe(0);
+    expect(timerSettings({ NIGHTCAST_WS_KEEPALIVE_SECS: '2' }).keepAliveMs).toBe(50_000);
+    expect(timerSettings({ NIGHTCAST_WS_KEEPALIVE_SECS: 'off' }).keepAliveMs).toBe(50_000);
   });
 });
 

@@ -145,9 +145,10 @@ Every command finds the ID there automatically. Keep it private like your other 
 
 **The request limit.** A Blockfrost project may make a set number of requests a day (50,000 on the free plan; the day runs midnight to midnight UTC). Past it, Blockfrost answers everything with `402 Project Over Limit` until the next day. Nightcast counts its own requests and is built to stay well inside the limit:
 
-- an open wallet asks about once a minute, around 1,700 requests a day. (Midnight's wallet software asks 8 times a minute by default, 11,500 a day for every wallet that is merely open; Nightcast slows its timers down. `NIGHTCAST_VERSION_WATCH_SECS` and `NIGHTCAST_LIVENESS_SECS` change them.)
+- what counts: each request, and each message sent over an open connection (pings included). Messages received don't count;
+- an open wallet asks about once a minute, and pings each of its two or three open connections every 50 seconds: around 6,000 a day in all. (Midnight's wallet software asks 8 times a minute and pings every 15 seconds by default, 23,000 to 29,000 a day for every wallet that is merely open; Nightcast slows them down. `NIGHTCAST_VERSION_WATCH_SECS`, `NIGHTCAST_LIVENESS_SECS` and `NIGHTCAST_WS_KEEPALIVE_SECS` change them.)
 - the oracle looks for requests every 15 seconds on Preprod (every 5 while one is waiting); `--poll <seconds>` changes it. At 15 seconds that is about 5,800 requests a day;
-- every service logs `Blockfrost today (UTC …): N request(s), …` once an hour, and `./nightcast mcp`'s `/health` and the oracle's status file carry the same counts;
+- every service logs `Blockfrost today (UTC …): about N counted against the limit …` once an hour, and `./nightcast mcp`'s `/health` and the oracle's status file carry the same counts;
 - set `NIGHTCAST_BLOCKFROST_USAGE=<file>` for a service to keep its count in that file across restarts (one file per service), so a monitor can add them up;
 - if Blockfrost does refuse the project, a service says so, stops, and asks again once every 15 minutes instead of retrying non-stop (which can get the address banned).
 

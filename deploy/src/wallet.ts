@@ -248,7 +248,8 @@ const walletConfiguration = (env: EnvironmentConfiguration, prover: 'server' | '
   const configuration = {
     forks: DefaultForkSchedule,
     batchUpdates: { size: syncBatchSize(), timeout: 100, spacing: 0 },
-    indexerClientConnection: { indexerHttpUrl: env.indexer, indexerWsUrl: env.indexerWS },
+    // keepAlive: how often each open indexer connection sends a ping (see timerSettings).
+    indexerClientConnection: { indexerHttpUrl: env.indexer, indexerWsUrl: env.indexerWS, keepAlive: timers.keepAliveMs },
     // The wallet's own timers, slowed down (see timerSettings). The shielded and DUST parts read versionWatch and
     // the unshielded part livenessPollInterval from this same object; the facade's type doesn't list them.
     versionWatch: { intervalMs: timers.versionWatchMs },
@@ -282,8 +283,24 @@ const walletConfiguration = (env: EnvironmentConfiguration, prover: 'server' | '
  *
  * NIGHTCAST_VERSION_WATCH_SECS (0 turns the watch off) and
  * NIGHTCAST_LIVENESS_SECS (10 or more) change them.
+ *
+ * The pings cost more than those timers did. Each wallet part holds a
+ * WebSocket to the indexer open, and the SDK sends a ping on each one every
+ * 15 s: 4 a minute per connection, two or three connections per wallet,
+ * 11,500 to 17,000 a day for a wallet that is merely open. Blockfrost counts a
+ * message we send like a request: on 13 Nov 2026 the dashboard's figure for
+ * the day (30,826) was our HTTP requests (7,343) plus our sent messages
+ * (24,230) to within 3%, and nearly all of those were pings (7.5 a minute from
+ * services with two connections, 11.9 from one with three).
+ *
+ * Here a connection pings every 50 s: under the 60 s after which common
+ * proxies close a connection that has gone quiet, and 1.2 a minute instead of
+ * 4. NIGHTCAST_WS_KEEPALIVE_SECS changes it (5 or more; 0 sends no pings, and
+ * then a quiet connection may be closed and reopened by a proxy on the way).
  */
-export const timerSettings = (env: NodeJS.ProcessEnv = process.env): { versionWatchMs: number; livenessMs: number } => {
+export const timerSettings = (
+  env: NodeJS.ProcessEnv = process.env,
+): { versionWatchMs: number; livenessMs: number; keepAliveMs: number } => {
   const secs = (v: string | undefined, fallback: number, min: number): number => {
     const n = Number(v);
     return v !== undefined && v.trim() !== '' && Number.isFinite(n) && n >= min ? n : fallback;
@@ -291,6 +308,7 @@ export const timerSettings = (env: NodeJS.ProcessEnv = process.env): { versionWa
   return {
     versionWatchMs: Math.round(secs(env.NIGHTCAST_VERSION_WATCH_SECS, 600, 0) * 1000),
     livenessMs: Math.round(secs(env.NIGHTCAST_LIVENESS_SECS, 120, 10) * 1000),
+    keepAliveMs: env.NIGHTCAST_WS_KEEPALIVE_SECS?.trim() === '0' ? 0 : Math.round(secs(env.NIGHTCAST_WS_KEEPALIVE_SECS, 50, 5) * 1000),
   };
 };
 
