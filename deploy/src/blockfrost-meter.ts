@@ -15,6 +15,10 @@
  *  - every request to Blockfrost is counted here (HTTP requests, WebSocket
  *    connections, WebSocket messages), per UTC day, logged hourly and kept in
  *    a small file (NIGHTCAST_BLOCKFROST_USAGE) that a monitor can add up;
+ *  - what Blockfrost charges against the allowance is the HTTP requests plus
+ *    the WebSocket messages we send (see `charged`): on 13 Nov 2026 its
+ *    dashboard showed 30,826 when our services had made 7,343 HTTP requests
+ *    and sent 24,230 messages. Messages received are not charged;
  *  - a 402 or 418 is remembered, so a service can say so plainly and stop
  *    knocking (see blockfrostGate).
  *
@@ -145,9 +149,16 @@ export class BlockfrostMeter {
   }
 }
 
+/**
+ * What Blockfrost counts against the daily allowance, as far as we have measured it: each HTTP request and each
+ * WebSocket message sent (a subscription, a query, a ping).
+ */
+export const charged = (u: UsageCounts): number => u.http + u.messagesOut;
+
 /** One line for the log: today's counts. */
 export const usageLine = (u: Usage): string =>
-  `Blockfrost today (UTC ${u.day}): ${u.http} request(s), ${u.sockets} connection(s), ${u.messagesIn} message(s) received and ${u.messagesOut} sent` +
+  `Blockfrost today (UTC ${u.day}): about ${charged(u)} counted against the limit (${u.http} request(s) and ${u.messagesOut} message(s) sent); ` +
+  `${u.sockets} connection(s), ${u.messagesIn} message(s) received` +
   (u.refused ? `; ${u.refused} refused for the limit` : '');
 
 /** The process's meter. */

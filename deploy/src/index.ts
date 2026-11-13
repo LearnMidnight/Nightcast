@@ -49,6 +49,7 @@ export { redact } from './redact-output.js';
 export {
   blockfrostGate,
   BlockfrostMeter,
+  charged,
   installMeter,
   isOverLimit,
   meter,
