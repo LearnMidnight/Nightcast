@@ -16,6 +16,17 @@
  *   frees it within a few minutes of the transaction landing); or
  * - the DUST part hasn't applied a new chain event for `dustStallMinutes`
  *   (Preprod has DUST events every minute or so).
+ *
+ * Seen on Preprod (14 Nov 2026, a LunaSpin request): the oracle's DUST view
+ * stalled while a request waited. The first fulfil spent two minutes proving,
+ * then failed with `DustTreesNotAtBlock` ("No Dust spend can be dated yet"),
+ * and the 10-minute stall rule restarted the oracle with two minutes left
+ * before the request's deadline. So, sooner, when there is something to pay
+ * for:
+ * - a fee that fails because the wallet's DUST trees are behind the chain
+ *   restarts at once; and
+ * - before a fulfil, `readyToPay()` refuses to start one (and the service
+ *   restarts) when the DUST view hasn't moved for `answerStallMinutes`.
  */
 import { inspect } from 'node:util';
 
@@ -40,21 +51,35 @@ const read = <T>(f: () => T): T | undefined => {
   }
 };
 
+/** The fee failed because the wallet's DUST trees are behind the chain (wallet SDK 2's `DustTreesNotAtBlock`). */
+export const isDustBehindChain = (err: unknown): boolean => {
+  const text = typeof err === 'string' ? err : `${err instanceof Error ? err.message : ''} ${inspect(err, { depth: 8 })}`;
+  return /DustTreesNotAtBlock|No Dust spend can be dated/i.test(text);
+};
+
 /** The fee failed because the wallet found no coin to pay with (wallet SDK 2's `Wallet.InsufficientFunds`). */
 export const isInsufficientFunds = (err: unknown): boolean => {
   const text = typeof err === 'string' ? err : `${err instanceof Error ? err.message : ''} ${inspect(err, { depth: 8 })}`;
   return /InsufficientFunds|Insufficient funds/i.test(text);
 };
 
-export type HealthOptions = { pendingMinutes?: number; dustStallMinutes?: number };
+export type HealthOptions = { pendingMinutes?: number; dustStallMinutes?: number; answerStallMinutes?: number };
 
-/** Minutes from the environment: NIGHTCAST_PENDING_MINUTES (default 8) and NIGHTCAST_DUST_STALL_MINUTES (default 10). */
+/**
+ * Minutes from the environment: NIGHTCAST_PENDING_MINUTES (default 8), NIGHTCAST_DUST_STALL_MINUTES
+ * (default 10) and NIGHTCAST_ANSWER_STALL_MINUTES (default 3: how stale the DUST view may be when
+ * a request is about to be answered).
+ */
 export const healthOptions = (env: NodeJS.ProcessEnv = process.env): Required<HealthOptions> => {
   const minutes = (v: string | undefined, fallback: number) => {
     const n = Number(v);
     return v !== undefined && v !== '' && Number.isFinite(n) && n > 0 ? n : fallback;
   };
-  return { pendingMinutes: minutes(env.NIGHTCAST_PENDING_MINUTES, 8), dustStallMinutes: minutes(env.NIGHTCAST_DUST_STALL_MINUTES, 10) };
+  return {
+    pendingMinutes: minutes(env.NIGHTCAST_PENDING_MINUTES, 8),
+    dustStallMinutes: minutes(env.NIGHTCAST_DUST_STALL_MINUTES, 10),
+    answerStallMinutes: minutes(env.NIGHTCAST_ANSWER_STALL_MINUTES, 3),
+  };
 };
 
 export class WalletHealth {
@@ -100,6 +125,23 @@ export class WalletHealth {
     if (isInsufficientFunds(err) && this.holdsDust) {
       this.reason ??= 'a fee failed for insufficient funds although the wallet holds DUST (its coins are stuck as booked)';
     }
+    if (isDustBehindChain(err)) {
+      this.reason ??= "a fee failed because the wallet's DUST view is behind the chain";
+    }
+  }
+
+  /**
+   * Call before paying for something that can't wait (the oracle's fulfil). Returns why not, and
+   * marks the wallet stuck, when its DUST view hasn't moved for `answerStallMinutes`: a fee would
+   * likely fail after minutes of proving, and a restart syncs afresh in about a minute.
+   */
+  readyToPay(): string | undefined {
+    if (this.dustAt === '') return undefined;
+    const idle = (this.clock() - this.dustMovedAt) / 60_000;
+    if (idle < this.o.answerStallMinutes) return undefined;
+    const why = `a request is waiting and the wallet's DUST view hasn't moved for ${Math.floor(idle)} minutes`;
+    this.reason ??= why;
+    return why;
   }
 
   /** Why the wallet looks stuck, if it does. */

@@ -28,8 +28,12 @@ export const startOracleService = async (
   contractAddress: string,
   secretKey: bigint,
   logger: Logger,
-  options: Pick<OracleOptions, 'pollMs' | 'busyPollMs' | 'safetyMarginSecs' | 'requesters'> = {},
+  options: Pick<OracleOptions, 'pollMs' | 'busyPollMs' | 'safetyMarginSecs' | 'requesters'> & {
+    /** Called before each fulfil; throw to skip it (the oracle retries after its back-off). */
+    beforeFulfil?: () => void;
+  } = {},
 ): Promise<RunningOracle> => {
+  const { beforeFulfil, ...oracleOptions } = options;
   const state = await readContractState(providers.publicDataProvider, contractAddress);
   if (!state) throw new Error(`no Nightcast contract at ${contractAddress}`);
   const ledger = ledgerOf(state);
@@ -51,6 +55,13 @@ export const startOracleService = async (
   // `expire` is a small call: on ledger 9 its fee needs two DUST spends (see withTwoDustSpends).
   const expire = chain.expire.bind(chain);
   chain.expire = (id) => withTwoDustSpends(() => expire(id));
+  if (beforeFulfil) {
+    const fulfil = chain.fulfil.bind(chain);
+    chain.fulfil = async (id) => {
+      beforeFulfil();
+      return fulfil(id);
+    };
+  }
   const oracle = new NightcastOracle({
     chain,
     secretKey,
@@ -61,11 +72,11 @@ export const startOracleService = async (
       warn: (m) => logger.warn(m),
       error: (m) => logger.error(m),
     },
-    ...options,
+    ...oracleOptions,
   });
   oracle.start();
-  const pollMs = options.pollMs ?? 5_000;
-  const busyPollMs = Math.min(options.busyPollMs ?? pollMs, pollMs);
+  const pollMs = oracleOptions.pollMs ?? 5_000;
+  const busyPollMs = Math.min(oracleOptions.busyPollMs ?? pollMs, pollMs);
   logger.info(`Oracle running for ${contractAddress}; polling every ${pollMs / 1000}s${busyPollMs < pollMs ? ` (every ${busyPollMs / 1000}s while a request is waiting)` : ''}`);
   return { oracle, stop: () => oracle.stop() };
 };
