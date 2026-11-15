@@ -660,6 +660,11 @@ const main = async (argv: string[]): Promise<number> => {
             pollMs: pollSecs * 1000,
             busyPollMs: Math.min(pollSecs, 5) * 1000,
             requesters,
+            // Don't spend minutes proving an answer the wallet can't pay for: restart first (below).
+            beforeFulfil: () => {
+              const why = health.readyToPay();
+              if (why) throw new Error(`not answering yet: ${why}; restarting the oracle first`);
+            },
           });
           const upkeep = upkeepConfig();
           const stopUpkeep = upkeepWanted(upkeep)
@@ -680,7 +685,7 @@ const main = async (argv: string[]): Promise<number> => {
                 session.logger.error(`Restarting the oracle: ${why}.`);
                 resolve(RESTART);
               }
-            }, 15_000);
+            }, 5_000);
           });
           clearInterval(check);
           stopUpkeep();

@@ -78,8 +78,8 @@ describe('a stuck wallet', () => {
   });
 
   it('takes its minutes from the environment', () => {
-    expect(healthOptions({})).toEqual({ pendingMinutes: 8, dustStallMinutes: 10 });
-    expect(healthOptions({ NIGHTCAST_PENDING_MINUTES: '3', NIGHTCAST_DUST_STALL_MINUTES: 'x' })).toEqual({ pendingMinutes: 3, dustStallMinutes: 10 });
+    expect(healthOptions({})).toEqual({ pendingMinutes: 8, dustStallMinutes: 10, answerStallMinutes: 3 });
+    expect(healthOptions({ NIGHTCAST_PENDING_MINUTES: '3', NIGHTCAST_DUST_STALL_MINUTES: 'x' })).toEqual({ pendingMinutes: 3, dustStallMinutes: 10, answerStallMinutes: 3 });
   });
 
   it("passes a logger's errors and warnings on, and still logs them", () => {
