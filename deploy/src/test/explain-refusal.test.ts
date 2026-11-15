@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { balanceReport, explainRefusals, isRefusal } from '../explain-refusal.js';
-import { failureText, feeSettings, timerSettings } from '../wallet.js';
+import { failureText, feeSettings, skipLedgerV8DustHistory, timerSettings } from '../wallet.js';
 
 const refusal = () => Object.assign(new Error('Transaction submission error'), { cause: new Error('1010: Invalid Transaction: Custom error: 138') });
 
@@ -148,5 +148,13 @@ describe('an error with its causes', () => {
   it('leaves a plain error as it is', () => {
     expect(failureText(new Error('usage: ./nightcast'))).toBe('usage: ./nightcast');
     expect(failureText('text')).toBe('text');
+  });
+});
+
+describe("a fresh wallet's DUST sync", () => {
+  it('starts at the ledger 9 fork, unless NIGHTCAST_DUST_V8_HISTORY=1 asks for the history before it', () => {
+    expect(skipLedgerV8DustHistory({})).toBe(true);
+    expect(skipLedgerV8DustHistory({ NIGHTCAST_DUST_V8_HISTORY: '0' })).toBe(true);
+    expect(skipLedgerV8DustHistory({ NIGHTCAST_DUST_V8_HISTORY: '1' })).toBe(false);
   });
 });

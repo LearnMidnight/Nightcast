@@ -77,6 +77,16 @@ export const syncBatchSize = (): number => {
   return Number.isFinite(n) && n > 0 ? n : 500;
 };
 
+/**
+ * Whether a wallet's first sync skips the DUST history from before the ledger 9 fork. When a chain
+ * crossed to ledger 9 it re-emitted all its DUST as ledger 9 events, so a fresh wallet can start
+ * there: on Preprod that skips about 1.86 of 1.93 million DUST events, which the event replay
+ * applies at only about 30 a second (some 17 hours). The only loss is the wallet's ledger 8 DUST
+ * transaction history. A restored wallet resumes from its saved position either way.
+ * NIGHTCAST_DUST_V8_HISTORY=1 reads the history (the SDK's default).
+ */
+export const skipLedgerV8DustHistory = (env: NodeJS.ProcessEnv = process.env): boolean => env.NIGHTCAST_DUST_V8_HISTORY !== '1';
+
 type SubmissionService = { submitTransaction(tx: unknown, waitFor?: 'Submitted' | 'InBlock' | 'Finalized'): Promise<unknown>; close(): Promise<void> };
 type Submittable = { identifiers(): string[] };
 
@@ -377,6 +387,7 @@ export const buildWallet = async (
       ledgerParams: DEFAULT_DUST_OPTIONS.ledgerParams,
       ...feeSettings(),
     },
+    skipLedgerV8DustHistory: skipLedgerV8DustHistory(),
   };
   const unshieldedConfig = {
     ...config,
