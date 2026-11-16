@@ -47,3 +47,14 @@ describe('a wallet behind the chain while a request waits', () => {
     expect(healthOptions({ NIGHTCAST_ANSWER_STALL_MINUTES: 'x' }).answerStallMinutes).toBe(3);
   });
 });
+
+describe('minutes from the environment', () => {
+  it('reads a positive number and falls back otherwise', async () => {
+    const { minutesFromEnv } = await import('../wallet-health.js');
+    expect(minutesFromEnv('4', 9)).toBe(4);
+    expect(minutesFromEnv(undefined, 9)).toBe(9);
+    expect(minutesFromEnv('', 9)).toBe(9);
+    expect(minutesFromEnv('0', 9)).toBe(9);
+    expect(minutesFromEnv('x', 9)).toBe(9);
+  });
+});

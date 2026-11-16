@@ -68,7 +68,7 @@ import { currentCommit, type DeploymentRecord, readRecord, recordPath, writeReco
 import { checkRequest } from './check.js';
 import { midnightBackend } from './mcp/backend.js';
 import { type McpMode, RESTART, runMcp, Watchdog } from './mcp/serve.js';
-import { healthOptions, noticingFailures, WalletHealth } from './wallet-health.js';
+import { healthOptions, minutesFromEnv, noticingFailures, WalletHealth } from './wallet-health.js';
 import { meter, overLimitReason } from './blockfrost-meter.js';
 import { OracleTally, upkeepConfig, upkeepWanted } from './upkeep.js';
 import { startUpkeep, talking } from './upkeep-run.js';
@@ -671,12 +671,17 @@ const main = async (argv: string[]): Promise<number> => {
             ? startUpkeep({ config: upkeep, session, wallet, providers, contractAddress: record.contractAddress, secretKey, oracle: running.oracle, tally })
             : () => undefined;
           session.logger.info('Press Ctrl+C to stop.');
+          // A pass that never finishes leaves the service running but answering nothing (16 Nov 2026:
+          // upkeep stopped writing its status at 09:04 CET, and a request went unanswered for its
+          // whole window). Restart when the oracle hasn't finished a look for NIGHTCAST_LOOK_STALL_MINUTES.
+          const lookStallMs = minutesFromEnv(process.env.NIGHTCAST_LOOK_STALL_MINUTES, 4) * 60_000;
           let check: NodeJS.Timeout | undefined;
           const code = await new Promise<number>((resolve) => {
             process.once('SIGINT', () => resolve(0));
             process.once('SIGTERM', () => resolve(0));
             check = setInterval(() => {
-              const why = health.stuck();
+              const sinceLook = Date.now() - running.lastLookAt();
+              const why = health.stuck() ?? (sinceLook >= lookStallMs ? `it hasn't looked at the contract's requests for ${Math.floor(sinceLook / 60_000)} minutes` : undefined);
               const refused = overLimitReason();
               if (refused) {
                 session.logger.error(`Stopping the oracle to wait: ${refused}.`);
@@ -688,6 +693,14 @@ const main = async (argv: string[]): Promise<number> => {
             }, 5_000);
           });
           clearInterval(check);
+          // Stopping waits for the pass in flight. If that pass never finishes, a restart would
+          // hang here for ever with the service still "active" (16 Nov 2026, from 09:27 CET for
+          // 2.5 hours): exit after a minute regardless. systemd starts it again.
+          const deadline = setTimeout(() => {
+            process.stderr.write(`The oracle didn't stop within 60 s; exiting (${code}) anyway.\n`);
+            process.exit(code);
+          }, 60_000);
+          deadline.unref();
           stopUpkeep();
           watch.unsubscribe();
           session.logger.info('Stopping the oracle...');

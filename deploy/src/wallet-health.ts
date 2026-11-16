@@ -70,11 +70,14 @@ export type HealthOptions = { pendingMinutes?: number; dustStallMinutes?: number
  * (default 10) and NIGHTCAST_ANSWER_STALL_MINUTES (default 3: how stale the DUST view may be when
  * a request is about to be answered).
  */
+/** A number of minutes from an environment value, or `fallback` when it's unset or not a positive number. */
+export const minutesFromEnv = (v: string | undefined, fallback: number): number => {
+  const n = Number(v);
+  return v !== undefined && v !== '' && Number.isFinite(n) && n > 0 ? n : fallback;
+};
+
 export const healthOptions = (env: NodeJS.ProcessEnv = process.env): Required<HealthOptions> => {
-  const minutes = (v: string | undefined, fallback: number) => {
-    const n = Number(v);
-    return v !== undefined && v !== '' && Number.isFinite(n) && n > 0 ? n : fallback;
-  };
+  const minutes = minutesFromEnv;
   return {
     pendingMinutes: minutes(env.NIGHTCAST_PENDING_MINUTES, 8),
     dustStallMinutes: minutes(env.NIGHTCAST_DUST_STALL_MINUTES, 10),
