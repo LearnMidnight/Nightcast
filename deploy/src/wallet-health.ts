@@ -57,6 +57,15 @@ export const isDustBehindChain = (err: unknown): boolean => {
   return /DustTreesNotAtBlock|No Dust spend can be dated/i.test(text);
 };
 
+/**
+ * An answer failed because the oracle's key is no longer in its private state. Something replaced the
+ * private state the oracle shares (16 Nov 2026: the upkeep's bond deposit); a restart loads the key again.
+ */
+export const isKeyMissing = (err: unknown): boolean => {
+  const text = typeof err === 'string' ? err : `${err instanceof Error ? err.message : ''} ${inspect(err, { depth: 8 })}`;
+  return /no oracle secret key in private state/i.test(text);
+};
+
 /** The fee failed because the wallet found no coin to pay with (wallet SDK 2's `Wallet.InsufficientFunds`). */
 export const isInsufficientFunds = (err: unknown): boolean => {
   const text = typeof err === 'string' ? err : `${err instanceof Error ? err.message : ''} ${inspect(err, { depth: 8 })}`;
@@ -130,6 +139,9 @@ export class WalletHealth {
     }
     if (isDustBehindChain(err)) {
       this.reason ??= "a fee failed because the wallet's DUST view is behind the chain";
+    }
+    if (isKeyMissing(err)) {
+      this.reason ??= "an answer failed because the oracle's key is missing from its private state";
     }
   }
 
