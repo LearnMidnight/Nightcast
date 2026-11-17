@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { healthOptions, isDustBehindChain, WalletHealth } from '../wallet-health.js';
+import { healthOptions, isDustBehindChain, isKeyMissing, WalletHealth } from '../wallet-health.js';
 
 /** A wallet state as wallet SDK 2 emits it, with only what the watcher reads. */
 const state = (dustAt: bigint) => ({ dust: { progress: { appliedIndex: dustAt }, pendingCoins: [], balance: () => 7_000n } });
@@ -56,5 +56,18 @@ describe('minutes from the environment', () => {
     expect(minutesFromEnv('', 9)).toBe(9);
     expect(minutesFromEnv('0', 9)).toBe(9);
     expect(minutesFromEnv('x', 9)).toBe(9);
+  });
+});
+
+describe("an oracle whose key was wiped from its private state", () => {
+  // The failure seen on Preprod on 16 Nov 2026, after the upkeep's bond deposit replaced the private state.
+  const WIPED =
+    "fulfil 17bea08f… failed (attempt 1, retry in 5000 ms): Error executing circuit 'fulfil': Nightcast: no oracle secret key in private state <- Error executing circuit 'fulfil' <- Nightcast: no oracle secret key in private state";
+  it('restarts at once', () => {
+    expect(isKeyMissing(WIPED)).toBe(true);
+    expect(isKeyMissing(new Error('Wallet.InsufficientFunds'))).toBe(false);
+    const h = new WalletHealth();
+    h.failed(WIPED);
+    expect(h.stuck()).toBe("an answer failed because the oracle's key is missing from its private state");
   });
 });

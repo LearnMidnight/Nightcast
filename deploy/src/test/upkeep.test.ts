@@ -2,7 +2,7 @@ import { mkdtempSync, readFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
-import { bondShortfall, LowWatch, OracleTally, Pace, readsLow, TOPUP_LOW_FOR_MS, topUpDue, upkeepConfig, upkeepWanted, writeStatus } from '../upkeep.js';
+import { bondShortfall, coinStep, LowWatch, OracleTally, Pace, readsLow, TOPUP_LOW_FOR_MS, topUpDue, upkeepConfig, upkeepWanted, writeStatus } from '../upkeep.js';
 
 const N = 1_000_000n;
 
@@ -114,5 +114,22 @@ describe('the tally, the pace and the status file', () => {
     const file = join(mkdtempSync(join(tmpdir(), 'upkeep-')), 'oracle.json');
     writeStatus(file, { at: '2026-11-11T05:00:00.000Z', wallet: { night: '5950000000', dust: '7' }, bond: { free: '48', held: '0', target: '50' }, fulfilled: 3, missed: 1 });
     expect(JSON.parse(readFileSync(file, 'utf8'))).toMatchObject({ bond: { free: '48', target: '50' }, missed: 1 });
+  });
+});
+
+describe('coinStep: two DUST coins for the bond deposit (ledger 9, error 231)', () => {
+  const N = 1_000_000n;
+  it('is ok with two or more DUST coins', () => {
+    expect(coinStep({ dustCoins: 2, nightUtxos: 1, nightRegistered: 1, night: 3948n * N })).toBe('ok');
+  });
+  it('splits a lone registered NIGHT UTXO (16 Nov 2026: 1 UTXO, 3948 NIGHT)', () => {
+    expect(coinStep({ dustCoins: 1, nightUtxos: 1, nightRegistered: 1, night: 3948n * N })).toBe('split');
+  });
+  it("registers the split's outputs once they arrive", () => {
+    expect(coinStep({ dustCoins: 1, nightUtxos: 2, nightRegistered: 0, night: 3948n * N })).toBe('register');
+  });
+  it('waits while the new DUST coin appears, and when there is too little NIGHT to split', () => {
+    expect(coinStep({ dustCoins: 1, nightUtxos: 2, nightRegistered: 2, night: 3948n * N })).toBe('wait');
+    expect(coinStep({ dustCoins: 1, nightUtxos: 1, nightRegistered: 1, night: N })).toBe('wait');
   });
 });
