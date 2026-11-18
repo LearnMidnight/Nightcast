@@ -33,6 +33,8 @@ export const midnightBackend = (
     providers: Promise<NightcastProviders>;
     onSubmitError?: (err: unknown) => void;
     onSubmitted?: () => void;
+    /** Runs each submit (mcp/gate.ts); without it the tools send one at a time. */
+    schedule?<T>(job: () => Promise<T>): Promise<T>;
   },
   /** How long one read of the contract's state answers every check (NIGHTCAST_STATE_CACHE_SECS, default 15 s; 0 = no sharing). */
   stateCacheMs: number = stateCacheSecs() * 1000,
@@ -69,6 +71,7 @@ export const midnightBackend = (
     canRequest: requester !== undefined,
     notReady: () => (!requester ? undefined : openError ? `the wallet could not open (${openError})` : opened ? undefined : "this server's wallet is still opening and syncing"),
     idFor: (tag, seed) => pureCircuits.requestId(deployment, commitment, tag, seed),
+    ...(requester?.schedule ? { schedule: requester.schedule } : {}),
     async submit(tag, seed, deadline) {
       if (!requester) throw new Error('this server has no wallet');
       if (!opened) throw new Error("this server's wallet is still opening");
