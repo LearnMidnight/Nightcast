@@ -12,7 +12,7 @@ files and proof-server version with it.
 
 Paths assume the checkout in `/root/Nightcast` and the secrets in `/root/lunardraw-secrets` and
 `/root/nightcast-secrets`. Settings that differ per machine (bond, top-up, status files, stall limits,
-`NIGHTCAST_PARALLEL`, Blockfrost usage files) go in drop-ins under
+`NIGHTCAST_PARALLEL` for the oracle, `NIGHTCAST_MCP_PARALLEL` for the MCP server, Blockfrost usage files) go in drop-ins under
 `/etc/systemd/system/<unit>.service.d/`, which the update leaves alone.
 
 ## Updating

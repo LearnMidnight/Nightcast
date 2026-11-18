@@ -55,6 +55,8 @@ import {
   nightIn,
   pendingNightIn,
   openWallet,
+  registerNewNight,
+  sendNight,
   FAUCETS,
   publicEndpoints,
   type Session,
@@ -67,6 +69,7 @@ import { failureText, walletStateFile } from './wallet.js';
 import { currentCommit, type DeploymentRecord, readRecord, recordPath, writeRecord } from './record.js';
 import { checkRequest } from './check.js';
 import { midnightBackend } from './mcp/backend.js';
+import { FeeGate, feeCoinsOf, mcpParallelFromEnv } from './mcp/gate.js';
 import { type McpMode, RESTART, runMcp, Watchdog } from './mcp/serve.js';
 import { describeFeeCoins, freeDustCoins, healthOptions, minutesFromEnv, noticingFailures, parallelFromEnv, WalletHealth } from './wallet-health.js';
 import { meter, overLimitReason } from './blockfrost-meter.js';
@@ -788,9 +791,55 @@ const main = async (argv: string[]): Promise<number> => {
           return nightcastProviders(session, w);
         });
         providers.catch((e: unknown) => session.logger.error(`The wallet could not open: ${e instanceof Error ? e.message : String(e)}`));
+        // Several requests in flight at once (NIGHTCAST_MCP_PARALLEL, default 1), as many as the wallet has fee coins for.
+        const parallel = mcpParallelFromEnv();
+        let lastState: unknown;
+        void wallet.then((w) => w.wallet.state().subscribe((s) => (lastState = s))).catch(() => undefined);
+        const gate = parallel > 1 ? new FeeGate(parallel, () => feeCoinsOf(lastState), (why) => session.logger.info(`A request waits: ${why}.`)) : undefined;
+        if (gate) {
+          session.logger.info(`Sending up to ${parallel} requests at once, as many as the wallet has DUST coins for.`);
+          // Keep a DUST coin for each request in flight: register NIGHT that doesn't generate DUST yet, and split a
+          // lone NIGHT UTXO by sending half of it to this wallet's own address (each registered UTXO makes a coin).
+          const keepCoins = async (): Promise<void> => {
+            const w = await wallet;
+            const c = feeCoinsOf(lastState);
+            if (c.free + c.booked >= parallel || gate.sending() > 0) return;
+            const b = await walletBalances(w);
+            if (b.nightRegistered < b.nightUtxos) {
+              await gate.exclusive(() => registerNewNight(w, session.logger));
+            } else if (b.nightUtxos < parallel && b.night >= 2_000_000n) {
+              const half = b.night / 2n;
+              const txId = await gate.exclusive(() => sendNight(w, walletAddress(w), half, session.config.walletNetworkId));
+              session.logger.info(`Split this wallet's NIGHT for another DUST coin (${parallel} requests at once need ${parallel}): transaction ${txId}.`);
+            }
+          };
+          let keeping = false;
+          const keep = () => {
+            if (keeping) return;
+            keeping = true;
+            keepCoins()
+              .catch((err: unknown) => session.logger.warn(`Making another DUST coin failed (trying again later): ${failureText(err, 300)}`))
+              .finally(() => (keeping = false));
+          };
+          setTimeout(keep, 2 * 60_000).unref?.();
+          setInterval(keep, 10 * 60_000).unref?.();
+        }
+        // A send refused for want of a free coin, while others were in flight, is tried once more on its own.
+        const schedule = gate
+          ? async <T>(job: () => Promise<T>): Promise<T> => {
+              try {
+                return await gate.run(job);
+              } catch (err) {
+                if (!/insufficient\s*funds/i.test(failureText(err, 2000))) throw err;
+                session.logger.warn('A request found no free DUST coin; sending it again once the others are done.');
+                return gate.exclusive(job);
+              }
+            }
+          : undefined;
         const backend = midnightBackend(network, record, indexerPublicDataProvider(session.config.indexer, session.config.indexerWS), {
           secret,
           providers,
+          ...(schedule ? { schedule } : {}),
           refundTo: wallet.then(walletBytes),
           onSubmitted: () => watchdog.submitted(),
           onSubmitError: (err) => {

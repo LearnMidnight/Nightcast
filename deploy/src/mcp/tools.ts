@@ -47,6 +47,11 @@ export interface RandomnessBackend {
   idFor(tag: Uint8Array, seed: Uint8Array): Uint8Array;
   /** Submit a request; resolves once it's on chain. */
   submit(tag: Uint8Array, seed: Uint8Array, deadline: bigint): Promise<{ txId: string }>;
+  /**
+   * Runs each submit: how many may be in flight at once (mcp/gate.ts, NIGHTCAST_MCP_PARALLEL). Without it
+   * the tools send one at a time, so one wallet never spends the same coins twice.
+   */
+  schedule?<T>(job: () => Promise<T>): Promise<T>;
   /** The request as the chain has it, and the public checks of it (with tag and seed, the id check too). */
   read(id: Uint8Array, inputs?: { tag: Uint8Array; seed: Uint8Array }): Promise<{ request: Request | undefined; checks: Check[] }>;
   /** Seconds since the epoch. */
@@ -127,7 +132,7 @@ export const nightcastTools = (backend: RandomnessBackend, limits: Partial<Limit
   const L = { ...DEFAULT_LIMITS, ...limits };
   const pending = new Map<string, Pending>();
   const counter = new Counter();
-  // One request at a time: one wallet must not spend the same coins twice.
+  // One request at a time unless the backend schedules its own sends: one wallet must not spend the same coins twice.
   let queue: Promise<unknown> = Promise.resolve();
   const serial = <T>(f: () => Promise<T>): Promise<T> => {
     const run = queue.then(f, f);
@@ -235,7 +240,8 @@ export const nightcastTools = (backend: RandomnessBackend, limits: Partial<Limit
 
       const deadline = BigInt(Math.floor(backend.now()) + secs);
       pending.set(idHex, { state: 'submitting' });
-      const done = serial(() => backend.submit(tag, seed, deadline)).then(
+      const send = backend.schedule ? <T>(job: () => Promise<T>) => backend.schedule!(job) : serial;
+      const done = send(() => backend.submit(tag, seed, deadline)).then(
         (r) => {
           pending.set(idHex, { state: 'submitted', txId: r.txId });
           return r;
