@@ -235,3 +235,19 @@ export const describeFeeCoins = (state: unknown): string => {
     return '';
   }
 };
+
+/**
+ * How quickly the oracle answers (18 Nov 2026: a LunaSpin spin took about 90 s, about 30 s of it the
+ * oracle's own waiting):
+ * - NIGHTCAST_NEW_REQUEST_DELAY_SECS (0-60, default 20): the pause after first seeing a request, for
+ *   the node to catch up with the indexer (a fulfil sent too early is refused);
+ * - NIGHTCAST_BUSY_POLL_SECS (1-5, default 5): how often it looks while a request is waiting.
+ */
+export const oracleSpeedFromEnv = (env: NodeJS.ProcessEnv = process.env): { newRequestDelaySecs: number; busyPollSecs: number } => {
+  const num = (v: string | undefined, min: number, max: number, dflt: number): number => {
+    if (v === undefined || v.trim() === '') return dflt;
+    const n = Number(v);
+    return Number.isFinite(n) && n >= min ? Math.min(n, max) : dflt;
+  };
+  return { newRequestDelaySecs: num(env.NIGHTCAST_NEW_REQUEST_DELAY_SECS, 0, 60, 20), busyPollSecs: num(env.NIGHTCAST_BUSY_POLL_SECS, 1, 5, 5) };
+};

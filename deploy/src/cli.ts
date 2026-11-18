@@ -71,7 +71,7 @@ import { checkRequest } from './check.js';
 import { midnightBackend } from './mcp/backend.js';
 import { FeeGate, feeCoinsOf, mcpParallelFromEnv } from './mcp/gate.js';
 import { type McpMode, RESTART, runMcp, Watchdog } from './mcp/serve.js';
-import { describeFeeCoins, freeDustCoins, healthOptions, minutesFromEnv, noticingFailures, parallelFromEnv, WalletHealth } from './wallet-health.js';
+import { describeFeeCoins, freeDustCoins, healthOptions, minutesFromEnv, noticingFailures, oracleSpeedFromEnv, parallelFromEnv, WalletHealth } from './wallet-health.js';
 import { meter, overLimitReason } from './blockfrost-meter.js';
 import { OracleTally, upkeepConfig, upkeepWanted } from './upkeep.js';
 import { startUpkeep, talking } from './upkeep-run.js';
@@ -664,11 +664,14 @@ const main = async (argv: string[]): Promise<number> => {
           const logger = talking(noticingFailures(session.logger, (msg) => health.failed(msg)), (line) => tally.see(line));
           // Every look is a Blockfrost request on Preprod (17,280 a day at 5 s): look every 15 s there
           // while nothing is waiting, and every 5 s while a request is.
-          const pollSecs = values.poll !== undefined ? Number(values.poll) : BLOCKFROST[network] ? 15 : 5;
-          if (!(pollSecs >= 1)) throw new Error('--poll must be a number of seconds, 1 or more');
+          // NIGHTCAST_POLL_SECS sets it too (--poll wins), so a VM can change it in a drop-in.
+          const pollSecs = values.poll !== undefined ? Number(values.poll) : process.env.NIGHTCAST_POLL_SECS ? Number(process.env.NIGHTCAST_POLL_SECS) : BLOCKFROST[network] ? 15 : 5;
+          if (!(pollSecs >= 1)) throw new Error('--poll (or NIGHTCAST_POLL_SECS) must be a number of seconds, 1 or more');
+          const speed = oracleSpeedFromEnv();
           const running = await startOracleService(providers, record.contractAddress, secretKey, logger, {
             pollMs: pollSecs * 1000,
-            busyPollMs: Math.min(pollSecs, 5) * 1000,
+            busyPollMs: Math.min(pollSecs, speed.busyPollSecs) * 1000,
+            newRequestDelayMs: speed.newRequestDelaySecs * 1000,
             requesters,
             // Several answers at once (default 1), each paying from its own DUST coin.
             parallel: parallelFromEnv(),
@@ -840,6 +843,7 @@ const main = async (argv: string[]): Promise<number> => {
           secret,
           providers,
           ...(schedule ? { schedule } : {}),
+          log: (line) => session.logger.info(line),
           refundTo: wallet.then(walletBytes),
           onSubmitted: () => watchdog.submitted(),
           onSubmitError: (err) => {

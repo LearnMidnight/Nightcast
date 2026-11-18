@@ -103,3 +103,14 @@ describe('describing the fee coins', () => {
     expect(describeFeeCoins(undefined)).toBe('');
   });
 });
+
+describe('how quickly the oracle answers (NIGHTCAST_NEW_REQUEST_DELAY_SECS, NIGHTCAST_BUSY_POLL_SECS)', () => {
+  it('keeps 20 s and 5 s by default, and takes values in range', async () => {
+    const { oracleSpeedFromEnv } = await import('../wallet-health.js');
+    expect(oracleSpeedFromEnv({})).toEqual({ newRequestDelaySecs: 20, busyPollSecs: 5 });
+    expect(oracleSpeedFromEnv({ NIGHTCAST_NEW_REQUEST_DELAY_SECS: '5', NIGHTCAST_BUSY_POLL_SECS: '2' })).toEqual({ newRequestDelaySecs: 5, busyPollSecs: 2 });
+    expect(oracleSpeedFromEnv({ NIGHTCAST_NEW_REQUEST_DELAY_SECS: '0' })).toEqual({ newRequestDelaySecs: 0, busyPollSecs: 5 });
+    expect(oracleSpeedFromEnv({ NIGHTCAST_NEW_REQUEST_DELAY_SECS: '999', NIGHTCAST_BUSY_POLL_SECS: '0' })).toEqual({ newRequestDelaySecs: 60, busyPollSecs: 5 });
+    expect(oracleSpeedFromEnv({ NIGHTCAST_NEW_REQUEST_DELAY_SECS: 'soon' })).toEqual({ newRequestDelaySecs: 20, busyPollSecs: 5 });
+  });
+});

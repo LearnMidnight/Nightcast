@@ -290,7 +290,11 @@ export class NightcastOracle {
     for (const e of todo) {
       const id = hex(e.id);
       const seenAt = this.firstSeen.get(id) ?? Date.now();
-      if (!this.firstSeen.has(id)) this.firstSeen.set(id, seenAt);
+      if (!this.firstSeen.has(id)) {
+        this.firstSeen.set(id, seenAt);
+        // Timing (where a request's time goes): when it was first seen, and when its answer starts.
+        this.logger.info(`seen ${id}${newRequestDelayMs > 0 ? `; answering in ${Math.round(newRequestDelayMs / 1000)} s` : ''}`);
+      }
       if (Date.now() - seenAt < newRequestDelayMs) {
         report.skipped.push({ id, reason: 'new; letting the node catch up' });
         continue;
@@ -339,12 +343,17 @@ export class NightcastOracle {
         return;
       }
       const retry = this.retries.get(id);
+      const startedAt = Date.now();
+      this.logger.info(`answering ${id}`);
       try {
         await chain.fulfil(e.id);
         this.retries.delete(id);
         this.answered.set(id, Date.now());
         report.fulfilled.push(id);
-        this.logger.info(`fulfilled ${id} -> ${hex(this.expectedOutput(e))}`);
+        const seen = this.firstSeen.get(id);
+        this.logger.info(
+          `fulfilled ${id} -> ${hex(this.expectedOutput(e))} (answer took ${Math.round((Date.now() - startedAt) / 1000)} s${seen !== undefined ? `, ${Math.round((Date.now() - seen) / 1000)} s since seen` : ''})`,
+        );
       } catch (err) {
         const message = withCauses(err);
         const failures = (retry?.failures ?? 0) + 1;
