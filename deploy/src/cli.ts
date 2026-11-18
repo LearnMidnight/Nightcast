@@ -68,7 +68,7 @@ import { currentCommit, type DeploymentRecord, readRecord, recordPath, writeReco
 import { checkRequest } from './check.js';
 import { midnightBackend } from './mcp/backend.js';
 import { type McpMode, RESTART, runMcp, Watchdog } from './mcp/serve.js';
-import { freeDustCoins, healthOptions, minutesFromEnv, noticingFailures, parallelFromEnv, WalletHealth } from './wallet-health.js';
+import { describeFeeCoins, freeDustCoins, healthOptions, minutesFromEnv, noticingFailures, parallelFromEnv, WalletHealth } from './wallet-health.js';
 import { meter, overLimitReason } from './blockfrost-meter.js';
 import { OracleTally, upkeepConfig, upkeepWanted } from './upkeep.js';
 import { startUpkeep, talking } from './upkeep-run.js';
@@ -651,9 +651,11 @@ const main = async (argv: string[]): Promise<number> => {
           const health = new WalletHealth(healthOptions());
           // The latest wallet state, for how many fees it can pay at once (NIGHTCAST_PARALLEL).
           let free = 1;
+          let lastState: unknown;
           const watch = wallet.wallet.state().subscribe((s) => {
             health.see(s);
             free = freeDustCoins(s);
+            lastState = s;
           });
           const tally = new OracleTally();
           const logger = talking(noticingFailures(session.logger, (msg) => health.failed(msg)), (line) => tally.see(line));
@@ -668,6 +670,7 @@ const main = async (argv: string[]): Promise<number> => {
             // Several answers at once (default 1), each paying from its own DUST coin.
             parallel: parallelFromEnv(),
             freeFeeCoins: () => free,
+            describeFeeCoins: () => describeFeeCoins(lastState),
             // Don't spend minutes proving an answer the wallet can't pay for: restart first (below).
             beforeFulfil: () => {
               const why = health.readyToPay();
