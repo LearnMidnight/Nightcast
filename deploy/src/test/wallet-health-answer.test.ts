@@ -90,3 +90,16 @@ describe('answering several at once: free fee coins and NIGHTCAST_PARALLEL', () 
     expect(parallelFromEnv({ NIGHTCAST_PARALLEL: '0' })).toBe(1);
   });
 });
+
+describe('describing the fee coins', () => {
+  it('counts DUST coins holding DUST, free and booked ones, and unshielded UTXOs', async () => {
+    const { describeFeeCoins } = await import('../wallet-health.js');
+    const state = {
+      dust: { availableCoins: [{ generatedNow: 4n }, { generatedNow: 0n }], pendingCoins: [{}] },
+      unshielded: { availableCoins: [{ utxo: { type: 'n' } }, { utxo: { type: 'n' } }] },
+    };
+    expect(describeFeeCoins(state)).toBe('1 DUST coin(s) holding DUST of 2 free, 1 booked; 2 unshielded UTXO(s)');
+    expect(describeFeeCoins({})).toBe('0 DUST coin(s) holding DUST of 0 free, 0 booked');
+    expect(describeFeeCoins(undefined)).toBe('');
+  });
+});

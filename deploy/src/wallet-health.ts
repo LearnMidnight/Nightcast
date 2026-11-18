@@ -214,3 +214,24 @@ export const parallelFromEnv = (env: NodeJS.ProcessEnv = process.env): number =>
   const n = Number(env.NIGHTCAST_PARALLEL ?? '1');
   return Number.isInteger(n) && n >= 1 ? Math.min(n, 8) : 1;
 };
+
+/**
+ * The wallet's fee coins in a few words, for the log line when requests wait together but it can pay fewer
+ * fees at once than NIGHTCAST_PARALLEL: free DUST coins holding DUST, all free ones, booked ones, and NIGHT
+ * UTXOs (each registered one generates DUST).
+ */
+export const describeFeeCoins = (state: unknown): string => {
+  try {
+    const s = state as {
+      dust?: { availableCoins?: readonly { generatedNow?: bigint }[]; pendingCoins?: readonly unknown[] };
+      unshielded?: { availableCoins?: readonly { utxo?: { type?: string } }[] };
+    };
+    const free = Array.isArray(s.dust?.availableCoins) ? s.dust!.availableCoins! : [];
+    const holding = free.filter((c) => typeof c.generatedNow !== 'bigint' || c.generatedNow > 0n).length;
+    const booked = Array.isArray(s.dust?.pendingCoins) ? s.dust!.pendingCoins!.length : 0;
+    const night = Array.isArray(s.unshielded?.availableCoins) ? s.unshielded!.availableCoins!.length : undefined;
+    return `${holding} DUST coin(s) holding DUST of ${free.length} free, ${booked} booked${night !== undefined ? `; ${night} unshielded UTXO(s)` : ''}`;
+  } catch {
+    return '';
+  }
+};

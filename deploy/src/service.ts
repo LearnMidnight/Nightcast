@@ -34,7 +34,7 @@ export const startOracleService = async (
   contractAddress: string,
   secretKey: bigint,
   logger: Logger,
-  options: Pick<OracleOptions, 'pollMs' | 'busyPollMs' | 'safetyMarginSecs' | 'requesters' | 'parallel' | 'freeFeeCoins'> & {
+  options: Pick<OracleOptions, 'pollMs' | 'busyPollMs' | 'safetyMarginSecs' | 'requesters' | 'parallel' | 'freeFeeCoins' | 'describeFeeCoins'> & {
     /** Called before each fulfil; throw to skip it (the oracle retries after its back-off). */
     beforeFulfil?: () => void;
   } = {},

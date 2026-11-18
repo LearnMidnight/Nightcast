@@ -414,6 +414,27 @@ describe('answering several requests at once (parallel)', () => {
     expect(t.seen.most).toBe(1);
   });
 
+  it('says why it answers one at a time when requests wait together', async () => {
+    const { sim, sk, chain } = setup();
+    for (const i of [1, 2, 3]) sim.request(label('g'), label(`d${i}`), BigInt(sim.now + 600 + i));
+    const lines: string[] = [];
+    const logger = { info: (m: string) => lines.push(m), warn: () => undefined, error: () => undefined };
+    const oracle = new NightcastOracle({
+      chain,
+      secretKey: sk,
+      safetyMarginSecs: 30,
+      newRequestDelayMs: 0,
+      parallel: 2,
+      freeFeeCoins: () => 1,
+      describeFeeCoins: () => '1 DUST coin(s) holding DUST of 1 free, 0 booked',
+      logger,
+    });
+    expect((await oracle.tick()).fulfilled).toHaveLength(3);
+    expect(lines.filter((l) => l.includes('requests waiting'))).toEqual([
+      '3 requests waiting; answering one at a time: the wallet can pay one fee at once (1 DUST coin(s) holding DUST of 1 free, 0 booked)',
+    ]);
+  });
+
   it('treats a failing coin count as one coin', async () => {
     const { sim, sk, chain } = setup();
     for (const i of [1, 2]) sim.request(label('g'), label(`d${i}`), BigInt(sim.now + 600 + i));

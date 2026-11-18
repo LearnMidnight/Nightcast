@@ -67,6 +67,11 @@ export type OracleOptions = {
    * at least one). Errors count as 1.
    */
   freeFeeCoins?: () => Promise<number> | number;
+  /**
+   * A few words on the wallet's fee coins (for example "1 free DUST coin of 2; 2 NIGHT UTXOs"), added to
+   * the log line when requests wait together but the wallet can pay for fewer at once than `parallel`.
+   */
+  describeFeeCoins?: () => string;
   /** Clock in seconds; defaults to the chain's clock if it has one, else the local clock. */
   now?: () => Promise<number> | number;
   logger?: OracleLogger;
@@ -313,6 +318,17 @@ export class NightcastOracle {
         coins = 1;
       }
       width = Math.max(1, Math.min(width, Number.isFinite(coins) ? coins : 1));
+      if (width < Math.min(this.cfg.parallel, ready.length)) {
+        let detail = '';
+        try {
+          detail = this.options.describeFeeCoins?.() ?? '';
+        } catch {
+          detail = '';
+        }
+        this.logger.info(
+          `${ready.length} requests waiting; answering ${width === 1 ? 'one at a time' : `${width} at once`}: the wallet can pay ${width === 1 ? 'one fee' : `${width} fees`} at once${detail ? ` (${detail})` : ''}`,
+        );
+      }
     }
 
     const answer = async (e: (typeof todo)[number]): Promise<void> => {
