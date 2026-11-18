@@ -34,7 +34,7 @@ export const startOracleService = async (
   contractAddress: string,
   secretKey: bigint,
   logger: Logger,
-  options: Pick<OracleOptions, 'pollMs' | 'busyPollMs' | 'safetyMarginSecs' | 'requesters'> & {
+  options: Pick<OracleOptions, 'pollMs' | 'busyPollMs' | 'safetyMarginSecs' | 'requesters' | 'parallel' | 'freeFeeCoins'> & {
     /** Called before each fulfil; throw to skip it (the oracle retries after its back-off). */
     beforeFulfil?: () => void;
   } = {},
@@ -91,6 +91,7 @@ export const startOracleService = async (
   const pollMs = oracleOptions.pollMs ?? 5_000;
   const busyPollMs = Math.min(oracleOptions.busyPollMs ?? pollMs, pollMs);
   logger.info(`Oracle running for ${contractAddress}; polling every ${pollMs / 1000}s${busyPollMs < pollMs ? ` (every ${busyPollMs / 1000}s while a request is waiting)` : ''}`);
+  if ((oracleOptions.parallel ?? 1) > 1) logger.info(`Answering up to ${oracleOptions.parallel} requests at once, as many as the wallet has free DUST coins.`);
   return { oracle, stop: () => oracle.stop(), lastLookAt: () => lastLookAt };
 };
 

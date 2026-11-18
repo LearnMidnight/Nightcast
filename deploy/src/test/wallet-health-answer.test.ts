@@ -71,3 +71,22 @@ describe("an oracle whose key was wiped from its private state", () => {
     expect(h.stuck()).toBe("an answer failed because the oracle's key is missing from its private state");
   });
 });
+
+describe('answering several at once: free fee coins and NIGHTCAST_PARALLEL', () => {
+  it('counts free DUST coins that hold DUST, and never says less than one', async () => {
+    const { freeDustCoins } = await import('../wallet-health.js');
+    expect(freeDustCoins({ dust: { availableCoins: [{ generatedNow: 5n }, { generatedNow: 9n }] } })).toBe(2);
+    expect(freeDustCoins({ dust: { availableCoins: [{ generatedNow: 5n }, { generatedNow: 0n }] } })).toBe(1);
+    expect(freeDustCoins({ dust: { availableCoins: [] } })).toBe(1);
+    expect(freeDustCoins({})).toBe(1);
+    expect(freeDustCoins(undefined)).toBe(1);
+  });
+  it('reads NIGHTCAST_PARALLEL, 1 by default, between 1 and 8', async () => {
+    const { parallelFromEnv } = await import('../wallet-health.js');
+    expect(parallelFromEnv({})).toBe(1);
+    expect(parallelFromEnv({ NIGHTCAST_PARALLEL: '2' })).toBe(2);
+    expect(parallelFromEnv({ NIGHTCAST_PARALLEL: '20' })).toBe(8);
+    expect(parallelFromEnv({ NIGHTCAST_PARALLEL: 'two' })).toBe(1);
+    expect(parallelFromEnv({ NIGHTCAST_PARALLEL: '0' })).toBe(1);
+  });
+});

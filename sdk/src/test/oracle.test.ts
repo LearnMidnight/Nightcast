@@ -360,3 +360,99 @@ describe('how soon to look again', () => {
     expect(hasWaitingWork({ ...none, skipped: [{ id: 'ab', reason: 'too close to deadline' }] })).toBe(false);
   });
 });
+
+describe('answering several requests at once (parallel)', () => {
+  // A chain whose fulfil takes a moment, and that records how many ran at the same time.
+  const timed = (chain: SimulatorChain) => {
+    const seen = { now: 0, most: 0 };
+    return {
+      seen,
+      chain: {
+        listRequests: () => chain.listRequests(),
+        now: () => chain.now(),
+        fulfil: async (id: Uint8Array) => {
+          seen.now += 1;
+          seen.most = Math.max(seen.most, seen.now);
+          await new Promise((r) => setTimeout(r, 20));
+          await chain.fulfil(id);
+          seen.now -= 1;
+        },
+      },
+    };
+  };
+
+  it('answers one at a time by default', async () => {
+    const { sim, sk, chain } = setup();
+    for (const i of [1, 2, 3]) sim.request(label('g'), label(`d${i}`), BigInt(sim.now + 600));
+    const t = timed(chain);
+    const oracle = new NightcastOracle({ chain: t.chain, secretKey: sk, safetyMarginSecs: 30, newRequestDelayMs: 0 });
+    expect((await oracle.tick()).fulfilled).toHaveLength(3);
+    expect(t.seen.most).toBe(1);
+  });
+
+  it('answers two at once, and the rest on the next pass', async () => {
+    const { sim, sk, chain } = setup();
+    const ids = [1, 2, 3].map((i) => sim.request(label('g'), label(`d${i}`), BigInt(sim.now + 600 + i)));
+    const t = timed(chain);
+    const oracle = new NightcastOracle({ chain: t.chain, secretKey: sk, safetyMarginSecs: 30, newRequestDelayMs: 0, parallel: 2, freeFeeCoins: () => 2 });
+    const first = await oracle.tick();
+    expect(first.fulfilled.sort()).toEqual([ids[0], ids[1]].map(hex).sort());
+    expect(first.skipped).toEqual([{ id: hex(ids[2]), reason: 'queued; answering others' }]);
+    expect(hasWaitingWork(first)).toBe(true);
+    expect(t.seen.most).toBe(2);
+    expect((await oracle.tick()).fulfilled).toEqual([hex(ids[2])]);
+    for (const id of ids) expect(sim.getLedger().requests.lookup(id).status).toBe(Status.fulfilled);
+  });
+
+  it('answers no more at once than the wallet has free fee coins', async () => {
+    const { sim, sk, chain } = setup();
+    for (const i of [1, 2]) sim.request(label('g'), label(`d${i}`), BigInt(sim.now + 600 + i));
+    const t = timed(chain);
+    const oracle = new NightcastOracle({ chain: t.chain, secretKey: sk, safetyMarginSecs: 30, newRequestDelayMs: 0, parallel: 3, freeFeeCoins: () => 1 });
+    expect((await oracle.tick()).fulfilled).toHaveLength(1);
+    expect((await oracle.tick()).fulfilled).toHaveLength(1);
+    expect(t.seen.most).toBe(1);
+  });
+
+  it('treats a failing coin count as one coin', async () => {
+    const { sim, sk, chain } = setup();
+    for (const i of [1, 2]) sim.request(label('g'), label(`d${i}`), BigInt(sim.now + 600 + i));
+    const t = timed(chain);
+    const oracle = new NightcastOracle({
+      chain: t.chain,
+      secretKey: sk,
+      safetyMarginSecs: 30,
+      newRequestDelayMs: 0,
+      parallel: 2,
+      freeFeeCoins: () => {
+        throw new Error('wallet not synced');
+      },
+    });
+    expect((await oracle.tick()).fulfilled).toHaveLength(1);
+    expect(t.seen.most).toBe(1);
+  });
+
+  it('a failed answer leaves the one beside it alone, and is retried', async () => {
+    const { sim, sk, chain } = setup();
+    const a = sim.request(label('g'), label('a'), BigInt(sim.now + 600));
+    const b = sim.request(label('g'), label('b'), BigInt(sim.now + 601));
+    let failA = true;
+    const flaky = {
+      listRequests: () => chain.listRequests(),
+      now: () => chain.now(),
+      fulfil: async (id: Uint8Array) => {
+        if (failA && hex(id) === hex(a)) {
+          failA = false;
+          throw new Error('fee coin taken');
+        }
+        await chain.fulfil(id);
+      },
+    };
+    const oracle = new NightcastOracle({ chain: flaky, secretKey: sk, safetyMarginSecs: 30, newRequestDelayMs: 0, backoffMs: 1, parallel: 2, freeFeeCoins: () => 2 });
+    const first = await oracle.tick();
+    expect(first.fulfilled).toEqual([hex(b)]);
+    expect(first.failed).toEqual([{ id: hex(a), error: 'fee coin taken' }]);
+    await new Promise((r) => setTimeout(r, 10));
+    expect((await oracle.tick()).fulfilled).toEqual([hex(a)]);
+  });
+});

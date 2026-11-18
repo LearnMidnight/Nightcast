@@ -68,7 +68,7 @@ import { currentCommit, type DeploymentRecord, readRecord, recordPath, writeReco
 import { checkRequest } from './check.js';
 import { midnightBackend } from './mcp/backend.js';
 import { type McpMode, RESTART, runMcp, Watchdog } from './mcp/serve.js';
-import { healthOptions, minutesFromEnv, noticingFailures, WalletHealth } from './wallet-health.js';
+import { freeDustCoins, healthOptions, minutesFromEnv, noticingFailures, parallelFromEnv, WalletHealth } from './wallet-health.js';
 import { meter, overLimitReason } from './blockfrost-meter.js';
 import { OracleTally, upkeepConfig, upkeepWanted } from './upkeep.js';
 import { startUpkeep, talking } from './upkeep-run.js';
@@ -649,7 +649,12 @@ const main = async (argv: string[]): Promise<number> => {
           const providers = nightcastProviders(session, wallet);
           // A stuck wallet (wallet-health.ts) is fixed by a restart: exit 75 and systemd starts the oracle again.
           const health = new WalletHealth(healthOptions());
-          const watch = wallet.wallet.state().subscribe((s) => health.see(s));
+          // The latest wallet state, for how many fees it can pay at once (NIGHTCAST_PARALLEL).
+          let free = 1;
+          const watch = wallet.wallet.state().subscribe((s) => {
+            health.see(s);
+            free = freeDustCoins(s);
+          });
           const tally = new OracleTally();
           const logger = talking(noticingFailures(session.logger, (msg) => health.failed(msg)), (line) => tally.see(line));
           // Every look is a Blockfrost request on Preprod (17,280 a day at 5 s): look every 15 s there
@@ -660,6 +665,9 @@ const main = async (argv: string[]): Promise<number> => {
             pollMs: pollSecs * 1000,
             busyPollMs: Math.min(pollSecs, 5) * 1000,
             requesters,
+            // Several answers at once (default 1), each paying from its own DUST coin.
+            parallel: parallelFromEnv(),
+            freeFeeCoins: () => free,
             // Don't spend minutes proving an answer the wallet can't pay for: restart first (below).
             beforeFulfil: () => {
               const why = health.readyToPay();
