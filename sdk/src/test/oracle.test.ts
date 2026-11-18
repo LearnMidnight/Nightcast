@@ -409,8 +409,8 @@ describe('answering several requests at once (parallel)', () => {
     for (const i of [1, 2]) sim.request(label('g'), label(`d${i}`), BigInt(sim.now + 600 + i));
     const t = timed(chain);
     const oracle = new NightcastOracle({ chain: t.chain, secretKey: sk, safetyMarginSecs: 30, newRequestDelayMs: 0, parallel: 3, freeFeeCoins: () => 1 });
-    expect((await oracle.tick()).fulfilled).toHaveLength(1);
-    expect((await oracle.tick()).fulfilled).toHaveLength(1);
+    // One coin: back to answering in turn, all in the same pass.
+    expect((await oracle.tick()).fulfilled).toHaveLength(2);
     expect(t.seen.most).toBe(1);
   });
 
@@ -428,7 +428,7 @@ describe('answering several requests at once (parallel)', () => {
         throw new Error('wallet not synced');
       },
     });
-    expect((await oracle.tick()).fulfilled).toHaveLength(1);
+    expect((await oracle.tick()).fulfilled).toHaveLength(2);
     expect(t.seen.most).toBe(1);
   });
 
