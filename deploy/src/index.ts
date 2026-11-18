@@ -45,6 +45,7 @@ export {
   type OperationsSource,
 } from './fingerprints.js';
 export { addressFromSeed, forgetWalletState, keyCacheDir, walletStateFile } from './wallet.js';
+export { releaseStaleDustBookings, STALE_DUST_BOOKING_MS } from './dust-bookings.js';
 export { redact } from './redact-output.js';
 export {
   blockfrostGate,
