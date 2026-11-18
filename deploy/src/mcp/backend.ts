@@ -33,6 +33,8 @@ export const midnightBackend = (
     providers: Promise<NightcastProviders>;
     onSubmitError?: (err: unknown) => void;
     onSubmitted?: () => void;
+    /** Timing lines: when a request starts and when it is on chain (where a request's time goes). */
+    log?: (line: string) => void;
     /** Runs each submit (mcp/gate.ts); without it the tools send one at a time. */
     schedule?<T>(job: () => Promise<T>): Promise<T>;
   },
@@ -80,7 +82,11 @@ export const midnightBackend = (
           callTx: { request(t: Uint8Array, s: Uint8Array, d: bigint, refundTo: { bytes: Uint8Array }): Promise<{ public: { txId: string } }> };
         };
         // A missed request's fee and collateral come back to this server's wallet.
+        const id = Buffer.from(pureCircuits.requestId(deployment, commitment, tag, seed)).toString('hex');
+        const startedAt = Date.now();
+        requester.log?.(`sending request ${id}`);
         const r = await c.callTx.request(tag, seed, deadline, { bytes: await requester.refundTo });
+        requester.log?.(`request ${id} on chain after ${Math.round((Date.now() - startedAt) / 1000)} s (transaction ${r.public.txId})`);
         requester.onSubmitted?.();
         return { txId: r.public.txId };
       } catch (err) {
