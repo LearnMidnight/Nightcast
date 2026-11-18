@@ -14,6 +14,7 @@ import { chmodSync, existsSync, mkdirSync, readFileSync, renameSync, rmSync, wri
 import { homedir } from 'node:os';
 import { dirname, join } from 'node:path';
 import type { Logger } from 'pino';
+import { releaseStaleDustBookings } from './dust-bookings.js';
 import {
   Capabilities,
   createKeystore,
@@ -394,11 +395,22 @@ export const buildWallet = async (
   const saved = persist ? readSaved(file, network) : undefined;
   let parts: Awaited<ReturnType<typeof fresh>> | undefined;
   if (saved) {
+    // DUST coins still booked by a transaction that can no longer land (left behind by a stop mid-transaction)
+    // go back to the wallet; the SDK itself never releases them (dust-bookings.ts).
+    const bookings = releaseStaleDustBookings(saved.dust);
+    if (bookings.released > 0) {
+      logger.warn(
+        `Released ${bookings.released} DUST coin(s) the saved state still had booked for transactions that can no longer land` +
+          (bookings.kept > 0 ? ` (${bookings.kept} recent booking(s) kept)` : ''),
+      );
+    } else if (bookings.skipped) {
+      logger.warn(`The saved DUST bookings were not checked (${bookings.skipped})`);
+    }
     try {
       parts = {
         shielded: await ShieldedWallet(config).restore(saved.shielded),
         unshielded: await UnshieldedWallet(unshieldedConfig).restore(saved.unshielded),
-        dust: await DustWallet(dustConfig).restore(saved.dust),
+        dust: await DustWallet(dustConfig).restore(bookings.serialized),
       };
     } catch (err) {
       logger.warn(`Saved wallet state could not be used (${err instanceof Error ? err.message : String(err)}); syncing from the start.`);
