@@ -17,7 +17,7 @@ Check it yourself with `./nightcast verify --network preprod` (record: [deployme
 
 **v1: request fees and oracle bonds** ([SPEC §4.3a](docs/SPEC.md#43a-fees-and-bonds-v1-issues-13-and-9)). Each request pays the fee to the oracle when it's answered and holds one slot of the oracle's bond as collateral; if the oracle misses the deadline, `expire` returns the fee and the collateral to the requester. `./nightcast verify` reports the free bond slots.
 
-**Ledger 9.** Preprod moved to ledger 9 on 9 Nov 2026 (in place: contracts and balances carried over). `main` is on the ledger 9 stack (Midnight.js 5, wallet SDK 2, proof server 9.0.0, Midnight's public Preprod node). Contracts compiled with Compact 0.31.1, like the one above, keep working; a *new* deployment on ledger 9 needs a Compact 0.36 compile, which is still to do ([#58](https://github.com/LearnMidnight/Nightcast/issues/58)).
+**Ledger 9.** Preprod moved to ledger 9 on 9 Nov 2026 (in place: contracts and balances carried over). `main` is on the ledger 9 stack (Midnight.js 5.0.1, wallet SDK 2.0.1, proof server 9.0.2, Midnight's public Preprod node). Contracts compiled with Compact 0.31.1, like the one above, keep working; a *new* deployment on ledger 9 needs a Compact 0.36 compile, which is still to do ([#58](https://github.com/LearnMidnight/Nightcast/issues/58)).
 
 **What that means today.** Everything that uses the live deployment works: requests, the oracle, `verify`, `check`, the MCP server. `./nightcast deploy` can't make a *new* deployment on Preprod until #58, and the local test network (ledger 8 images) doesn't work with this stack either, so CI's local end-to-end steps are switched off for now.
 
