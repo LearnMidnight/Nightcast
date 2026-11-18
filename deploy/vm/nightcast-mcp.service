@@ -1,0 +1,20 @@
+# Nightcast's MCP server for LunaSpin: private (127.0.0.1 only; WordPress on this box is its one client).
+# WordPress keeps its own per-visitor limits, so the server's per-client limit is the daily cap.
+# Installed and updated by deploy/vm/update.sh; per-machine settings go in drop-ins.
+[Unit]
+Description=Nightcast MCP server (private, for LunaSpin)
+After=nightcast-proof.service network-online.target docker.service
+Wants=nightcast-proof.service network-online.target
+
+[Service]
+WorkingDirectory=/root/Nightcast
+Environment=HOME=/root
+# ledger 9: register new NIGHT for DUST (a second DUST coin for small calls; midnight-ledger#838)
+Environment=NIGHTCAST_REGISTER_NEW_NIGHT=1
+ExecStart=/root/Nightcast/nightcast mcp --network preprod --http 127.0.0.1:6350 --wallet /root/nightcast-secrets/lunaspin-wallet.secret --requester /root/nightcast-secrets/lunaspin-requester.secret --per-hour 200 --per-day 200 --proof-server-port 6303
+Restart=always
+RestartSec=10
+TimeoutStopSec=60
+
+[Install]
+WantedBy=multi-user.target

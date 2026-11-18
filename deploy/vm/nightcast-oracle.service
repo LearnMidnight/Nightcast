@@ -1,0 +1,20 @@
+# Nightcast v1's oracle on Preprod: answers every request bound to its key.
+# Installed and updated by deploy/vm/update.sh. Settings that differ per machine (bond, top-up, status file,
+# stall limits, NIGHTCAST_PARALLEL) live in drop-ins under /etc/systemd/system/nightcast-oracle.service.d/.
+[Unit]
+Description=Nightcast oracle (v1, Preprod)
+After=nightcast-proof.service network-online.target docker.service
+Wants=nightcast-proof.service network-online.target
+
+[Service]
+WorkingDirectory=/root/Nightcast
+Environment=HOME=/root
+# ledger 9: register new NIGHT for DUST (a second DUST coin for small calls; midnight-ledger#838)
+Environment=NIGHTCAST_REGISTER_NEW_NIGHT=1
+ExecStart=/root/Nightcast/nightcast oracle --network preprod --oracle /root/lunardraw-secrets/oracle.secret --wallet /root/nightcast-secrets/nightcast-oracle-wallet.secret --proof-server-port 6303
+Restart=always
+RestartSec=15
+TimeoutStopSec=60
+
+[Install]
+WantedBy=multi-user.target
