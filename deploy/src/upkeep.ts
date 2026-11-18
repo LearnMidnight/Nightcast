@@ -75,6 +75,23 @@ export const bondShortfall = (o: { free: bigint; held: bigint; target?: bigint; 
   return missing < affordable ? missing : affordable;
 };
 
+/**
+ * Ledger 9 refuses the bond's deposit when its fee is paid with one DUST coin (1010, custom error 231,
+ * patch-dust-two-spends.mjs), so the wallet needs two. Its NIGHT ends up in one UTXO (a top-up's
+ * change merges it), which makes one DUST coin. What to do about it this pass:
+ * - 'ok': two or more DUST coins;
+ * - 'register': NIGHT that doesn't generate DUST yet (a split's outputs): register it;
+ * - 'split': one NIGHT UTXO, all registered: send half of it to this wallet's own address;
+ * - 'wait': the new coins are on their way (or there's too little NIGHT to split).
+ */
+export type CoinStep = 'ok' | 'register' | 'split' | 'wait';
+export const coinStep = (c: { dustCoins: number; nightUtxos: number; nightRegistered: number; night: bigint }): CoinStep => {
+  if (c.dustCoins >= 2) return 'ok';
+  if (c.nightRegistered < c.nightUtxos) return 'register';
+  if (c.nightUtxos < 2 && c.night >= 2_000_000n) return 'split';
+  return 'wait';
+};
+
 /** What /health of the served MCP server says about its wallet. */
 export type ServedWallet = { address?: string; night?: string };
 

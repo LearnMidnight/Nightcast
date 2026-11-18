@@ -33,6 +33,10 @@ export const midnightBackend = (
     providers: Promise<NightcastProviders>;
     onSubmitError?: (err: unknown) => void;
     onSubmitted?: () => void;
+    /** Timing lines: when a request starts and when it is on chain (where a request's time goes). */
+    log?: (line: string) => void;
+    /** Runs each submit (mcp/gate.ts); without it the tools send one at a time. */
+    schedule?<T>(job: () => Promise<T>): Promise<T>;
   },
   /** How long one read of the contract's state answers every check (NIGHTCAST_STATE_CACHE_SECS, default 15 s; 0 = no sharing). */
   stateCacheMs: number = stateCacheSecs() * 1000,
@@ -69,6 +73,7 @@ export const midnightBackend = (
     canRequest: requester !== undefined,
     notReady: () => (!requester ? undefined : openError ? `the wallet could not open (${openError})` : opened ? undefined : "this server's wallet is still opening and syncing"),
     idFor: (tag, seed) => pureCircuits.requestId(deployment, commitment, tag, seed),
+    ...(requester?.schedule ? { schedule: requester.schedule } : {}),
     async submit(tag, seed, deadline) {
       if (!requester) throw new Error('this server has no wallet');
       if (!opened) throw new Error("this server's wallet is still opening");
@@ -77,7 +82,11 @@ export const midnightBackend = (
           callTx: { request(t: Uint8Array, s: Uint8Array, d: bigint, refundTo: { bytes: Uint8Array }): Promise<{ public: { txId: string } }> };
         };
         // A missed request's fee and collateral come back to this server's wallet.
+        const id = Buffer.from(pureCircuits.requestId(deployment, commitment, tag, seed)).toString('hex');
+        const startedAt = Date.now();
+        requester.log?.(`sending request ${id}`);
         const r = await c.callTx.request(tag, seed, deadline, { bytes: await requester.refundTo });
+        requester.log?.(`request ${id} on chain after ${Math.round((Date.now() - startedAt) / 1000)} s (transaction ${r.public.txId})`);
         requester.onSubmitted?.();
         return { txId: r.public.txId };
       } catch (err) {

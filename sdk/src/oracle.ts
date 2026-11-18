@@ -55,6 +55,23 @@ export type OracleOptions = {
    * with `expire`.
    */
   expireMissed?: boolean;
+  /**
+   * Answer up to this many requests at once (default 1: one after another).
+   * Each answer pays its own fee, so the wallet needs that many free DUST
+   * coins; pass `freeFeeCoins` to cap a pass by what it actually has.
+   */
+  parallel?: number;
+  /**
+   * How many fees the wallet can pay right now (free DUST coins). Read once a
+   * pass when `parallel` is above 1; a pass answers at most this many (and
+   * at least one). Errors count as 1.
+   */
+  freeFeeCoins?: () => Promise<number> | number;
+  /**
+   * A few words on the wallet's fee coins (for example "1 free DUST coin of 2; 2 NIGHT UTXOs"), added to
+   * the log line when requests wait together but the wallet can pay for fewer at once than `parallel`.
+   */
+  describeFeeCoins?: () => string;
   /** Clock in seconds; defaults to the chain's clock if it has one, else the local clock. */
   now?: () => Promise<number> | number;
   logger?: OracleLogger;
@@ -101,8 +118,9 @@ export const selectWork = (
 
 /**
  * Watches a Nightcast deployment and fulfils every pending request bound to
- * its key. Fulfils one at a time, which keeps wallet balancing simple and
- * avoids two transactions competing for the same fees. Failed fulfils are
+ * its key. Fulfils one at a time by default, which keeps wallet balancing
+ * simple and avoids two transactions competing for the same fees; with
+ * `parallel` it answers several at once, each paying from its own DUST coin. Failed fulfils are
  * retried with exponential backoff until the deadline gets too close. It
  * reads requests from an indexer, which can be a little ahead of the node it
  * submits to (a new request) or behind the chain (a request it has just
@@ -133,7 +151,7 @@ export const withCauses = (err: unknown, depth = 0): string => {
  * One already answered (waiting for the indexer) or past its time isn't.
  */
 export const hasWaitingWork = (report: TickReport): boolean =>
-  report.fulfilled.length > 0 || report.failed.length > 0 || report.skipped.some((s) => s.reason.startsWith('new') || s.reason === 'backing off');
+  report.fulfilled.length > 0 || report.failed.length > 0 || report.skipped.some((s) => s.reason.startsWith('new') || s.reason.startsWith('queued') || s.reason === 'backing off');
 
 export class NightcastOracle {
   readonly publicKey: { x: bigint; y: bigint };
@@ -157,6 +175,7 @@ export class NightcastOracle {
     maxBackoffMs: number;
     newRequestDelayMs: number;
     answeredGraceMs: number;
+    parallel: number;
   };
   private readonly logger: OracleLogger;
 
@@ -170,6 +189,7 @@ export class NightcastOracle {
       maxBackoffMs: options.maxBackoffMs ?? 60_000,
       newRequestDelayMs: options.newRequestDelayMs ?? 20_000,
       answeredGraceMs: options.answeredGraceMs ?? 10 * 60_000,
+      parallel: Math.max(1, Math.floor(options.parallel ?? 1)),
     };
     this.requesters = options.requesters ? new Set([...options.requesters].map((r) => r.toLowerCase())) : undefined;
     this.logger = options.logger ?? silent;
@@ -265,10 +285,16 @@ export class NightcastOracle {
       }
     }
 
+    // Requests ready to answer now, in deadline order (selectWork sorts them).
+    const ready: typeof todo = [];
     for (const e of todo) {
       const id = hex(e.id);
       const seenAt = this.firstSeen.get(id) ?? Date.now();
-      if (!this.firstSeen.has(id)) this.firstSeen.set(id, seenAt);
+      if (!this.firstSeen.has(id)) {
+        this.firstSeen.set(id, seenAt);
+        // Timing (where a request's time goes): when it was first seen, and when its answer starts.
+        this.logger.info(`seen ${id}${newRequestDelayMs > 0 ? `; answering in ${Math.round(newRequestDelayMs / 1000)} s` : ''}`);
+      }
       if (Date.now() - seenAt < newRequestDelayMs) {
         report.skipped.push({ id, reason: 'new; letting the node catch up' });
         continue;
@@ -283,17 +309,51 @@ export class NightcastOracle {
         report.skipped.push({ id, reason: 'backing off' });
         continue;
       }
+      ready.push(e);
+    }
+
+    // How many to answer at once this pass: `parallel`, capped by the fees the wallet can pay.
+    let width = this.cfg.parallel;
+    if (width > 1 && ready.length > 1 && this.options.freeFeeCoins) {
+      let coins = 1;
+      try {
+        coins = Math.floor(await this.options.freeFeeCoins());
+      } catch {
+        coins = 1;
+      }
+      width = Math.max(1, Math.min(width, Number.isFinite(coins) ? coins : 1));
+      if (width < Math.min(this.cfg.parallel, ready.length)) {
+        let detail = '';
+        try {
+          detail = this.options.describeFeeCoins?.() ?? '';
+        } catch {
+          detail = '';
+        }
+        this.logger.info(
+          `${ready.length} requests waiting; answering ${width === 1 ? 'one at a time' : `${width} at once`}: the wallet can pay ${width === 1 ? 'one fee' : `${width} fees`} at once${detail ? ` (${detail})` : ''}`,
+        );
+      }
+    }
+
+    const answer = async (e: (typeof todo)[number]): Promise<void> => {
+      const id = hex(e.id);
       // Proving takes time, so check the deadline again right before each fulfil.
       if (e.request.deadline <= BigInt(Math.floor(await this.nowSecs()) + safetyMarginSecs)) {
         report.skipped.push({ id, reason: 'too close to deadline' });
-        continue;
+        return;
       }
+      const retry = this.retries.get(id);
+      const startedAt = Date.now();
+      this.logger.info(`answering ${id}`);
       try {
         await chain.fulfil(e.id);
         this.retries.delete(id);
         this.answered.set(id, Date.now());
         report.fulfilled.push(id);
-        this.logger.info(`fulfilled ${id} -> ${hex(this.expectedOutput(e))}`);
+        const seen = this.firstSeen.get(id);
+        this.logger.info(
+          `fulfilled ${id} -> ${hex(this.expectedOutput(e))} (answer took ${Math.round((Date.now() - startedAt) / 1000)} s${seen !== undefined ? `, ${Math.round((Date.now() - seen) / 1000)} s since seen` : ''})`,
+        );
       } catch (err) {
         const message = withCauses(err);
         const failures = (retry?.failures ?? 0) + 1;
@@ -302,6 +362,16 @@ export class NightcastOracle {
         report.failed.push({ id, error: message });
         this.logger.error(`fulfil ${id} failed (attempt ${failures}, retry in ${delay} ms): ${message}`);
       }
+    };
+
+    if (width <= 1) {
+      for (const e of ready) await answer(e);
+    } else {
+      // Up to `width` at a time; the rest wait for the next pass (which comes quickly: hasWaitingWork).
+      const batch = ready.slice(0, width);
+      for (const e of ready.slice(width)) report.skipped.push({ id: hex(e.id), reason: 'queued; answering others' });
+      if (batch.length > 1) this.logger.info(`answering ${batch.length} requests at once`);
+      await Promise.all(batch.map(answer));
     }
     return report;
   }

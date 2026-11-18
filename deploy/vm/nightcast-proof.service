@@ -1,0 +1,19 @@
+# Nightcast's own proof server (127.0.0.1:6303), for the oracle and the MCP server only.
+# Its image follows deploy/docker/proof-server.yml. Installed and updated by deploy/vm/update.sh.
+[Unit]
+Description=Nightcast proof server (Midnight, 127.0.0.1:6303)
+After=docker.service network-online.target
+Requires=docker.service
+Wants=network-online.target
+
+[Service]
+WorkingDirectory=/root/Nightcast
+Environment=HOME=/root
+Environment=NIGHTCAST_PROOF_PORT=6303
+ExecStart=/root/Nightcast/deploy/vm/proof-server.sh
+Restart=always
+RestartSec=10
+TimeoutStopSec=30
+
+[Install]
+WantedBy=multi-user.target

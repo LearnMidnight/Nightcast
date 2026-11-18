@@ -17,6 +17,12 @@ export const textLabel = (text: string): Uint8Array => {
 export type RunningOracle = {
   oracle: NightcastOracle;
   stop(): Promise<void>;
+  /**
+   * When the oracle last finished reading the contract's requests (ms). A pass that never
+   * finishes (a read or a transaction that waits for ever, or upkeep work it waits behind)
+   * stops this moving, so a service can restart instead of looking alive while answering nothing.
+   */
+  lastLookAt(): number;
 };
 
 /**
@@ -28,7 +34,7 @@ export const startOracleService = async (
   contractAddress: string,
   secretKey: bigint,
   logger: Logger,
-  options: Pick<OracleOptions, 'pollMs' | 'busyPollMs' | 'safetyMarginSecs' | 'requesters'> & {
+  options: Pick<OracleOptions, 'pollMs' | 'busyPollMs' | 'safetyMarginSecs' | 'requesters' | 'parallel' | 'freeFeeCoins' | 'describeFeeCoins' | 'newRequestDelayMs'> & {
     /** Called before each fulfil; throw to skip it (the oracle retries after its back-off). */
     beforeFulfil?: () => void;
   } = {},
@@ -55,6 +61,13 @@ export const startOracleService = async (
   // `expire` is a small call: on ledger 9 its fee needs two DUST spends (see withTwoDustSpends).
   const expire = chain.expire.bind(chain);
   chain.expire = (id) => withTwoDustSpends(() => expire(id));
+  let lastLookAt = Date.now();
+  const listRequests = chain.listRequests.bind(chain);
+  chain.listRequests = async () => {
+    const entries = await listRequests();
+    lastLookAt = Date.now();
+    return entries;
+  };
   if (beforeFulfil) {
     const fulfil = chain.fulfil.bind(chain);
     chain.fulfil = async (id) => {
@@ -77,8 +90,12 @@ export const startOracleService = async (
   oracle.start();
   const pollMs = oracleOptions.pollMs ?? 5_000;
   const busyPollMs = Math.min(oracleOptions.busyPollMs ?? pollMs, pollMs);
-  logger.info(`Oracle running for ${contractAddress}; polling every ${pollMs / 1000}s${busyPollMs < pollMs ? ` (every ${busyPollMs / 1000}s while a request is waiting)` : ''}`);
-  return { oracle, stop: () => oracle.stop() };
+  logger.info(
+    `Oracle running for ${contractAddress}; polling every ${pollMs / 1000}s${busyPollMs < pollMs ? ` (every ${busyPollMs / 1000}s while a request is waiting)` : ''}` +
+      (oracleOptions.newRequestDelayMs !== undefined ? `; answering ${oracleOptions.newRequestDelayMs / 1000}s after a request is seen` : ''),
+  );
+  if ((oracleOptions.parallel ?? 1) > 1) logger.info(`Answering up to ${oracleOptions.parallel} requests at once, as many as the wallet has free DUST coins.`);
+  return { oracle, stop: () => oracle.stop(), lastLookAt: () => lastLookAt };
 };
 
 /**

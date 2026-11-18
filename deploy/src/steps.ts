@@ -12,7 +12,7 @@ import {
   submitTx,
 } from '@midnight-ntwrk/midnight-js/contracts';
 import { LedgerTransaction } from '@midnight-ntwrk/midnight-js/types';
-import { ledgerOf, oraclePublicKey } from '@nightcast/contract';
+import { ledgerOf, type NightcastPrivateState, oraclePublicKey } from '@nightcast/contract';
 import { isLocked } from './lock.js';
 import { compiledNightcast, NIGHTCAST_PRIVATE_STATE_ID, type NightcastProviders, readContractState } from './network.js';
 
@@ -138,13 +138,25 @@ export const acceptOracleKey = async (
   return { txId: result.public.txId };
 };
 
-/** Add `slots` slots of collateral (slots × collateralPerRequest NIGHT atoms) to the current oracle's bond, from this wallet. */
-export const depositBond = async (providers: NightcastProviders, contractAddress: string, slots: bigint): Promise<{ txId: string }> => {
+/**
+ * Add `slots` slots of collateral (slots × collateralPerRequest NIGHT atoms) to the current oracle's bond, from this wallet.
+ *
+ * `privateState` replaces the providers' Nightcast private state (findDeployedContract sets it). The
+ * deposit itself needs none, but a running oracle shares these providers: pass its `{ oracleSecretKey }`
+ * or every later fulfil fails with "no oracle secret key in private state" until a restart (16 Nov 2026:
+ * the upkeep's deposit at 13:24 CET wiped the key, and a LunaSpin request went unanswered for its window).
+ */
+export const depositBond = async (
+  providers: NightcastProviders,
+  contractAddress: string,
+  slots: bigint,
+  privateState: NightcastPrivateState = {},
+): Promise<{ txId: string }> => {
   const nightcast = await findDeployedContract(providers, {
     contractAddress,
     compiledContract: compiledNightcast(),
     privateStateId: NIGHTCAST_PRIVATE_STATE_ID,
-    initialPrivateState: {},
+    initialPrivateState: privateState,
   });
   const result = await nightcast.callTx.depositBond(slots);
   return { txId: result.public.txId };

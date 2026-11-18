@@ -57,6 +57,15 @@ export const isDustBehindChain = (err: unknown): boolean => {
   return /DustTreesNotAtBlock|No Dust spend can be dated/i.test(text);
 };
 
+/**
+ * An answer failed because the oracle's key is no longer in its private state. Something replaced the
+ * private state the oracle shares (16 Nov 2026: the upkeep's bond deposit); a restart loads the key again.
+ */
+export const isKeyMissing = (err: unknown): boolean => {
+  const text = typeof err === 'string' ? err : `${err instanceof Error ? err.message : ''} ${inspect(err, { depth: 8 })}`;
+  return /no oracle secret key in private state/i.test(text);
+};
+
 /** The fee failed because the wallet found no coin to pay with (wallet SDK 2's `Wallet.InsufficientFunds`). */
 export const isInsufficientFunds = (err: unknown): boolean => {
   const text = typeof err === 'string' ? err : `${err instanceof Error ? err.message : ''} ${inspect(err, { depth: 8 })}`;
@@ -70,11 +79,14 @@ export type HealthOptions = { pendingMinutes?: number; dustStallMinutes?: number
  * (default 10) and NIGHTCAST_ANSWER_STALL_MINUTES (default 3: how stale the DUST view may be when
  * a request is about to be answered).
  */
+/** A number of minutes from an environment value, or `fallback` when it's unset or not a positive number. */
+export const minutesFromEnv = (v: string | undefined, fallback: number): number => {
+  const n = Number(v);
+  return v !== undefined && v !== '' && Number.isFinite(n) && n > 0 ? n : fallback;
+};
+
 export const healthOptions = (env: NodeJS.ProcessEnv = process.env): Required<HealthOptions> => {
-  const minutes = (v: string | undefined, fallback: number) => {
-    const n = Number(v);
-    return v !== undefined && v !== '' && Number.isFinite(n) && n > 0 ? n : fallback;
-  };
+  const minutes = minutesFromEnv;
   return {
     pendingMinutes: minutes(env.NIGHTCAST_PENDING_MINUTES, 8),
     dustStallMinutes: minutes(env.NIGHTCAST_DUST_STALL_MINUTES, 10),
@@ -128,6 +140,9 @@ export class WalletHealth {
     if (isDustBehindChain(err)) {
       this.reason ??= "a fee failed because the wallet's DUST view is behind the chain";
     }
+    if (isKeyMissing(err)) {
+      this.reason ??= "an answer failed because the oracle's key is missing from its private state";
+    }
   }
 
   /**
@@ -178,3 +193,61 @@ export const noticingFailures = <L extends { error: LogFn; warn: LogFn }>(logger
       return typeof v === 'function' ? (v as LogFn).bind(target) : v;
     },
   });
+
+/**
+ * How many fees the wallet can pay at once: its DUST coins that are free (not booked by a transaction still
+ * on its way) and hold some DUST. At least 1, so a wallet state of an unexpected shape never stops answering.
+ */
+export const freeDustCoins = (state: unknown): number => {
+  try {
+    const coins = (state as { dust?: { availableCoins?: readonly { generatedNow?: bigint }[] } }).dust?.availableCoins;
+    if (!Array.isArray(coins)) return 1;
+    const usable = coins.filter((c) => typeof c.generatedNow !== 'bigint' || c.generatedNow > 0n).length;
+    return Math.max(1, usable);
+  } catch {
+    return 1;
+  }
+};
+
+/** NIGHTCAST_PARALLEL: how many requests the oracle may answer at once (default 1, at most 8). */
+export const parallelFromEnv = (env: NodeJS.ProcessEnv = process.env): number => {
+  const n = Number(env.NIGHTCAST_PARALLEL ?? '1');
+  return Number.isInteger(n) && n >= 1 ? Math.min(n, 8) : 1;
+};
+
+/**
+ * The wallet's fee coins in a few words, for the log line when requests wait together but it can pay fewer
+ * fees at once than NIGHTCAST_PARALLEL: free DUST coins holding DUST, all free ones, booked ones, and NIGHT
+ * UTXOs (each registered one generates DUST).
+ */
+export const describeFeeCoins = (state: unknown): string => {
+  try {
+    const s = state as {
+      dust?: { availableCoins?: readonly { generatedNow?: bigint }[]; pendingCoins?: readonly unknown[] };
+      unshielded?: { availableCoins?: readonly { utxo?: { type?: string } }[] };
+    };
+    const free = Array.isArray(s.dust?.availableCoins) ? s.dust!.availableCoins! : [];
+    const holding = free.filter((c) => typeof c.generatedNow !== 'bigint' || c.generatedNow > 0n).length;
+    const booked = Array.isArray(s.dust?.pendingCoins) ? s.dust!.pendingCoins!.length : 0;
+    const night = Array.isArray(s.unshielded?.availableCoins) ? s.unshielded!.availableCoins!.length : undefined;
+    return `${holding} DUST coin(s) holding DUST of ${free.length} free, ${booked} booked${night !== undefined ? `; ${night} unshielded UTXO(s)` : ''}`;
+  } catch {
+    return '';
+  }
+};
+
+/**
+ * How quickly the oracle answers (18 Nov 2026: a LunaSpin spin took about 90 s, about 30 s of it the
+ * oracle's own waiting):
+ * - NIGHTCAST_NEW_REQUEST_DELAY_SECS (0-60, default 20): the pause after first seeing a request, for
+ *   the node to catch up with the indexer (a fulfil sent too early is refused);
+ * - NIGHTCAST_BUSY_POLL_SECS (1-5, default 5): how often it looks while a request is waiting.
+ */
+export const oracleSpeedFromEnv = (env: NodeJS.ProcessEnv = process.env): { newRequestDelaySecs: number; busyPollSecs: number } => {
+  const num = (v: string | undefined, min: number, max: number, dflt: number): number => {
+    if (v === undefined || v.trim() === '') return dflt;
+    const n = Number(v);
+    return Number.isFinite(n) && n >= min ? Math.min(n, max) : dflt;
+  };
+  return { newRequestDelaySecs: num(env.NIGHTCAST_NEW_REQUEST_DELAY_SECS, 0, 60, 20), busyPollSecs: num(env.NIGHTCAST_BUSY_POLL_SECS, 1, 5, 5) };
+};

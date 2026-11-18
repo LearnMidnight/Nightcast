@@ -7,11 +7,11 @@
 import { ledgerOf, oraclePublicKey, Status } from '@nightcast/contract';
 import type { NightcastOracle } from '@nightcast/sdk';
 import type { MidnightWalletProvider } from '@midnight-ntwrk/testkit-js';
-import { type NightcastProviders, readContractState, sendNight, type Session, walletBalances } from './network.js';
+import { type NightcastProviders, readContractState, registerNewNight, sendNight, type Session, walletAddress, walletBalances } from './network.js';
 import { withTwoDustSpends } from './service.js';
 import { depositBond } from './steps.js';
 import { meter } from './blockfrost-meter.js';
-import { bondShortfall, LowWatch, type OracleTally, Pace, readsLow, type ServedWallet, topUpDue, type UpkeepConfig, type UpkeepStatus, writeStatus } from './upkeep.js';
+import { bondShortfall, coinStep, LowWatch, type OracleTally, Pace, readsLow, type ServedWallet, topUpDue, type UpkeepConfig, type UpkeepStatus, writeStatus } from './upkeep.js';
 import { failureText } from './wallet.js';
 
 type LogFn = (obj: unknown, ...rest: unknown[]) => void;
@@ -95,10 +95,31 @@ export const startUpkeep = (o: {
     const lowForMs = low.see(readsLow(served, config.topUp));
 
     const slots = bondShortfall({ free: seen.free, held: seen.held, target: config.bondTarget, collateral: seen.collateral, night: ours, floor: config.walletFloor });
-    if (slots > 0n && pace.due('deposit', 10 * 60_000)) {
+    // The deposit needs two DUST coins (coinStep): make them first, and don't send a deposit that would be refused.
+    let coinsReady = true;
+    if (slots > 0n) {
+      const coins = await walletBalances(wallet);
+      const step = coinStep({ ...coins, night: ours });
+      coinsReady = step === 'ok';
+      try {
+        if (step === 'register' && pace.due('register', 10 * 60_000)) {
+          await o.oracle.between(() => registerNewNight(wallet, log));
+        } else if (step === 'split' && pace.due('split', 30 * 60_000)) {
+          const half = ours / 2n;
+          const txId = await o.oracle.between(() => sendNight(wallet, walletAddress(wallet), half, session.config.walletNetworkId));
+          log.info(`Split this wallet's NIGHT for a second DUST coin (the bond's deposit needs two): sent ${night(half)} NIGHT to itself, transaction ${txId}.`);
+        } else if (step !== 'ok' && pace.due('coins-wait', 60 * 60_000)) {
+          log.info(`The bond's deposit waits for a second DUST coin (${coins.dustCoins} DUST coin(s), ${coins.nightUtxos} NIGHT UTXO(s), ${coins.nightRegistered} generating DUST).`);
+        }
+      } catch (err) {
+        log.warn(`Making a second DUST coin failed (trying again later): ${failureText(err, 300)}`);
+      }
+    }
+    if (slots > 0n && coinsReady && pace.due('deposit', 10 * 60_000)) {
       const at = new Date().toISOString();
       try {
-        await o.oracle.between(() => withTwoDustSpends(() => depositBond(providers, contractAddress, slots)));
+        // The oracle shares these providers: keep its key in the private state (see depositBond).
+        await o.oracle.between(() => withTwoDustSpends(() => depositBond(providers, contractAddress, slots, { oracleSecretKey: o.secretKey })));
         log.info(`Bond topped up with ${slots} slot(s): back to ${config.bondTarget}.`);
         lastDeposit = { at, slots: String(slots), ok: true };
         ours -= slots * seen.collateral;

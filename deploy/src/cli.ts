@@ -55,6 +55,8 @@ import {
   nightIn,
   pendingNightIn,
   openWallet,
+  registerNewNight,
+  sendNight,
   FAUCETS,
   publicEndpoints,
   type Session,
@@ -67,8 +69,9 @@ import { failureText, walletStateFile } from './wallet.js';
 import { currentCommit, type DeploymentRecord, readRecord, recordPath, writeRecord } from './record.js';
 import { checkRequest } from './check.js';
 import { midnightBackend } from './mcp/backend.js';
+import { FeeGate, feeCoinsOf, mcpParallelFromEnv } from './mcp/gate.js';
 import { type McpMode, RESTART, runMcp, Watchdog } from './mcp/serve.js';
-import { healthOptions, noticingFailures, WalletHealth } from './wallet-health.js';
+import { describeFeeCoins, freeDustCoins, healthOptions, minutesFromEnv, noticingFailures, oracleSpeedFromEnv, parallelFromEnv, WalletHealth } from './wallet-health.js';
 import { meter, overLimitReason } from './blockfrost-meter.js';
 import { OracleTally, upkeepConfig, upkeepWanted } from './upkeep.js';
 import { startUpkeep, talking } from './upkeep-run.js';
@@ -649,17 +652,31 @@ const main = async (argv: string[]): Promise<number> => {
           const providers = nightcastProviders(session, wallet);
           // A stuck wallet (wallet-health.ts) is fixed by a restart: exit 75 and systemd starts the oracle again.
           const health = new WalletHealth(healthOptions());
-          const watch = wallet.wallet.state().subscribe((s) => health.see(s));
+          // The latest wallet state, for how many fees it can pay at once (NIGHTCAST_PARALLEL).
+          let free = 1;
+          let lastState: unknown;
+          const watch = wallet.wallet.state().subscribe((s) => {
+            health.see(s);
+            free = freeDustCoins(s);
+            lastState = s;
+          });
           const tally = new OracleTally();
           const logger = talking(noticingFailures(session.logger, (msg) => health.failed(msg)), (line) => tally.see(line));
           // Every look is a Blockfrost request on Preprod (17,280 a day at 5 s): look every 15 s there
           // while nothing is waiting, and every 5 s while a request is.
-          const pollSecs = values.poll !== undefined ? Number(values.poll) : BLOCKFROST[network] ? 15 : 5;
-          if (!(pollSecs >= 1)) throw new Error('--poll must be a number of seconds, 1 or more');
+          // NIGHTCAST_POLL_SECS sets it too (--poll wins), so a VM can change it in a drop-in.
+          const pollSecs = values.poll !== undefined ? Number(values.poll) : process.env.NIGHTCAST_POLL_SECS ? Number(process.env.NIGHTCAST_POLL_SECS) : BLOCKFROST[network] ? 15 : 5;
+          if (!(pollSecs >= 1)) throw new Error('--poll (or NIGHTCAST_POLL_SECS) must be a number of seconds, 1 or more');
+          const speed = oracleSpeedFromEnv();
           const running = await startOracleService(providers, record.contractAddress, secretKey, logger, {
             pollMs: pollSecs * 1000,
-            busyPollMs: Math.min(pollSecs, 5) * 1000,
+            busyPollMs: Math.min(pollSecs, speed.busyPollSecs) * 1000,
+            newRequestDelayMs: speed.newRequestDelaySecs * 1000,
             requesters,
+            // Several answers at once (default 1), each paying from its own DUST coin.
+            parallel: parallelFromEnv(),
+            freeFeeCoins: () => free,
+            describeFeeCoins: () => describeFeeCoins(lastState),
             // Don't spend minutes proving an answer the wallet can't pay for: restart first (below).
             beforeFulfil: () => {
               const why = health.readyToPay();
@@ -671,12 +688,17 @@ const main = async (argv: string[]): Promise<number> => {
             ? startUpkeep({ config: upkeep, session, wallet, providers, contractAddress: record.contractAddress, secretKey, oracle: running.oracle, tally })
             : () => undefined;
           session.logger.info('Press Ctrl+C to stop.');
+          // A pass that never finishes leaves the service running but answering nothing (16 Nov 2026:
+          // upkeep stopped writing its status at 09:04 CET, and a request went unanswered for its
+          // whole window). Restart when the oracle hasn't finished a look for NIGHTCAST_LOOK_STALL_MINUTES.
+          const lookStallMs = minutesFromEnv(process.env.NIGHTCAST_LOOK_STALL_MINUTES, 4) * 60_000;
           let check: NodeJS.Timeout | undefined;
           const code = await new Promise<number>((resolve) => {
             process.once('SIGINT', () => resolve(0));
             process.once('SIGTERM', () => resolve(0));
             check = setInterval(() => {
-              const why = health.stuck();
+              const sinceLook = Date.now() - running.lastLookAt();
+              const why = health.stuck() ?? (sinceLook >= lookStallMs ? `it hasn't looked at the contract's requests for ${Math.floor(sinceLook / 60_000)} minutes` : undefined);
               const refused = overLimitReason();
               if (refused) {
                 session.logger.error(`Stopping the oracle to wait: ${refused}.`);
@@ -688,6 +710,14 @@ const main = async (argv: string[]): Promise<number> => {
             }, 5_000);
           });
           clearInterval(check);
+          // Stopping waits for the pass in flight. If that pass never finishes, a restart would
+          // hang here for ever with the service still "active" (16 Nov 2026, from 09:27 CET for
+          // 2.5 hours): exit after a minute regardless. systemd starts it again.
+          const deadline = setTimeout(() => {
+            process.stderr.write(`The oracle didn't stop within 60 s; exiting (${code}) anyway.\n`);
+            process.exit(code);
+          }, 60_000);
+          deadline.unref();
           stopUpkeep();
           watch.unsubscribe();
           session.logger.info('Stopping the oracle...');
@@ -764,9 +794,56 @@ const main = async (argv: string[]): Promise<number> => {
           return nightcastProviders(session, w);
         });
         providers.catch((e: unknown) => session.logger.error(`The wallet could not open: ${e instanceof Error ? e.message : String(e)}`));
+        // Several requests in flight at once (NIGHTCAST_MCP_PARALLEL, default 1), as many as the wallet has fee coins for.
+        const parallel = mcpParallelFromEnv();
+        let lastState: unknown;
+        void wallet.then((w) => w.wallet.state().subscribe((s) => (lastState = s))).catch(() => undefined);
+        const gate = parallel > 1 ? new FeeGate(parallel, () => feeCoinsOf(lastState), (why) => session.logger.info(`A request waits: ${why}.`)) : undefined;
+        if (gate) {
+          session.logger.info(`Sending up to ${parallel} requests at once, as many as the wallet has DUST coins for.`);
+          // Keep a DUST coin for each request in flight: register NIGHT that doesn't generate DUST yet, and split a
+          // lone NIGHT UTXO by sending half of it to this wallet's own address (each registered UTXO makes a coin).
+          const keepCoins = async (): Promise<void> => {
+            const w = await wallet;
+            const c = feeCoinsOf(lastState);
+            if (c.free + c.booked >= parallel || gate.sending() > 0) return;
+            const b = await walletBalances(w);
+            if (b.nightRegistered < b.nightUtxos) {
+              await gate.exclusive(() => registerNewNight(w, session.logger));
+            } else if (b.nightUtxos < parallel && b.night >= 2_000_000n) {
+              const half = b.night / 2n;
+              const txId = await gate.exclusive(() => sendNight(w, walletAddress(w), half, session.config.walletNetworkId));
+              session.logger.info(`Split this wallet's NIGHT for another DUST coin (${parallel} requests at once need ${parallel}): transaction ${txId}.`);
+            }
+          };
+          let keeping = false;
+          const keep = () => {
+            if (keeping) return;
+            keeping = true;
+            keepCoins()
+              .catch((err: unknown) => session.logger.warn(`Making another DUST coin failed (trying again later): ${failureText(err, 300)}`))
+              .finally(() => (keeping = false));
+          };
+          setTimeout(keep, 2 * 60_000).unref?.();
+          setInterval(keep, 10 * 60_000).unref?.();
+        }
+        // A send refused for want of a free coin, while others were in flight, is tried once more on its own.
+        const schedule = gate
+          ? async <T>(job: () => Promise<T>): Promise<T> => {
+              try {
+                return await gate.run(job);
+              } catch (err) {
+                if (!/insufficient\s*funds/i.test(failureText(err, 2000))) throw err;
+                session.logger.warn('A request found no free DUST coin; sending it again once the others are done.');
+                return gate.exclusive(job);
+              }
+            }
+          : undefined;
         const backend = midnightBackend(network, record, indexerPublicDataProvider(session.config.indexer, session.config.indexerWS), {
           secret,
           providers,
+          ...(schedule ? { schedule } : {}),
+          log: (line) => session.logger.info(line),
           refundTo: wallet.then(walletBytes),
           onSubmitted: () => watchdog.submitted(),
           onSubmitError: (err) => {
