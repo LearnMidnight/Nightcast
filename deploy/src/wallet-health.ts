@@ -193,3 +193,24 @@ export const noticingFailures = <L extends { error: LogFn; warn: LogFn }>(logger
       return typeof v === 'function' ? (v as LogFn).bind(target) : v;
     },
   });
+
+/**
+ * How many fees the wallet can pay at once: its DUST coins that are free (not booked by a transaction still
+ * on its way) and hold some DUST. At least 1, so a wallet state of an unexpected shape never stops answering.
+ */
+export const freeDustCoins = (state: unknown): number => {
+  try {
+    const coins = (state as { dust?: { availableCoins?: readonly { generatedNow?: bigint }[] } }).dust?.availableCoins;
+    if (!Array.isArray(coins)) return 1;
+    const usable = coins.filter((c) => typeof c.generatedNow !== 'bigint' || c.generatedNow > 0n).length;
+    return Math.max(1, usable);
+  } catch {
+    return 1;
+  }
+};
+
+/** NIGHTCAST_PARALLEL: how many requests the oracle may answer at once (default 1, at most 8). */
+export const parallelFromEnv = (env: NodeJS.ProcessEnv = process.env): number => {
+  const n = Number(env.NIGHTCAST_PARALLEL ?? '1');
+  return Number.isInteger(n) && n >= 1 ? Math.min(n, 8) : 1;
+};

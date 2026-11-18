@@ -35,6 +35,7 @@ import { acceptOracleKey, deployNightcast, deployNightcastLocked, depositBond } 
 import { checkRequest } from '../check.js';
 import { expireRequest, readRequest, startOracleService, type SubmittedRequest, submitRequest, waitForResult } from '../service.js';
 import { verifyDeployment } from '../verify.js';
+import { freeDustCoins } from '../wallet-health.js';
 
 const enabled = process.env.NIGHTCAST_E2E === '1';
 const hex = (b: Uint8Array) => Buffer.from(b).toString('hex');
@@ -240,6 +241,46 @@ describe.runIf(enabled)('Nightcast on a local Midnight network', () => {
       await requesterWallet.stop().catch(() => undefined);
     }
   }, 20 * 60_000);
+
+  it('answers two requests waiting at the same time (NIGHTCAST_PARALLEL=2)', async () => {
+    const requesterWallet = await openWallet(session, { seed: LOCAL_GENESIS_SEEDS[1] });
+    const requesterProviders = nightcastProviders(session, requesterWallet);
+    try {
+      const requesterSecret = label('parallel-requester');
+      // Both requests are on chain before the oracle starts, so it finds them waiting together.
+      const a = await submitRequest(requesterProviders, address, requesterSecret, { tag: 'e2e-par-a', deadlineSecs: 1_800, refundTo: walletBytes(requesterWallet) });
+      const b = await submitRequest(requesterProviders, address, requesterSecret, { tag: 'e2e-par-b', deadlineSecs: 1_800, refundTo: walletBytes(requesterWallet) });
+      let free = 1;
+      const watch = wallet.wallet.state().subscribe((s) => {
+        free = freeDustCoins(s);
+      });
+      const lines: string[] = [];
+      const logger = Object.assign(Object.create(session.logger), {
+        info: (m: string) => {
+          lines.push(m);
+          session.logger.info(m);
+        },
+      }) as typeof session.logger;
+      const running = await startOracleService(providers, address, sk, logger, { pollMs: 2_000, safetyMarginSecs: 60, parallel: 2, freeFeeCoins: () => free });
+      try {
+        const [ra, rb] = await Promise.all([
+          waitForResult(requesterProviders, address, a.id, { pollMs: 2_000, timeoutMs: 10 * 60_000 }),
+          waitForResult(requesterProviders, address, b.id, { pollMs: 2_000, timeoutMs: 10 * 60_000 }),
+        ]);
+        expect(ra?.status).toBe(Status.fulfilled);
+        expect(rb?.status).toBe(Status.fulfilled);
+        expect(hex(ra!.output)).toBe(hex(pureCircuits.evaluate(sk, a.id)));
+        expect(hex(rb!.output)).toBe(hex(pureCircuits.evaluate(sk, b.id)));
+        // Whether both went at once depends on the wallet having two free DUST coins; say which it was.
+        console.log(`parallel e2e: ${lines.some((l) => l.includes('requests at once')) ? 'answered together' : 'answered one after the other (one free DUST coin)'}`);
+      } finally {
+        await running.stop();
+        watch.unsubscribe();
+      }
+    } finally {
+      await requesterWallet.stop().catch(() => undefined);
+    }
+  }, 25 * 60_000);
 
   it('expires a request nobody answers, and the checks agree', async () => {
     const requesterSecret = label('expire-requester');
