@@ -1,6 +1,9 @@
 import { describe, expect, it } from 'vitest';
 import { balanceReport, explainRefusals, isRefusal } from '../explain-refusal.js';
-import { failureText, feeSettings, timerSettings } from '../wallet.js';
+import { mkdtempSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { failureText, feeSettings, readDustStart, skipLedgerV8DustHistory, timerSettings } from '../wallet.js';
 
 const refusal = () => Object.assign(new Error('Transaction submission error'), { cause: new Error('1010: Invalid Transaction: Custom error: 138') });
 
@@ -148,5 +151,24 @@ describe('an error with its causes', () => {
   it('leaves a plain error as it is', () => {
     expect(failureText(new Error('usage: ./nightcast'))).toBe('usage: ./nightcast');
     expect(failureText('text')).toBe('text');
+  });
+});
+
+describe("a fresh wallet's DUST sync", () => {
+  it('starts at the ledger 9 fork, unless NIGHTCAST_DUST_V8_HISTORY=1 asks for the history before it', () => {
+    expect(skipLedgerV8DustHistory({})).toBe(true);
+    expect(skipLedgerV8DustHistory({ NIGHTCAST_DUST_V8_HISTORY: '0' })).toBe(true);
+    expect(skipLedgerV8DustHistory({ NIGHTCAST_DUST_V8_HISTORY: '1' })).toBe(false);
+  });
+  it("reads the kept ledger 9 start of the DUST history, and nothing from a missing or broken file", () => {
+    const dir = mkdtempSync(join(tmpdir(), 'dust-start-'));
+    const file = join(dir, 'preprod-dust-ledger9-start.json');
+    expect(readDustStart(file)).toBeUndefined();
+    writeFileSync(file, JSON.stringify({ network: 'preprod', cursor: '1857960', version: '2001100' }));
+    expect(readDustStart(file)).toEqual({ cursor: 1857960n, version: 2001100n });
+    writeFileSync(file, '{"cursor": "1857960"}');
+    expect(readDustStart(file)).toBeUndefined();
+    writeFileSync(file, 'not json');
+    expect(readDustStart(file)).toBeUndefined();
   });
 });

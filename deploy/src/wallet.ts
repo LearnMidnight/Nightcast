@@ -13,7 +13,9 @@ import { createHash } from 'node:crypto';
 import { chmodSync, existsSync, mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { dirname, join } from 'node:path';
+import { Effect, Option } from 'effect';
 import type { Logger } from 'pino';
+import { SyncService as DustSync } from '@midnightntwrk/wallet-sdk/dust/v2';
 import { releaseStaleDustBookings } from './dust-bookings.js';
 import {
   Capabilities,
@@ -76,6 +78,56 @@ export const walletStateFile = (network: string, seed: string): string =>
 export const syncBatchSize = (): number => {
   const n = Number.parseInt(process.env.NIGHTCAST_SYNC_BATCH ?? '', 10);
   return Number.isFinite(n) && n > 0 ? n : 500;
+};
+
+/**
+ * Whether a wallet's first sync skips the DUST history from before the ledger 9 fork. When a chain
+ * crossed to ledger 9 it re-emitted all its DUST as ledger 9 events, so a fresh wallet can start
+ * there: on Preprod that skips about 1.86 of 1.93 million DUST events, which the event replay
+ * applies at only about 30 a second (some 17 hours). The only loss is the wallet's ledger 8 DUST
+ * transaction history. A restored wallet resumes from its saved position either way.
+ * NIGHTCAST_DUST_V8_HISTORY=1 reads the history (the SDK's default).
+ */
+export const skipLedgerV8DustHistory = (env: NodeJS.ProcessEnv = process.env): boolean => env.NIGHTCAST_DUST_V8_HISTORY !== '1';
+
+type DustStart = { cursor: bigint; version: bigint };
+
+/** Where `network`'s DUST timeline reaches ledger 9, once found: it never changes. */
+export const dustStartFile = (network: string): string => join(walletStateDir(), `${network}-dust-ledger9-start.json`);
+
+export const readDustStart = (file: string): DustStart | undefined => {
+  try {
+    const j = JSON.parse(readFileSync(file, 'utf8')) as { cursor?: string; version?: string };
+    if (!j.cursor || !j.version) return undefined;
+    return { cursor: BigInt(j.cursor), version: BigInt(j.version) };
+  } catch {
+    return undefined;
+  }
+};
+
+/**
+ * Where the chain's DUST timeline reaches ledger 9, for a fresh wallet to start from: the SDK's
+ * own search of the indexer (one short subscription per halving of the timeline), run here rather
+ * than inside the wallet's start, which gives it only 30 s; through Blockfrost it takes longer,
+ * and the start then quietly replays everything. Found once per network and kept beside the
+ * wallet states. Undefined if the search finds nothing (the start then replays as before).
+ */
+const dustStartFor = async (network: string, config: Parameters<typeof DustSync.findDustTimelineStart>[0], v9: bigint, logger: Logger): Promise<DustStart | undefined> => {
+  const file = dustStartFile(network);
+  const known = readDustStart(file);
+  if (known) return known;
+  logger.info('Finding where the DUST history reaches ledger 9 (once for this network)...');
+  const started = Date.now();
+  const found = await Effect.runPromise(DustSync.findDustTimelineStart(config, v9 as never));
+  if (Option.isNone(found)) {
+    logger.warn(`The DUST history's ledger 9 start wasn't found (${Math.round((Date.now() - started) / 1000)} s); this wallet's DUST syncs from the beginning.`);
+    return undefined;
+  }
+  const start = { cursor: found.value.cursor, version: BigInt(found.value.version) };
+  mkdirSync(dirname(file), { recursive: true, mode: 0o700 });
+  writeFileSync(file, JSON.stringify({ network, cursor: String(start.cursor), version: String(start.version) }) + '\n');
+  logger.info(`The DUST history reaches ledger 9 after event ${start.cursor} (found in ${Math.round((Date.now() - started) / 1000)} s); a fresh wallet's DUST syncs from there.`);
+  return start;
 };
 
 type SubmissionService = { submitTransaction(tx: unknown, waitFor?: 'Submitted' | 'InBlock' | 'Finalized'): Promise<unknown>; close(): Promise<void> };
@@ -385,11 +437,16 @@ export const buildWallet = async (
   };
   const keystore = createKeystore({ kind: 'schnorr', secret: seeds.unshielded }, env.walletNetworkId);
 
-  const fresh = async () => ({
-    shielded: await ShieldedWallet(config).startWithSeed(seeds.shielded),
-    unshielded: await UnshieldedWallet(unshieldedConfig).startWithPublicKey(PublicKey.fromKeyStore(keystore)),
-    dust: await DustWallet(dustConfig).startWithSeed(seeds.dust),
-  });
+  const fresh = async () => {
+    // A fresh DUST wallet starts at the ledger 9 fork (skipLedgerV8DustHistory), from where it was found.
+    const start = skipLedgerV8DustHistory() ? await dustStartFor(network, dustConfig as never, BigInt(config.forks.v9 as never), logger).catch(() => undefined) : undefined;
+    const freshDust = start ? { ...dustConfig, dustTimelineStartProbe: async () => Option.some({ cursor: start.cursor, version: start.version as never }) } : dustConfig;
+    return {
+      shielded: await ShieldedWallet(config).startWithSeed(seeds.shielded),
+      unshielded: await UnshieldedWallet(unshieldedConfig).startWithPublicKey(PublicKey.fromKeyStore(keystore)),
+      dust: await DustWallet(freshDust as typeof dustConfig).startWithSeed(seeds.dust),
+    };
+  };
 
   const file = walletStateFile(network, seed);
   const saved = persist ? readSaved(file, network) : undefined;
