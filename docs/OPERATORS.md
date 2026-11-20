@@ -1,5 +1,7 @@
 # The Nightcast operator network (draft, November 2026)
 
+*By Jack Baker, founder of Lunardraw and Nightcast.*
+
 *Status: a design with a working contract and a test on Preprod. Experimental and unaudited. Testnets only.*
 
 ## The problem
@@ -62,6 +64,40 @@ Five operators, three per request, run on one machine (`network/vm/net.sh`, its 
 - how often requests clash or need a second try;
 - what happens when an operator is paused (its requests go void and are refunded from its bond; the others carry on);
 - an operator leaving, and a sixth joining.
+
+## Who can be an operator (next version)
+
+*Decided 20 Nov 2026 (Jack): Cardano stake pool operators required, Midnight block producers preferred. Not in the contract yet.*
+
+More operators is good only if they are really different people. Anyone can register many keys (a Sybil), and whoever holds a fraction `f` of the keys in a draw's pool controls all three of a random group with chance `f³`: 0.1% at 10%, 0.8% at 20%, 3.7% at 33% (about once a month for a daily draw).
+
+- **Requirement: a Cardano stake pool operator.** Every operator key is linked to a registered Cardano pool, one pool per operator. Pools are public, carry real stake, and already run servers around the clock. There are thousands today.
+- **Preferred: Midnight block producers.** Midnight is a Cardano partner chain: every Midnight block producer is first a Cardano SPO that also runs a Midnight node. They are chosen more often, or need a smaller bond. They have shown they can run Midnight infrastructure, and it rewards the people securing the chain.
+- **Proving the link**, in order of strength:
+  1. The pool's key signs "operator key K is mine", and anyone checks it against Cardano's public pool list. The website, the SDK and the community check this, outside the contract. This works today, so it comes first on Preprod.
+  2. The contract checks the pool's Ed25519 signature itself, if Compact can verify it in a circuit. This is to be checked.
+  3. Midnight's own record of its block producers, if it ever becomes readable by contracts. It isn't today.
+- **Other defences:**
+  - **Bigger groups for bigger jackpots:** 5 of N instead of 3 turns 0.8% at 20% into 0.03%. The fee is paid per answer, so only the draws worth attacking pay more.
+  - **Bonds that grow with what is at stake:** the collateral per request is a share of the jackpot it protects, so many keys tie up a lot of money and a refusal costs more than a re-roll could gain.
+  - **Every result names its group,** so a group that keeps answering together is visible.
+  - **When the consumer is a contract with a fixed seed** (a Starfall draw: the seed comes from the previous draw), the consumer contract itself can pick the group from that seed and the operator list, because nobody can try other seeds. Free-form requesters still name their own group, as above.
+
+## Paying operators and keepers (next Starfall)
+
+*Simulated 20 Nov 2026 (Lunardraw's notes: `helper-pay-split-sim-20-nov-2026`). This is a starting point; it needs re-running with real server prices and mainnet fees.*
+
+Starfall keeps players' 1.0 a game for prizes and the Treasury's 0.10, and splits the operator's 0.20:
+
+- **0.10 to Lunardraw, 0.04 to the draw's randomness operators, 0.06 to the keepers who carry the draw through.** Keepers settle, pay out and pay most of the fees, so they get more than operators, about 60:40.
+- **A minimum per draw for the helpers, taken from Lunardraw's share first:** about 150 NIGHT at US$0.05. Servers are a fixed cost (about US$7 a day keeps 7 operators and 3 keepers running), so no per-game share works at low sales.
+  - Below about 750 games a draw, the helpers take all 0.20.
+  - Above about 1,500, the plain split applies.
+- With this split the network pays outside helpers from about 1,500 games a day at NIGHT US$0.05:
+  - about 4,300 at US$0.02;
+  - about 770 at US$0.10;
+  - about 600 if operators are stake pools on machines they already run.
+- Keepers are paid only for steps that move a draw forward, so nobody gains by triggering cheap steps early.
 
 ## Towards a shared standard
 
