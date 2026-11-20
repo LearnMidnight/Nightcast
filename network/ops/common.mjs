@@ -6,7 +6,7 @@ import { existsSync, mkdirSync, readFileSync, writeFileSync, appendFileSync } fr
 import { webcrypto } from 'node:crypto';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
-import { connect, contractProviders, openWallet, walletAddress } from '@nightcast/deploy';
+import { blockfrostProjectId, connect, contractProviders, openWallet, walletAddress } from '@nightcast/deploy';
 import { CompiledContract } from '@midnight-ntwrk/compact-js';
 import { findDeployedContract } from '@midnight-ntwrk/midnight-js/contracts';
 import { ContractState } from '@midnight-ntwrk/midnight-js-protocol/v9';
@@ -92,7 +92,9 @@ export const readJsonl = (file) => (existsSync(file) ? readFileSync(file, 'utf8'
  * a contract handle whose `callTx` sends transactions. The wallet is stopped afterwards.
  */
 export const withChain = async ({ network = 'preprod', proofServerPort, walletFile, address }, f) => {
-  const session = await connect(network, { proofServerPort, waitForBlockfrost: true });
+  // Preprod is served by Blockfrost: its project id as the CLI finds it (NIGHTCAST_BLOCKFROST_PROJECT_ID,
+  // else ~/nightcast-secrets/blockfrost-<network>.secret, saved by `./nightcast blockfrost save`).
+  const session = await connect(network, { proofServerPort, projectId: blockfrostProjectId(network), waitForBlockfrost: true });
   try {
     const wallet = await openWallet(session, { seed: walletSeedFrom(walletFile) });
     try {
