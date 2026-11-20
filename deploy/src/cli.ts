@@ -652,6 +652,7 @@ const main = async (argv: string[]): Promise<number> => {
           const providers = nightcastProviders(session, wallet);
           // A stuck wallet (wallet-health.ts) is fixed by a restart: exit 75 and systemd starts the oracle again.
           const health = new WalletHealth(healthOptions());
+          health.walletOpen(); // open and synced: a DUST view lagging the chain counts from now on
           // The latest wallet state, for how many fees it can pay at once (NIGHTCAST_PARALLEL).
           let free = 1;
           let lastState: unknown;
@@ -791,6 +792,7 @@ const main = async (argv: string[]): Promise<number> => {
         const wallet = openWallet(session, walletOptions(network, walletSeed(values.wallet)));
         const providers = wallet.then((w) => {
           session.logger.info(`Wallet open: requests are on (${walletAddress(w)}).`);
+          watchdog.walletOpen();
           return nightcastProviders(session, w);
         });
         providers.catch((e: unknown) => session.logger.error(`The wallet could not open: ${e instanceof Error ? e.message : String(e)}`));
@@ -846,11 +848,21 @@ const main = async (argv: string[]): Promise<number> => {
           log: (line) => session.logger.info(line),
           refundTo: wallet.then(walletBytes),
           onSubmitted: () => watchdog.submitted(),
+          readyToSend: () => watchdog.readyToSend(),
+          describe: () => {
+            const age = watchdog.dustAgeSecs();
+            return age === undefined ? undefined : `the wallet's DUST view is ${age} s old`;
+          },
           onSubmitError: (err) => {
             session.logger.warn(`A request failed: ${failureText(err)}`);
             watchdog.failed(err);
           },
         });
+        // How old the wallet's DUST view is, every 10 minutes: a view going stale shows before a request meets it.
+        setInterval(() => {
+          const age = watchdog.dustAgeSecs();
+          if (age !== undefined) session.logger.info(`The wallet's DUST view is ${age} s old.`);
+        }, 10 * 60_000).unref?.();
         // The wallet's address and NIGHT on /health, so the oracle can top it up when it runs low (upkeep.ts).
         let walletInfo: { address: string; night: string } | undefined;
         void wallet

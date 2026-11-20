@@ -37,6 +37,10 @@ export const midnightBackend = (
     log?: (line: string) => void;
     /** Runs each submit (mcp/gate.ts); without it the tools send one at a time. */
     schedule?<T>(job: () => Promise<T>): Promise<T>;
+    /** Why not to send now (the wallet's DUST view too old to date a fee: the server restarts), if so. */
+    readyToSend?: () => string | undefined;
+    /** Said with each send's first line (how old the wallet's DUST view is). */
+    describe?: () => string | undefined;
   },
   /** How long one read of the contract's state answers every check (NIGHTCAST_STATE_CACHE_SECS, default 15 s; 0 = no sharing). */
   stateCacheMs: number = stateCacheSecs() * 1000,
@@ -77,6 +81,9 @@ export const midnightBackend = (
     async submit(tag, seed, deadline) {
       if (!requester) throw new Error('this server has no wallet');
       if (!opened) throw new Error("this server's wallet is still opening");
+      // Refuse at once rather than fail after the wallet library's 2-minute retry; the server restarts and resyncs.
+      const notNow = requester.readyToSend?.();
+      if (notNow) throw new Error(`not sending now: ${notNow}; this server restarts to resync its wallet, so try again in a minute`);
       try {
         const c = (await handle()) as unknown as {
           callTx: { request(t: Uint8Array, s: Uint8Array, d: bigint, refundTo: { bytes: Uint8Array }): Promise<{ public: { txId: string } }> };
@@ -84,7 +91,8 @@ export const midnightBackend = (
         // A missed request's fee and collateral come back to this server's wallet.
         const id = Buffer.from(pureCircuits.requestId(deployment, commitment, tag, seed)).toString('hex');
         const startedAt = Date.now();
-        requester.log?.(`sending request ${id}`);
+        const about = requester.describe?.();
+        requester.log?.(`sending request ${id}${about ? ` (${about})` : ''}`);
         const r = await c.callTx.request(tag, seed, deadline, { bytes: await requester.refundTo });
         requester.log?.(`request ${id} on chain after ${Math.round((Date.now() - startedAt) / 1000)} s (transaction ${r.public.txId})`);
         requester.onSubmitted?.();
