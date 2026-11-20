@@ -9,6 +9,10 @@
 #   bash net.sh deploy             deploy the contract (locked) and check it
 #   bash net.sh operators [5]      make the operator keys and register them (bond: BOND slots each, default 20)
 #   bash net.sh start | stop       the operators and the requester services
+#   bash net.sh wallets5           a wallet of its own for each operator (op-N): prints their addresses to fund
+#   bash net.sh sync5 | synced     sync those wallets in the background (two at a time) / how far they've got
+#   bash net.sh start5             each operator in its own process with its own wallet (nightcast-net-operator@N),
+#                                  and a fresh requester log (the last one is kept as requests-<time>.jsonl)
 #   bash net.sh status             operators, bonds, requests, and the requester's report
 #   bash net.sh pause N | resume N operator op-N stops / starts answering (the others carry on)
 #   bash net.sh leave N            op-N takes its bond back and leaves
@@ -24,6 +28,7 @@ PORT=6304
 BOND="${BOND:-20}"
 OPS="$DATA/operators"
 OPW="$DATA/operators-wallet.secret"
+OWD="$DATA/wallets"
 REQW="$DATA/requester-wallet.secret"
 say() { echo "== $*"; }
 node_net() { (cd "$REPO" && node "network/ops/$1" "${@:2}" --proof-server-port "$PORT"); }
@@ -83,7 +88,56 @@ case "${1:-}" in
     node_net operators.mjs register --dir "$OPS" --wallet "$OPW" --bond "$BOND"
     ;;
   start) systemctl start nightcast-net-operators && sleep 5 && systemctl start nightcast-net-requester && say "started" ;;
-  stop) systemctl stop nightcast-net-requester nightcast-net-operators && say "stopped" ;;
+  stop) systemctl stop nightcast-net-requester nightcast-net-operators 'nightcast-net-operator@*' && say "stopped" ;;
+  wallets5)
+    mkdir -p "$OWD" && chmod 700 "$OWD"
+    for k in "$OPS"/op-*.secret; do
+      n=$(basename "$k" .secret)
+      [ -f "$OWD/$n.secret" ] || "$REPO/nightcast" wallet new --out "$OWD/$n.secret" >/dev/null
+    done
+    say "Fund each with about ${EACH:-40} tNIGHT (its own NIGHT makes the DUST that pays its fees):"
+    (cd "$REPO/deploy" && node -e "
+      const { walletAddressOf } = await import('./dist/index.js');
+      const fs = await import('node:fs');
+      for (const f of fs.readdirSync('$OWD').filter((x) => /^op-[0-9]+\.secret$/.test(x)).sort((a, b) => parseInt(a.slice(3)) - parseInt(b.slice(3)))) {
+        console.log(f.replace('.secret', '').padEnd(6), walletAddressOf('preprod', JSON.parse(fs.readFileSync('$OWD/' + f, 'utf8')).seed));
+      }" --input-type=module)
+    ;;
+  sync5)
+    # In the background (an ssh session ending doesn't stop it), two at a time to spare memory and Blockfrost.
+    nohup bash "$0" _sync5 >/dev/null 2>&1 &
+    say "Syncing in the background; check with: bash net.sh synced"
+    ;;
+  _sync5)
+    ls "$OWD"/op-*.secret | sort -V | xargs -P 2 -I{} bash "$0" _sync1 {}
+    ;;
+  _sync1)
+    n=$(basename "$2" .secret)
+    rm -f "$DATA/sync-$n.done"
+    set +e
+    "$REPO/nightcast" wallet show --network preprod --wallet "$2" --proof-server-port "$PORT" > "$DATA/sync-$n.log" 2>&1
+    echo $? > "$DATA/sync-$n.done"
+    ;;
+  synced)
+    for k in "$OWD"/op-*.secret; do
+      n=$(basename "$k" .secret)
+      if [ -f "$DATA/sync-$n.done" ]; then st="done (exit $(cat "$DATA/sync-$n.done"))"; else st="syncing"; fi
+      printf '%-5s %s  %s\n' "$n" "$st" "$(grep -E 'NIGHT|DUST' "$DATA/sync-$n.log" 2>/dev/null | tail -1 | cut -c1-110)"
+    done
+    ;;
+  start5)
+    install -m 644 "$REPO/network/vm/nightcast-net-operator@.service" /etc/systemd/system/nightcast-net-operator@.service
+    install -m 644 "$REPO/network/vm/nightcast-net-requester.service" /etc/systemd/system/nightcast-net-requester.service
+    systemctl daemon-reload
+    systemctl stop nightcast-net-requester nightcast-net-operators 'nightcast-net-operator@*' 2>/dev/null || true
+    [ -f "$DATA/requests.jsonl" ] && mv "$DATA/requests.jsonl" "$DATA/requests-$(date -u +%Y%m%dT%H%M).jsonl"
+    for k in "$OPS"/op-*.secret; do
+      n=$(basename "$k" .secret); i=${n#op-}
+      [ -f "$OWD/$n.secret" ] || { echo "no wallet for $n in $OWD (run wallets5)" >&2; exit 1; }
+      systemctl start "nightcast-net-operator@$i"
+    done
+    sleep 5 && systemctl start nightcast-net-requester && say "started: $(ls "$OPS"/op-*.secret | wc -l) operators, each with its own wallet"
+    ;;
   status)
     node_net operators.mjs status --dir "$OPS" --wallet "$OPW" 2>&1 | grep -E "^[0-9:]{8} " || true
     (cd "$REPO" && node network/ops/requester.mjs report --log "$DATA/requests.jsonl")
@@ -94,10 +148,17 @@ case "${1:-}" in
   add)
     n=$(( $(ls "$OPS"/op-*.secret | wc -l) + 1 ))
     (cd "$REPO" && node network/ops/operators.mjs keys --dir "$OPS" --count "$n")
-    systemctl stop nightcast-net-operators
-    node_net operators.mjs register --dir "$OPS" --wallet "$OPW" --bond "$BOND"
-    systemctl start nightcast-net-operators
+    if [ -d "$OWD" ]; then
+      # One process per operator: the new one pays its fees from the shared operators wallet (funded, synced, idle now).
+      node_net operators.mjs register --dir "$OPS" --wallet "$OPW" --bond "$BOND"
+      ln -sf "$OPW" "$OWD/op-$n.secret"
+      systemctl start "nightcast-net-operator@$n" && say "op-$n running with the operators wallet"
+    else
+      systemctl stop nightcast-net-operators
+      node_net operators.mjs register --dir "$OPS" --wallet "$OPW" --bond "$BOND"
+      systemctl start nightcast-net-operators
+    fi
     ;;
-  logs) journalctl -u nightcast-net-operators -u nightcast-net-requester --since "-30 min" --no-pager -o cat | tail -40 ;;
+  logs) journalctl -u nightcast-net-operators -u 'nightcast-net-operator@*' -u nightcast-net-requester --since "-30 min" --no-pager -o cat | tail -40 ;;
   *) sed -n 2,20p "$0"; exit 2 ;;
 esac

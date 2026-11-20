@@ -9,10 +9,14 @@
  *   node network/ops/operators.mjs register --dir <dir> --wallet <file> [--bond 20]
  *       Register every key in <dir> that isn't active yet, each with --bond slots (paid from the
  *       wallet); fees are paid to the wallet's own address.
- *   node network/ops/operators.mjs run --dir <dir> --wallet <file> [--poll 15]
+ *   node network/ops/operators.mjs run --dir <dir> --wallet <file> [--key op-N] [--poll 15]
  *       Answer every request naming one of the keys, expire requests past their deadline, and
  *       finalise any whose requester hasn't. A key is paused while <dir>/op-N.pause exists
  *       (to test a missing operator). Logs to <dir>/answers.jsonl; status in <dir>/status.json.
+ *       With --key, only that operator, paying its fees from its own --wallet (as a real operator
+ *       does): one process per operator, in parallel. Then a request is finalised or expired by
+ *       its group's first operator, or by any of them once it's 2 minutes overdue (status in
+ *       <dir>/status-op-N.json).
  *   node network/ops/operators.mjs leave --dir <dir> --wallet <file> --key op-5
  *       That operator takes its free bond back and leaves (stops being named in new requests).
  *   node network/ops/operators.mjs status --dir <dir> --wallet <file>
@@ -105,11 +109,15 @@ await withChain(chain, async ({ read, handle, me, meBytes }) => {
 
   if (mode !== 'run') throw new Error('usage: operators.mjs keys|register|run|leave|status ...');
   const poll = Number(values.poll) * 1000;
+  // One operator per process (its own wallet), or every key in <dir> from one wallet.
+  const only = values.key ? keys.filter((k) => k.name === values.key) : null;
+  if (values.key && !only.length) throw new Error(`no key ${values.key} in ${dir}`);
+  if (only) keys.splice(0, keys.length, ...only);
   const mine = new Map(keys.map((k) => [k.idHex, k]));
   const seen = new Map(); // request id -> first seen (ms)
   const gaveUp = new Set();
   const stats = { answered: 0, failed: 0, expired: 0, finalised: 0, started: new Date().toISOString() };
-  const status = (extra = {}) => writeFileSync(join(dir, 'status.json'), JSON.stringify({ ...stats, updated: new Date().toISOString(), wallet: me, ...extra }, null, 2) + '\n');
+  const status = (extra = {}) => writeFileSync(join(dir, only ? `status-${values.key}.json` : 'status.json'), JSON.stringify({ ...stats, updated: new Date().toISOString(), wallet: me, ...extra }, null, 2) + '\n');
   say(`running ${keys.length} operators (${keys.map((k) => k.name).join(', ')}) for ${record.contractAddress}; paying fees from ${me}`);
   for (;;) {
     let l;
@@ -122,14 +130,18 @@ await withChain(chain, async ({ read, handle, me, meBytes }) => {
       if (!seen.has(id)) seen.set(id, Date.now());
       const missing = r.operators.filter((k) => !l.shares.member(N.pureCircuits.shareKeyOf(idBytes, k)));
       const deadline = Number(r.deadline);
+      // One operator per process: the group's first operator tidies up (finalise, expire), and any
+      // operator does once it's 2 minutes overdue, so several processes don't all send the same call.
+      const tidy = !only || hex(r.operators[0]) === only[0].idHex || now >= deadline + 120;
       if (now >= deadline + 15) {
+        if (!tidy) continue;
         if (missing.length > 0 && !gaveUp.has(`x${id}`)) jobs.push({ kind: 'expire', id, idBytes, at: deadline });
         else if (missing.length === 0 && !gaveUp.has(`f${id}`)) jobs.push({ kind: 'finalise', id, idBytes, at: deadline });
         continue;
       }
       if (missing.length === 0) {
         // The requester normally finalises; do it if it hasn't after a minute.
-        if (Date.now() - seen.get(id) > 60_000 && !gaveUp.has(`f${id}`)) jobs.push({ kind: 'finalise', id, idBytes, at: deadline });
+        if (tidy && Date.now() - seen.get(id) > 60_000 && !gaveUp.has(`f${id}`)) jobs.push({ kind: 'finalise', id, idBytes, at: deadline });
         continue;
       }
       for (const kb of missing) {

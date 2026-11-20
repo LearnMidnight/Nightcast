@@ -1,0 +1,18 @@
+# The Nightcast network test, one operator per process: op-%i, paying its fees from its own wallet
+# (/root/nightcast-net/wallets/op-%i.secret), as a real operator does. Started by `net.sh start5`;
+# not enabled at boot (it's a test).
+[Unit]
+Description=Nightcast network test: operator op-%i
+After=nightcast-net-proof.service network-online.target
+Wants=nightcast-net-proof.service
+
+[Service]
+WorkingDirectory=/root/Nightcast-net
+Environment=HOME=/root
+Environment=NIGHTCAST_REGISTER_NEW_NIGHT=1
+# Five of these side by side: each kept to 2 GB (a synced wallet needs much less).
+Environment=NODE_OPTIONS=--max-old-space-size=2048
+ExecStart=/usr/bin/env node network/ops/operators.mjs run --dir /root/nightcast-net/operators --key op-%i --wallet /root/nightcast-net/wallets/op-%i.secret --proof-server-port 6304 --poll 15
+Restart=always
+RestartSec=30
+TimeoutStopSec=60
