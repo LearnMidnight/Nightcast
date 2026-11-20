@@ -114,3 +114,74 @@ describe('how quickly the oracle answers (NIGHTCAST_NEW_REQUEST_DELAY_SECS, NIGH
     expect(oracleSpeedFromEnv({ NIGHTCAST_NEW_REQUEST_DELAY_SECS: 'soon' })).toEqual({ newRequestDelaySecs: 20, busyPollSecs: 5 });
   });
 });
+
+describe('a DUST view lagging the chain (LunaSpin, 20 Nov 2026)', () => {
+  // The wallet SDK 1 shape of the dust part's local state (dust-time.ts reads either shape).
+  const at = (dustAt: bigint, syncTime: Date) => ({
+    dust: { progress: { appliedIndex: dustAt }, pendingCoins: [], balance: () => 7_000n, state: { state: { syncTime, params: { dustGracePeriodSeconds: 3600n } } } },
+  });
+  const minutesAgo = (now: number, m: number) => new Date(now - m * 60_000);
+  const setup = () => {
+    const c = { now: 10_000_000_000, tick: (m: number) => (c.now += m * 60_000) };
+    const h = new WalletHealth({ dustStallMinutes: 10, answerStallMinutes: 3, dustAgeStartupMinutes: 20 }, () => c.now);
+    return { c, h };
+  };
+  const LAG = "the wallet's DUST view is 55 minutes behind the chain, too far to date a fee";
+
+  it('refuses a send at once while the view applies events but is too old to date a fee (grace 60 min, margin 10)', () => {
+    const { c, h } = setup();
+    h.walletOpen();
+    h.see(at(1n, minutesAgo(c.now, 30)));
+    expect(h.dustAgeSecs()).toBe(1800);
+    expect(h.readyToSend()).toBeUndefined();
+    h.see(at(2n, minutesAgo(c.now, 55)));
+    expect(h.readyToSend()).toBe(`a request came in and ${LAG}`);
+    // and the server restarts on its next check
+    expect(h.stuck()).toBe(`a request came in and ${LAG}`);
+  });
+
+  it('says nothing before the wallet has opened (a first sync is old until it catches up)', () => {
+    const { c, h } = setup();
+    h.see(at(1n, minutesAgo(c.now, 600)));
+    expect(h.readyToSend()).toBeUndefined();
+    c.tick(30);
+    h.see(at(2n, minutesAgo(c.now, 590))); // still catching up
+    expect(h.readyToSend()).toBeUndefined();
+    expect(h.stuck()).toBeUndefined();
+  });
+
+  it('leaves a view alone that is old only because the chain has had no DUST events', () => {
+    const { c, h } = setup();
+    h.walletOpen();
+    h.see(at(1n, minutesAgo(c.now, 40)));
+    c.tick(5); // no events: the view doesn't move, its time is 45 minutes and growing
+    h.see(at(1n, minutesAgo(c.now, 55)));
+    expect(h.readyToSend()).toBeUndefined();
+    expect(h.readyToPay()).toBe("a request is waiting and the wallet's DUST view hasn't moved for 5 minutes");
+  });
+
+  it('restarts an idle server with a lagging view, but not in its first 20 minutes', () => {
+    const { c, h } = setup();
+    h.walletOpen();
+    h.see(at(1n, minutesAgo(c.now, 55)));
+    expect(h.stuck()).toBeUndefined();
+    c.tick(19);
+    h.see(at(2n, minutesAgo(c.now, 55)));
+    expect(h.stuck()).toBeUndefined();
+    c.tick(1);
+    h.see(at(3n, minutesAgo(c.now, 55)));
+    expect(h.stuck()).toBe(LAG);
+  });
+
+  it('the oracle refuses to start an answer it could not pay for, too', () => {
+    const { c, h } = setup();
+    h.walletOpen();
+    h.see(at(1n, minutesAgo(c.now, 52)));
+    expect(h.readyToPay()).toBe("a request is waiting and the wallet's DUST view is 52 minutes behind the chain, too far to date a fee");
+  });
+
+  it('takes the startup allowance from the environment', () => {
+    expect(healthOptions({}).dustAgeStartupMinutes).toBe(20);
+    expect(healthOptions({ NIGHTCAST_DUST_AGE_STARTUP_MINUTES: '45' }).dustAgeStartupMinutes).toBe(45);
+  });
+});

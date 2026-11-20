@@ -94,6 +94,21 @@ export class Watchdog {
     if (this.staleInARow >= 3) this.restartFor ??= 'three requests in a row were refused for a stale fee (node error 170)';
   }
 
+  /** Before sending a request: why not (the wallet's DUST view too old to date a fee; a restart follows), if so. */
+  readyToSend(): string | undefined {
+    return this.health?.readyToSend();
+  }
+
+  /** The wallet has opened (synced): from now on a DUST view lagging the chain counts. */
+  walletOpen(): void {
+    this.health?.walletOpen();
+  }
+
+  /** How old the wallet's DUST view is, in seconds, once known. */
+  dustAgeSecs(): number | undefined {
+    return this.health?.dustAgeSecs();
+  }
+
   /** A reason to restart now, if there is one. */
   check(): string | undefined {
     const stalled = (this.clock() - this.movedAt) / 60_000;
@@ -156,7 +171,7 @@ export const runMcp = async (o: {
         clearInterval(timer);
         resolve(RESTART);
       }
-    }, 30_000);
+    }, 10_000);
     const stop = () => {
       clearInterval(timer);
       resolve(0);

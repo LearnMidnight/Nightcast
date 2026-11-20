@@ -28,6 +28,7 @@
  * - before a fulfil, `readyToPay()` refuses to start one (and the service
  *   restarts) when the DUST view hasn't moved for `answerStallMinutes`.
  */
+import { dustClock } from './dust-time.js';
 import { inspect } from 'node:util';
 
 type Progress = { appliedIndex?: bigint; appliedId?: bigint };
@@ -72,7 +73,24 @@ export const isInsufficientFunds = (err: unknown): boolean => {
   return /InsufficientFunds|Insufficient funds/i.test(text);
 };
 
-export type HealthOptions = { pendingMinutes?: number; dustStallMinutes?: number; answerStallMinutes?: number };
+export type HealthOptions = {
+  pendingMinutes?: number;
+  dustStallMinutes?: number;
+  answerStallMinutes?: number;
+  /**
+   * How long after starting before a DUST view too old to date a fee restarts an idle service
+   * (NIGHTCAST_DUST_AGE_STARTUP_MINUTES, default 20): a fresh sync gets its chance first, and a
+   * chain with no DUST events for a while can't make the service restart over and over.
+   */
+  dustAgeStartupMinutes?: number;
+};
+
+/**
+ * Seconds short of the DUST grace period at which a view counts as too old to date a fee: the same
+ * margin dust-time.ts uses before falling back to the wallet library's default, which then retries
+ * for 2 minutes and fails with DustTreesNotAtBlock (LunaSpin, 20 Nov 2026: a spin 4 minutes late).
+ */
+export const DUST_AGE_MARGIN_SECS = 600;
 
 /**
  * Minutes from the environment: NIGHTCAST_PENDING_MINUTES (default 8), NIGHTCAST_DUST_STALL_MINUTES
@@ -91,6 +109,7 @@ export const healthOptions = (env: NodeJS.ProcessEnv = process.env): Required<He
     pendingMinutes: minutes(env.NIGHTCAST_PENDING_MINUTES, 8),
     dustStallMinutes: minutes(env.NIGHTCAST_DUST_STALL_MINUTES, 10),
     answerStallMinutes: minutes(env.NIGHTCAST_ANSWER_STALL_MINUTES, 3),
+    dustAgeStartupMinutes: minutes(env.NIGHTCAST_DUST_AGE_STARTUP_MINUTES, 20),
   };
 };
 
@@ -98,6 +117,11 @@ export class WalletHealth {
   private dustAt = '';
   private dustMovedAt: number;
   private holdsDust = false;
+  /** The latest wallet state, read for the DUST view's own time (syncTime) only when asked. */
+  private lastState?: unknown;
+  /** Set once the wallet has opened (synced): before that an old DUST view is just a sync in progress. */
+  private open = false;
+  private readonly startedAt: number;
   /** Each booked coin (by nonce) and when it was first seen booked. */
   private readonly pendingSince = new Map<string, number>();
   private reason?: string;
@@ -109,6 +133,7 @@ export class WalletHealth {
   ) {
     this.o = { ...healthOptions({}), ...options };
     this.dustMovedAt = clock();
+    this.startedAt = clock();
   }
 
   /** Feed a wallet state. */
@@ -116,6 +141,7 @@ export class WalletHealth {
     const dust = dustOf(state);
     if (!dust) return;
     const now = this.clock();
+    this.lastState = state;
     const p = read(() => dust.progress ?? dust.state?.progress);
     const at = String(p?.appliedIndex ?? p?.appliedId ?? '');
     if (at !== '' && at !== this.dustAt) {
@@ -145,12 +171,58 @@ export class WalletHealth {
     }
   }
 
+  /** How old the DUST view is, in seconds (from its own syncTime), once known. */
+  dustAgeSecs(): number | undefined {
+    const t = read(() => dustClock(this.lastState).syncTime);
+    return t === undefined ? undefined : Math.max(0, Math.round((this.clock() - t.getTime()) / 1000));
+  }
+
+  /** Call once the wallet has opened (synced); the DUST-age checks only apply after that. */
+  walletOpen(): void {
+    this.open = true;
+  }
+
+  /**
+   * The DUST view is too old for a fee to be dated at its time (dust-time.ts would fall back to the
+   * library's default) while it is still applying events: it is lagging behind the chain. A view
+   * that is old because the chain has had no DUST events doesn't count (the library's default dates
+   * such a fee fine, and the stall rule above already covers a view that stops moving).
+   */
+  private dustTooOld(): string | undefined {
+    if (!this.open) return undefined;
+    if (this.dustAt === '' || (this.clock() - this.dustMovedAt) / 60_000 >= this.o.answerStallMinutes) return undefined;
+    const age = this.dustAgeSecs();
+    if (age === undefined) return undefined;
+    const grace = read(() => dustClock(this.lastState).graceSecs) ?? 3600;
+    if (age <= grace - DUST_AGE_MARGIN_SECS) return undefined;
+    return `the wallet's DUST view is ${Math.floor(age / 60)} minutes behind the chain, too far to date a fee`;
+  }
+
+  /**
+   * Call before sending a request (the MCP server). Returns why not, and marks the wallet stuck, when
+   * its DUST view is too old to date a fee: the fee would fail after the library's 2-minute retry,
+   * while a restart resyncs in about a minute and the caller sends again.
+   */
+  readyToSend(): string | undefined {
+    const old = this.dustTooOld();
+    if (!old) return undefined;
+    const why = `a request came in and ${old}`;
+    this.reason ??= why;
+    return why;
+  }
+
   /**
    * Call before paying for something that can't wait (the oracle's fulfil). Returns why not, and
    * marks the wallet stuck, when its DUST view hasn't moved for `answerStallMinutes`: a fee would
    * likely fail after minutes of proving, and a restart syncs afresh in about a minute.
    */
   readyToPay(): string | undefined {
+    const old = this.dustTooOld();
+    if (old) {
+      const why = `a request is waiting and ${old}`;
+      this.reason ??= why;
+      return why;
+    }
     if (this.dustAt === '') return undefined;
     const idle = (this.clock() - this.dustMovedAt) / 60_000;
     if (idle < this.o.answerStallMinutes) return undefined;
@@ -169,6 +241,11 @@ export class WalletHealth {
     }
     if (this.dustAt !== '' && (now - this.dustMovedAt) / 60_000 >= this.o.dustStallMinutes) {
       return `the wallet's DUST view hasn't moved for ${Math.floor((now - this.dustMovedAt) / 60_000)} minutes`;
+    }
+    // Idle: restart before the next request meets a view too old to pay with (not in the first minutes after a start).
+    if ((now - this.startedAt) / 60_000 >= this.o.dustAgeStartupMinutes) {
+      const old = this.dustTooOld();
+      if (old) return old;
     }
     return undefined;
   }
