@@ -2,6 +2,8 @@
 
 Nightcast is an independent, experimental verifiable randomness protocol for Midnight, designed to power smart contracts, lotteries, games and AI agents with publicly verifiable randomness.
 
+Founded by **Jack Baker**, who also founded [Lunardraw](https://lunardraw.io), the first app built on it.
+
 It works like [Chainlink VRF](https://docs.chain.link/vrf): you request randomness, an oracle answers, and the answer comes with a proof. On Midnight the proof is the transaction itself. The oracle's `fulfil` circuit evaluates the VRF with its secret key as a private input, so the network only accepts the one output that key can produce for that request, and the key is never revealed.
 
 > **Status: v1, experimental and unaudited.** Don't secure real value with it yet. Read the [threat model](docs/SPEC.md#4-threat-model) first, especially [withholding](docs/SPEC.md#42-withholding-and-aborts).
