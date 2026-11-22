@@ -11,3 +11,4 @@ rm -rf out
 "${C[@]}" --skip-zk ../src/network.compact out
 [ -d ../node_modules ] || (cd .. && npm install --no-audit --no-fund)
 node check.mjs
+node stall-watch.check.mjs

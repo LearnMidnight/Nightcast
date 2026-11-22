@@ -13,6 +13,7 @@ Environment=NIGHTCAST_REGISTER_NEW_NIGHT=1
 # Five of these side by side: each kept to 2 GB (a synced wallet needs much less).
 Environment=NODE_OPTIONS=--max-old-space-size=2048
 ExecStart=/usr/bin/env node network/ops/operators.mjs run --dir /root/nightcast-net/operators --key op-%i --wallet /root/nightcast-net/wallets/op-%i.secret --proof-server-port 6304 --poll 15
+# Exit code 75 = "restart me": the wallet stopped following the chain (ops/stall-watch.mjs).
 Restart=always
 RestartSec=30
 TimeoutStopSec=60

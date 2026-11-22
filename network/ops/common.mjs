@@ -7,6 +7,7 @@ import { webcrypto } from 'node:crypto';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { blockfrostProjectId, connect, contractProviders, openWallet, walletAddress } from '@nightcast/deploy';
+import { watchWallet } from './stall-watch.mjs';
 import { CompiledContract } from '@midnight-ntwrk/compact-js';
 import { findDeployedContract } from '@midnight-ntwrk/midnight-js/contracts';
 import { ContractState } from '@midnight-ntwrk/midnight-js-protocol/v9';
@@ -90,13 +91,23 @@ export const readJsonl = (file) => (existsSync(file) ? readFileSync(file, 'utf8'
  * A Preprod session and an open wallet (synced, with DUST), then `f({ session, wallet, providers,
  * read, handle })`. `read()` gives the contract's ledger; `handle(privateStateId, privateState)`
  * a contract handle whose `callTx` sends transactions. The wallet is stopped afterwards.
+ *
+ * `watch` (minutes, for a service that runs for hours): the process exits with code 75 for a restart
+ * when the wallet's sync hasn't moved for that long, opening included, or when transactions keep
+ * being refused as from a wallet that fell behind (stall-watch.mjs).
  */
-export const withChain = async ({ network = 'preprod', proofServerPort, walletFile, address }, f) => {
+let watching; // the running service's watch, told of every transaction by `send`
+export const withChain = async ({ network = 'preprod', proofServerPort, walletFile, address, watch = 0 }, f) => {
   // Preprod is served by Blockfrost: its project id as the CLI finds it (NIGHTCAST_BLOCKFROST_PROJECT_ID,
   // else ~/nightcast-secrets/blockfrost-<network>.secret, saved by `./nightcast blockfrost save`).
   const session = await connect(network, { proofServerPort, projectId: blockfrostProjectId(network), waitForBlockfrost: true });
   try {
-    const wallet = await openWallet(session, { seed: walletSeedFrom(walletFile) });
+    const wallet = await openWallet(session, {
+      seed: walletSeedFrom(walletFile),
+      onWallet: (w) => {
+        if (watch > 0) watching = watchWallet(w, { minutes: watch, log: say });
+      },
+    });
     try {
       const providers = contractProviders(session, wallet, BUILD);
       const readState = async (a = address) => {
@@ -118,6 +129,8 @@ export const withChain = async ({ network = 'preprod', proofServerPort, walletFi
       };
       return await f({ session, wallet, providers, read, readState, handle, me: walletAddress(wallet), meBytes: fromHex(wallet.unshieldedKeystore.getAddress()) });
     } finally {
+      watching?.stop();
+      watching = undefined;
       await wallet.stop().catch(() => undefined);
     }
   } finally {
@@ -144,9 +157,11 @@ export const send = async (what, call, { tries = 4, waitMs = 15_000, log = say }
     const started = Date.now();
     try {
       const r = succeeded(await call(), what);
+      watching?.sent();
       return { result: r.private?.result, txId: r.public?.txId, seconds: (Date.now() - started) / 1000, tries: i };
     } catch (e) {
       last = e;
+      watching?.failed(e);
       const text = errorText(e);
       // The contract refused it (an assert): sending it again gives the same answer.
       if (/failed assert|assertion failed|not pending|already answered|already exists|not one of this request|has not passed|has expired/i.test(text)) throw e;

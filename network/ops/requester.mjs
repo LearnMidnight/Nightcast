@@ -25,7 +25,7 @@ const { values, positionals } = parseArgs({
   allowPositionals: true,
   options: {
     wallet: { type: 'string' }, secret: { type: 'string' }, every: { type: 'string', default: '180' }, count: { type: 'string', default: '0' },
-    window: { type: 'string', default: '600' }, poll: { type: 'string', default: '15' }, log: { type: 'string' }, network: { type: 'string', default: 'preprod' }, 'proof-server-port': { type: 'string', default: '6304' },
+    window: { type: 'string', default: '600' }, poll: { type: 'string', default: '15' }, 'stall-after': { type: 'string', default: '10' }, log: { type: 'string' }, network: { type: 'string', default: 'preprod' }, 'proof-server-port': { type: 'string', default: '6304' },
   },
 });
 const mode = positionals[0];
@@ -62,7 +62,8 @@ const every = Number(values.every) * 1000;
 const count = Number(values.count);
 const windowSecs = BigInt(values.window);
 
-await withChain({ network: values.network, proofServerPort: Number(values['proof-server-port']), walletFile: values.wallet, address: record.contractAddress }, async ({ read, handle, me, meBytes }) => {
+// the requester restarts itself when its wallet stops following the chain (stall-watch.mjs)
+await withChain({ network: values.network, proofServerPort: Number(values['proof-server-port']), walletFile: values.wallet, address: record.contractAddress, watch: Number(values['stall-after']) }, async ({ read, handle, me, meBytes }) => {
   const h = await handle('net-requester', { requesterSecret });
   say(`requesting from ${me} on ${record.contractAddress}, every ${values.every} s${count ? `, ${count} in all` : ''}`);
   const open = new Map(); // id hex -> { sentAt, landedAt, group }

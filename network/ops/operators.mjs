@@ -31,7 +31,7 @@ const { values, positionals } = parseArgs({
   allowPositionals: true,
   options: {
     dir: { type: 'string' }, wallet: { type: 'string' }, count: { type: 'string', default: '5' }, bond: { type: 'string', default: '20' },
-    poll: { type: 'string', default: '15' }, key: { type: 'string' }, network: { type: 'string', default: 'preprod' }, 'proof-server-port': { type: 'string', default: '6304' },
+    poll: { type: 'string', default: '15' }, 'stall-after': { type: 'string', default: '10' }, key: { type: 'string' }, network: { type: 'string', default: 'preprod' }, 'proof-server-port': { type: 'string', default: '6304' },
   },
 });
 const mode = positionals[0];
@@ -66,7 +66,8 @@ if (!values.wallet) throw new Error('--wallet <file> is required');
 const record = readRecord(values.network);
 const keys = loadKeys();
 if (keys.length === 0) throw new Error(`no operator keys in ${dir}: run \`keys\` first`);
-const chain = { network: values.network, proofServerPort: Number(values['proof-server-port']), walletFile: values.wallet, address: record.contractAddress };
+// a running operator restarts itself when its wallet stops following the chain (stall-watch.mjs)
+const chain = { network: values.network, proofServerPort: Number(values['proof-server-port']), walletFile: values.wallet, address: record.contractAddress, watch: mode === 'run' ? Number(values['stall-after']) : 0 };
 
 await withChain(chain, async ({ read, handle, me, meBytes }) => {
   const h = (k) => handle(`net-${k.name}`, { oracleSecretKey: k.sk });
