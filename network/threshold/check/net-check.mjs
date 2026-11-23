@@ -1,4 +1,4 @@
-// The threshold network, stage 9, in memory (compact-runtime): the registry and six epochs in a
+// The threshold network, stage 10, in memory (compact-runtime): the registry and eight epochs in a
 // row on one contract. The committee's size follows the number of independents (1 of 1, 3 of 5,
 // 4 of 7), seats go round the ring of independents and then to the house, a ceremony that fails costs
 // the seats that didn't deal, and for each size EVERY set of t answers must give the off-chain
@@ -39,6 +39,7 @@ const witnesses = {
   coefficient: ({ privateState }, i, a, b, c) => [privateState, privateState.badCoefficient ?? coeff(Number(i), [a, b, c].map(Number))],
   requesterSecret: ({ privateState }) => [privateState, privateState.requester ?? bytes('requester')],
   quotient: ({ privateState }, total, k) => [privateState, privateState.badQuotient ?? total / k],
+  bucketOf: ({ privateState }, deadline) => [privateState, privateState.badBucket ?? deadline / ANSWER],
 };
 // Ed25519 (RFC 8032): a 32-byte key or R as the point the runtime wants, and S as a number.
 const q = (1n << 255n) - 19n;
@@ -57,9 +58,9 @@ const decode = (b) => {
 /** A stake pool: an Ed25519 key pair, its key as a point, and its id in the contract. */
 const pool = (name) => { const k = generateKeyPairSync('ed25519'); const key = decode(Buffer.from(k.publicKey.export({ format: 'jwk' }).x, 'base64url')); return { name, secret: k.privateKey, key, id: P.pureCircuits.poolIdOf(key) }; };
 const signed = (p, msg) => { const g = sign(null, Buffer.from(msg), p.secret); return { r: decode(g.subarray(0, 32)), s: le(g.subarray(32)) }; };
-// The contract's list: nine pools, in batches of eight, each batch committed to with the ones
+// The contract's list: twelve pools, in batches of eight, each batch committed to with the ones
 // after it. The contract is deployed with the first commitment.
-const POOLS = Array.from({ length: 9 }, (_, k) => pool(`pool${k}`));
+const POOLS = Array.from({ length: 12 }, (_, k) => pool(`pool${k}`));
 const UNLISTED = pool('unlisted');
 const ZERO = new Uint8Array(32);
 const BATCHES = [];
@@ -195,6 +196,13 @@ const NEXT_X = new Uint8Array(32).fill(0xa1), NEXT_Y = new Uint8Array(32).fill(0
 const name = (e, i, to, ps = {}) => call('recommend', [BigInt(i), { bytes: to }], { op: seated(e)[i - 1]?.op ?? rand(), ...ps });
 /** Open the next epoch once the serving one has served its length. */
 const open = async () => { if (ledger().current > 0n && ledger().opened === ledger().current) now += Number(EPOCH); return call('openEpoch', [dl()]); };
+
+// ---- how wide is the pad on a dealt share? (it should cover a share: 252 bits)
+{
+  let widest = 0;
+  for (let k = 1n; k <= 400n; k++) widest = Math.max(widest, P.pureCircuits.padOf(G(k), k, 1n, 2n).toString(2).length);
+  console.log(`note  the widest of 400 pads is ${widest} bits (a share is up to ${r.toString(2).length} bits, the field ${fp.toString(2).length})`);
+}
 
 // ---- what the contract refuses to be deployed with
 await fails(init({ miss: 0n }), /at least one slot/, "a contract can't be deployed with a free miss");
@@ -351,7 +359,7 @@ await fails(call('answer', [r2.rid, 3n], { sk: sk2[2] }), /already answered/, 'a
   ok(Buffer.from(out).equals(Buffer.from(P.pureCircuits.outputOf(rt.ecMul(req.point, mod(D * groupSk))))), 'a request answered late gives the value it always had: silence buys no second roll');
   ok(paid(FINALISER) === bounties && pendingNow() === MAXP, 'finalised late it pays no bounty (its fee is owed back), and still counts as open until it is settled');
   await settle(rid);
-  ok(ledger().requests.lookup(rid).voided === true && paid(REFUND) === FEE - BOUNTY && paid(SETTLER) === BOUNTY && pendingNow() === MAXP - 1n, 'with fewer than three answers in time the request is void: the requester gets the fee back, less a tip to whoever settled it, and nothing more');
+  ok(ledger().requests.lookup(rid).voided === true && paid(REFUND) === FEE && paid(SETTLER) === 0n && pendingNow() === MAXP - 1n, 'with fewer than three answers in time the request is void: the requester gets the whole fee back, whoever settles it in the first answering time after the deadline, and nothing more');
   ok(bond(H[1]) === 19n && bond(H[2]) === 19n && bond(H[3]) === 17n && bond(A) === 12n && ledger().forfeited === 5n, 'the three seats that did not answer in time each forfeit a slot of bond, to nobody; the two that answered lose nothing');
   await fails(settle(rid), /already settled/, 'a request is settled once');
 }
@@ -380,6 +388,18 @@ await fails(call('answer', [r2.rid, 3n], { sk: sk2[2] }), /already answered/, 'a
   const bounties = paid(FINALISER);
   await fin(rid, [1, 2, 3]);
   ok(paid(FINALISER) === bounties + BOUNTY && ledger().requests.lookup(rid).fee === 0n, 'and its bounty waited for whoever finalised it');
+}
+{
+  // a void request nobody settles for a whole answering time (on a copy of the state)
+  const before = snapshot(), t0 = now;
+  await fails(ask('wrong time', { badBucket: 1n }), /answering time the deadline falls in/, "a request's answering time is worked out, not chosen");
+  const rid = await ask('draw 2d');
+  now += 601 + Number(ANSWER);
+  const tips = paid(SETTLER), refunds = paid(REFUND);
+  await settle(rid);
+  ok(paid(SETTLER) === tips + BOUNTY && paid(REFUND) === refunds + FEE - BOUNTY, 'left unsettled for a whole answering time, a void request tips whoever settles it out of its fee, so none waits for ever');
+  now = t0;
+  restore(before);
 }
 books('after the fees of epoch 2');
 {
@@ -466,6 +486,21 @@ ok(Buffer.from(await fin(old, [1])).equals(Buffer.from(oldExpected)), "with epoc
   ok(hexOf(ledger().successor) === hexOf(NEXT_X) && balance === before && ledger().current === 4n, 'a recommendation moves no NIGHT and changes nothing else');
 }
 
+{
+  // a bond that has fallen below the minimum (on a copy of the state)
+  const before = snapshot(), t0 = now;
+  const rid = await ask('draw 4c');
+  now += 601;
+  await settle(rid); // nobody answered: every seat of epoch 4 forfeits a slot, so a and b fall to 9
+  ok(bond(A) === 9n && bond(C) === 11n, 'a void request takes a and b below the minimum bond');
+  await fails(call('standDown', [C.id, BigInt(now)]), /isn't below the minimum/, "an operator with its bond in order can't be stood down by anyone");
+  await call('standDown', [A.id, BigInt(now)]);
+  ok(!active(A) && !ledger().ringOp.member(1n) && ledger().independents === 3n, 'anyone can stand down an operator whose bond is below the minimum: it leaves the ring until it has made its bond up and sat out');
+  await fails(call('standDown', [A.id, BigInt(now)]), /isn't active/, 'once');
+  now = t0;
+  restore(before);
+}
+
 // ---- leaving, the ring, and taking the bond back
 await leave(Dd);
 await fails(leave(Dd), /already left/, 'an operator leaves once');
@@ -486,7 +521,7 @@ ok(ledger().independents === 3n, 'd and e have left: three independents');
   await fails(call('withdraw', [12n], { op: Dd.op }), /serving seat keeps its bond/, 'a seat of the serving committee keeps its bond behind it, however long ago its operator left');
   now += 3 * Number(EPOCH) + 1;
   await fails(ask('too late'), /overstayed/, 'a committee that has served four epoch lengths takes no more requests: a new epoch must open');
-  now += 3 * Number(ANSWER);
+  now += 4 * Number(ANSWER);
   await call('withdraw', [12n], { op: Dd.op });
   ok(bond(Dd) === 0n, 'and once it has overstayed and its last requests could be settled, its seats get their bonds back: a bond is never stuck');
   now = t0;
@@ -523,13 +558,12 @@ await fails(call('withdraw', [12n], { op: Dd.op }), /requests can be settled/, "
   };
   for (const rid of await round(['draw 5v', 'draw 5w'])) await settle(rid);
   ok(ledger().missed.lookup(C.id) === 1n && ledger().missed.lookup(A.id) === 1n, 'two requests missed in the same answering time count as one miss: a burst of requests can\'t stand a seat down');
-  for (const tag of ['draw 5x', 'draw 5y']) await settle((await round([tag]))[0]);
-  const [last] = await round(['draw 5z']);
+  const [x] = await round(['draw 5x']), [y] = await round(['draw 5y']), [last] = await round(['draw 5z']);
   await call('answer', [last, 1n], { sk: sk5[0] }); // c, too late
-  await settle(last);
+  for (const rid of [last, y, x]) await settle(rid); // settled latest first: the order makes no difference
   ok(earnedBy(B) === had + 5n * ((FEE - BOUNTY) / 3n) && ledger().forfeited === lost && ledger().dust === 0n, 'each fee is shared by the three seats that answered in time; a paid request takes no bond');
   ok(earnedBy(C) === hadC, 'an answer after the deadline earns nothing');
-  ok(ledger().missed.lookup(C.id) === 4n && ledger().missed.lookup(A.id) === 4n && ledger().missed.lookup(B.id) === 0n, 'a miss is counted, once per answering time, against each seat that did not answer in time');
+  ok(ledger().missed.lookup(C.id) === 4n && ledger().missed.lookup(A.id) === 4n && ledger().missed.lookup(B.id) === 0n, 'a miss is counted, once per answering time and in whatever order the requests are settled, against each seat that did not answer in time');
   await call('claim', [], { op: B.op });
   ok(paid(B.payout) === had + 5n * ((FEE - BOUNTY) / 3n), 'b claims its fees');
 }
@@ -574,5 +608,31 @@ ok(ledger().operators.lookup(Dd.id).active && ledger().independents === 2n && le
   await ask('room again');
   ok(pendingNow() === MAXP, 'once one of them has its answers and is finalised, there is room for another');
 }
+
+// ---- a ring larger than a committee: nine independents, seven seats
+await loadPools(BATCHES[1]);
+everyone.set(hexOf(F.id), F);
+const more = [[5, 'p6'], [6, 'p7'], [8, 'p9'], [9, 'p10'], [10, 'p11'], [11, 'p12']].map(([k, name]) => { const o = operator(name); o.pool = POOLS[k]; everyone.set(hexOf(o.id), o); return o; });
+await link(F);
+await call('register', [{ bytes: more[2].payout }, 12n, 0n], { op: more[2].op });
+await fails(link(more[2], more[2].pool, signed(more[2].pool, linkMessage(more[2], more[2].pool)), 4n), /place before this pool's/, "a place that is in the ring but isn't the one just before the pool's is refused too");
+await link(more[2]);
+for (const o of more) if (o !== more[2]) await register(o);
+const ringOrder = () => { const out = []; for (let k = ledger().ringNext.lookup(0n); k !== 0n; k = ledger().ringNext.lookup(k)) out.push(Number(k)); return out.join(' '); };
+ok(ringOrder() === '2 4 6 7 8 9 10 11 12' && ledger().independents === 9n, 'nine independents stand in the ring in the order of their pools in the list, whatever order they joined in');
+const e7 = await open();
+{
+  const c = ledger().committees.lookup(e7);
+  ok(c.n === 7n && c.t === 4n && c.indepSeats === 7n, 'from seven independents the committee is 4 of 7 with no seat for the house');
+}
+await fill(e7);
+ok(names(e7) === 'd p6 p7 f p9 p10 p11' && ledger().cursor === 11n, 'the turn goes on from b, who sat last: the next seven round the ring, and two wait');
+await deal(e7, [1, 2, 3, 4, 5, 6, 7]);
+ok((await finish(e7)) === true && ledger().current === 7n, 'epoch 7 serves');
+await leave(more[4]);
+ok(ledger().cursor === 10n && !ledger().ringOp.member(11n) && ringOrder() === '2 4 6 7 8 9 10 12', 'when the operator that sat last leaves the ring, the turn stays where it was');
+const e8 = await open();
+await fill(e8);
+ok(names(e8) === 'p12 b d p6 p7 f p9' && ledger().cursor === 9n, 'the next committee starts with the two that waited, then goes round past the start of the list: everyone sits in turn, and nobody twice in one committee');
 books('at the end');
 console.log(`${checks} checks passed`);
