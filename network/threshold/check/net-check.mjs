@@ -1,4 +1,4 @@
-// The threshold network, stage 3a, in memory (compact-runtime): the registry and six epochs in a
+// The threshold network, stage 3b, in memory (compact-runtime): the registry and six epochs in a
 // row on one contract. The committee's size follows the number of independents (1 of 1, 3 of 5,
 // 4 of 7), seats go to the front of the queue and then to the house, a ceremony that fails costs
 // the seats that didn't deal, and for each size EVERY set of t answers must give the off-chain
@@ -189,6 +189,9 @@ const ask = (tag, ps = {}) => call('request', [bytes(tag), BigInt(now) + 600n, {
 const fin = (rid, s, ps = {}) => call('finalise', [rid, slots(s), { bytes: FINALISER }], ps);
 const finish = (e) => call('finish', [e, BigInt(now)]);
 const earnedBy = (o) => (ledger().earned.member(o.id) ? ledger().earned.lookup(o.id) : 0n);
+// Two contracts the committee might recommend moving to, and a seat naming one.
+const NEXT_X = new Uint8Array(32).fill(0xa1), NEXT_Y = new Uint8Array(32).fill(0xa2), NONE = hexOf(new Uint8Array(32));
+const name = (e, i, to, ps = {}) => call('recommend', [BigInt(i), { bytes: to }], { op: seated(e)[i - 1]?.op ?? rand(), ...ps });
 /** Open the next epoch once the serving one has served its length. */
 const open = async () => { if (ledger().current > 0n && ledger().opened === ledger().current) now += Number(EPOCH); return call('openEpoch', [dl()]); };
 
@@ -332,6 +335,17 @@ await fails(call('answer', [r2.rid, 3n], { sk: sk2[2] }), /already answered/, 'a
   await fails(call('claim', [], { op: A.op }), /nothing to claim/, 'and only once');
 }
 books('after the fees of epoch 2');
+{
+  // the recommended successor: epoch 2 (5 seats) names X
+  await fails(name(e2, 1, NEXT_X, { op: rand() }), /not this position's holder/, "only a seat's holder names a successor for it");
+  await fails(name(e2, 6, NEXT_X), /no such position/, 'and only a seat of the serving committee');
+  await fails(name(e2, 1, rt.encodeContractAddress(address)), /that is this contract/, "a contract can't be its own successor");
+  for (const i of [1, 2, 3]) await name(e2, i, NEXT_X);
+  await fails(name(e2, 1, NEXT_Y), /has named an address/, 'a seat names one address in an epoch');
+  ok(ledger().backedEpoch === 0n, 'three seats of five are not two-thirds');
+  await name(e2, 4, NEXT_X);
+  ok(ledger().backedEpoch === 2n && hexOf(ledger().backed) === hexOf(NEXT_X) && hexOf(ledger().successor) === NONE, "four of five are: X is epoch 2's address, and one epoch recommends nothing yet");
+}
 
 // ---- epoch 3: four independents, so 4 of 7. Its ceremony fails, and that costs the seats that didn't deal
 const C = independent('c'), Dd = independent('d');
@@ -363,6 +377,16 @@ await everySubset(e4, p4, sk4, 'draw 4');
   await fails(call('answer', [rid, 1n], { sk: sk2[0] }), /not this position's share/, "an earlier epoch's share doesn't answer it");
 }
 ok(Buffer.from(await fin(old, [1])).equals(Buffer.from(oldExpected)), "with epoch 4 serving, epoch 1's open request is still finalised with epoch 1's key");
+{
+  ok(ledger().previous === 2n, 'the epoch served before epoch 4 is epoch 2 (epoch 3 never served)');
+  for (const i of [1, 2, 3, 4]) await name(e4, i, NEXT_X);
+  ok(ledger().backedEpoch === 2n && hexOf(ledger().successor) === NONE, 'four seats of seven are not two-thirds');
+  await name(e4, 5, NEXT_X);
+  ok(ledger().backedEpoch === 4n && hexOf(ledger().successor) === hexOf(NEXT_X) && ledger().successorEpoch === 4n, 'five of seven are: named by two served epochs in a row, X is the recommended successor');
+  const before = balance;
+  await name(e4, 6, NEXT_Y);
+  ok(hexOf(ledger().successor) === hexOf(NEXT_X) && balance === before && ledger().current === 4n, 'a recommendation moves no NIGHT and changes nothing else');
+}
 
 // ---- leaving, the queue's stale entries, and taking the bond back
 await call('leave', [], { op: Dd.op });
@@ -406,6 +430,8 @@ await everySubset(e5, p5, sk5, 'draw 5');
   ok(paid(C.payout) === had + first / 3n + (FEE - BOUNTY) / 3n, 'c claims its fees');
 }
 books('after the fees of epoch 5');
+for (const i of [1, 2, 3, 4]) await name(e5, i, NEXT_Y);
+ok(ledger().backedEpoch === 5n && hexOf(ledger().backed) === hexOf(NEXT_Y) && hexOf(ledger().successor) === hexOf(NEXT_X), 'epoch 5 names Y instead: one epoch does not replace the recommendation');
 await fails(call('withdraw', [12n], { op: Dd.op }), /two epochs/, 'one served epoch after leaving is not enough');
 const e6 = await open();
 ok(!ledger().operators.lookup(H[2].id).active && !ledger().operators.lookup(H[3].id).active && ledger().houseActive === 2n, 'h2 and h3 missed more requests than a term allows: they are stood down when the next epoch opens');
@@ -414,6 +440,8 @@ await register(H[2], 0n);
 ok(ledger().operators.lookup(H[2].id).active && ledger().houseActive === 3n, 'a stood-down operator can register again, for a later committee');
 await deal(e6, [1, 2, 3, 4, 5]);
 ok((await finish(e6)) === true && ledger().current === 6n, 'epoch 6 serves');
+for (const i of [1, 2, 3, 4]) await name(e6, i, NEXT_Y);
+ok(hexOf(ledger().successor) === hexOf(NEXT_Y) && ledger().successorEpoch === 6n, 'epoch 6 names Y too: now Y is the recommended successor');
 await call('withdraw', [12n], { op: Dd.op });
 ok(bond(Dd) === 0n && paid(Dd.payout) === 12n * SLOT, 'two served epochs after leaving, d takes its whole bond back');
 await fails(call('withdraw', [1n], { op: Dd.op }), /not that much bond/, 'and no more than it has');

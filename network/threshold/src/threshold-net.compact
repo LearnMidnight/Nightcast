@@ -1,5 +1,5 @@
-// Nightcast threshold network, stage 3a (NOT for deployment): the value path, the registry, the money
-// and the stake pool link.
+// Nightcast threshold network, stage 3b (not yet deployed): the value path, the registry, the money,
+// the stake pool link and the recommended successor.
 //
 // A committee of n operators (positions 1..n) shares one key that nobody holds. Any t of them
 // give the same random value for a request; fewer than t can't work it out. The design, the
@@ -31,7 +31,11 @@
 //               void request keeps its H and stays answerable: silence buys no second roll.
 //               Seats that miss too often, or whose bond fell below the minimum, are stood down
 //               when the next epoch opens and must register again.
-// Still to come (stage 3b): the recommended successor.
+//   successor   Nothing in this contract can be changed, and it can't move anyone or anything
+//               to another contract. `recommend` only RECORDS an address: when two-thirds of
+//               the serving committee's seats name the same address in two served epochs in a
+//               row, it becomes the recommended successor. Operators and consumers move, or
+//               don't, by their own choice.
 //
 //   share key of position i    pk_i = A0 + i·A1 + i²·A2 + i³·A3     (A_k: the dealers' sums)
 //   its answer to a request    Γ_i  = sk_i·H, proved against pk_i
@@ -156,6 +160,17 @@ export ledger poolKeys: Map<Bytes<32>, Curve25519Point>;
 export ledger poolOperator: Map<Bytes<32>, Bytes<32>>;
 export ledger poolLinks: Map<Bytes<32>, Uint<64>>;
 export ledger poolOf: Map<Bytes<32>, Bytes<32>>;
+// The epoch served before the current one (0: none). Recommending a successor: the seats that
+// have named an address in their epoch, by (epoch, position); the count for each (epoch,
+// address); the address two-thirds of an epoch's seats named and that epoch; and the
+// recommended successor (all zeros: none) with the epoch it was confirmed in.
+export ledger previous: Uint<64>;
+export ledger ballots: Map<Field, Boolean>;
+export ledger votes: Map<Bytes<32>, Uint<8>>;
+export ledger backed: Bytes<32>;
+export ledger backedEpoch: Uint<64>;
+export ledger successor: Bytes<32>;
+export ledger successorEpoch: Uint<64>;
 // The last epoch each operator was seated in.
 export ledger lastSeat: Map<Bytes<32>, Uint<64>>;
 // Bond slots taken as penalties (stage 2b pays them to the operators that behaved).
@@ -289,6 +304,10 @@ export pure circuit poolNodeOf(left: Field, right: Field): Field {
 // deployment: `number` is how many times the pool has linked before.
 export pure circuit linkMessageOf(deployment: ContractAddress, operator: Bytes<32>, number: Uint<64>): Bytes<32> {
   return persistentHash<LinkPreimage>(LinkPreimage { domain: pad(32, "nightcast:pool-link:v1"), deployment: deployment, operator: operator, number: number as Field });
+}
+
+export pure circuit voteKey(e: Uint<64>, next: Bytes<32>): Bytes<32> {
+  return persistentHash<[Bytes<32>, Field, Bytes<32>]>([pad(32, "nightcast:successor-vote:v1"), e as Field, next]);
 }
 
 export pure circuit requesterCommitmentOf(secret: Bytes<32>): Bytes<32> {
@@ -634,12 +653,14 @@ export circuit finish(e: Uint<64>, now: Uint<64>): Boolean {
   assert(c.phase == Phase.seating || c.phase == Phase.dealing, "that ceremony is over");
   if (c.phase == Phase.dealing && c.dealt == c.n) {
     committees.insert(ee, Committee { ...c, phase: Phase.serving, since: at });
+    previous = current;
     current = ee;
     return true;
   }
   assert(blockTimeGte(c.dealBy), "the ceremony isn't finished and its deadline hasn't passed");
   if (c.phase == Phase.dealing && c.dealt >= c.t) {
     committees.insert(ee, Committee { ...c, phase: Phase.serving, since: at });
+    previous = current;
     current = ee;
     return true;
   }
@@ -824,4 +845,34 @@ export circuit claim(): [] {
   const amount = earned.lookup(id);
   earned.insert(id, 0);
   sendUnshielded(nativeToken(), amount, toUser(operators.lookup(id).payout));
+}
+
+// ---------------------------------------------------------------- the recommended successor
+
+// The seat at position i of the serving committee names the contract it recommends moving to
+// (once per epoch). When two-thirds of the seats have named the same address, it is the
+// epoch's; if the epoch served before this one named it too, it becomes the recommended
+// successor. This records an opinion and nothing more: no bond, fee, request or seat moves.
+export circuit recommend(i: Uint<8>, next: ContractAddress): [] {
+  const ii = disclose(i);
+  const to = disclose(next).bytes;
+  assert(current > 0, "no committee is serving yet");
+  const e = current;
+  const c = committees.lookup(e);
+  assert(ii >= 1 && ii <= c.n, "no such position");
+  assert(disclose(same(ecMulGenerator(operatorSecret() as JubjubScalar), seats.lookup(seatKey(e, ii)))), "not this position's holder");
+  assert(to != kernel.self().bytes, "that is this contract");
+  assert(!ballots.member(seatKey(e, ii)), "this seat has named an address in this epoch");
+  ballots.insert(seatKey(e, ii), true);
+  const k = voteKey(e, to);
+  const n = ((votes.member(k) ? votes.lookup(k) : 0) + 1) as Uint<8>;
+  votes.insert(k, n);
+  if (n * 3 >= c.n * 2 && backedEpoch != e) {
+    if (previous > 0 && backedEpoch == previous && backed == to) {
+      successor = to;
+      successorEpoch = e;
+    }
+    backed = to;
+    backedEpoch = e;
+  }
 }
