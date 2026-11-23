@@ -1,0 +1,408 @@
+// Nightcast threshold network, stage 1 (NOT for deployment): the value path.
+//
+// A committee of n operators (positions 1..n) shares one key that nobody holds. Any t of them
+// give the same random value for a request; fewer than t can't work it out. The design, the
+// decisions and the first review are in the design doc ("Nightcast threshold network: design").
+//
+// Stage 1 has everything a value depends on:
+//   epochs      a committee per epoch, of 1 of 1, 3 of 5 or 4 of 7, each with a fresh key
+//   ceremony    takeSeat, dealCommit, dealShare, finish: a dealer PROVES its deal as it posts it
+//               (no complaints), and the group key is the sum of the dealers that finished
+//   requests    request (the id comes from the contract's counter, the input point H is fixed
+//               then), answer, finalise (any t answers, one value), expire (void, but the request
+//               keeps its H and stays answerable: no second roll)
+// Stage 2 adds what it leaves open: who may open an epoch and take a seat (the registry, bonds,
+// the waiting list and the house cap), fees and penalties. Stage 3: the stake pool link and the
+// recommended successor. Until then anyone can open an epoch and sit, so this must not be deployed.
+//
+//   share key of position i    pk_i = A0 + i·A1 + i²·A2 + i³·A3     (A_k: the dealers' sums)
+//   its answer to a request    Γ_i  = sk_i·H, proved against pk_i
+//   the value, from any t      Γ*   = Σ c_i·Γ_i,  c_i = 720·Π_{j≠i} j/(j-i)  →  720·sk·H
+//                              output = SHA-256("nightcast:threshold:v1" || Γ*)
+// 720 = 6! clears every denominator for positions 1..7, whatever the committee's size, so one
+// rule serves 1 of 1, 3 of 5 and 4 of 7. A negative c_i is applied as (r - |c_i|).
+//
+// Compact 0.36.1. Notes for whoever changes this: transientHash can't take a JubjubPoint (hash its
+// coordinates); never use constructJubjubPoint on anything a caller sends (it doesn't check the
+// curve); hashToCurve may have several valid outputs, so H is worked out once, by `request`.
+
+pragma language_version >= 0.28;
+
+import CompactStandardLibrary;
+
+export enum Phase { seating, dealing, serving, failed }
+export enum Status { pending, fulfilled }
+
+export struct Committee {
+  n: Uint<8>;
+  t: Uint<8>;
+  phase: Phase;
+  // Seats taken, and dealers that finished (posted every parcel).
+  seated: Uint<8>;
+  dealt: Uint<8>;
+  // The ceremony must finish by then (seconds since the epoch), or it fails.
+  dealBy: Uint<64>;
+}
+
+export struct Parcel {
+  r: JubjubPoint;
+  c: Field;
+}
+
+export struct Request {
+  // The committee that answers it: the one serving when it was made.
+  epoch: Uint<64>;
+  status: Status;
+  requester: Bytes<32>;
+  tag: Bytes<32>;
+  // H, fixed when the request was made.
+  point: JubjubPoint;
+  deadline: Uint<64>;
+  // Shares posted so far.
+  answers: Uint<8>;
+  // Past its deadline without t answers. It keeps its H and can still be answered and finalised.
+  voided: Boolean;
+  // The random value; all zeros until fulfilled.
+  output: Bytes<32>;
+}
+
+struct IdPreimage {
+  domain: Bytes<32>;
+  deployment: ContractAddress;
+  number: Field;
+  requester: Bytes<32>;
+  tag: Bytes<32>;
+}
+
+struct OutputPreimage {
+  domain: Bytes<32>;
+  gamma: JubjubPoint;
+}
+
+// The epoch being served (0: none yet), and the newest epoch opened.
+export ledger current: Uint<64>;
+export ledger opened: Uint<64>;
+export ledger committees: Map<Uint<64>, Committee>;
+// (epoch, position) -> that seat's key; (epoch, dealer, k) -> A_k; (epoch, dealer) -> it has
+// committed / parcels sent; (epoch, dealer, to) -> the parcel; (epoch, k) -> the group's A_k.
+export ledger seats: Map<Field, JubjubPoint>;
+export ledger commitments: Map<Field, JubjubPoint>;
+export ledger committed: Map<Field, Boolean>;
+export ledger sent: Map<Field, Uint<8>>;
+export ledger parcels: Map<Field, Parcel>;
+export ledger aggregate: Map<Field, JubjubPoint>;
+export ledger requests: Map<Bytes<32>, Request>;
+export ledger shares: Map<Bytes<32>, JubjubPoint>;
+export ledger nextRequest: Uint<64>;
+
+export sealed ledger minWindow: Uint<64>;
+export sealed ledger maxWindow: Uint<64>;
+
+// A seat's own secret (its key is that times G; parcels are encrypted to it).
+witness seatSecret(): Field;
+// A dealer's polynomial a_0..a_3 (zeros past the threshold), a share of it, and a one-time number.
+witness coefficients(): Vector<4, Field>;
+witness shareFor(i: Uint<8>): Field;
+witness ephemeral(i: Uint<8>): Field;
+// A position's share of the group key: the sum of what the finished dealers sent it.
+witness shareSecret(): Field;
+// |c_i| for position i with the others a, b, c (0: no such other).
+witness coefficient(i: Uint<8>, a: Uint<8>, b: Uint<8>, c: Uint<8>): Uint<64>;
+witness requesterSecret(): Bytes<32>;
+
+constructor(minSecs: Uint<64>, maxSecs: Uint<64>) {
+  assert(minSecs >= 60, "minWindow must be at least 60 seconds");
+  assert(minSecs < maxSecs, "minWindow must be below maxWindow");
+  assert(maxSecs <= 2592000, "maxWindow must be at most 30 days");
+  minWindow = disclose(minSecs);
+  maxWindow = disclose(maxSecs);
+}
+
+// ---------------------------------------------------------------- pure helpers
+
+export pure circuit seatKey(e: Uint<64>, i: Uint<8>): Field {
+  return (e as Field) * 8 + (i as Field);
+}
+
+export pure circuit cellKey(e: Uint<64>, d: Uint<8>, k: Uint<8>): Field {
+  return (e as Field) * 64 + (d as Field) * 8 + (k as Field);
+}
+
+export pure circuit shareId(id: Bytes<32>, i: Uint<8>): Bytes<32> {
+  return persistentHash<[Bytes<32>, Bytes<32>, Field]>([pad(32, "nightcast:threshold-share:v1"), id, i as Field]);
+}
+
+export pure circuit requestIdOf(deployment: ContractAddress, number: Uint<64>, requester: Bytes<32>, tag: Bytes<32>): Bytes<32> {
+  return persistentHash<IdPreimage>(IdPreimage { domain: pad(32, "nightcast:threshold-id:v1"), deployment: deployment, number: number as Field, requester: requester, tag: tag });
+}
+
+export pure circuit requesterCommitmentOf(secret: Bytes<32>): Bytes<32> {
+  return persistentHash<[Bytes<32>, Bytes<32>]>([pad(32, "nightcast:requester:v0"), secret]);
+}
+
+export pure circuit outputOf(gamma: JubjubPoint): Bytes<32> {
+  return persistentHash<OutputPreimage>(OutputPreimage { domain: pad(32, "nightcast:threshold:v1"), gamma: gamma });
+}
+
+// The pad for dealer d's parcel to position i in epoch e, from the point they share (by its
+// coordinates). 1852400484 is this contract's tag.
+export pure circuit padOf(k: JubjubPoint, e: Uint<64>, d: Uint<8>, i: Uint<8>): Field {
+  return transientHash<[Field, Field, Field, Field, Field, Field]>([1852400484 as Field, jubjubPointX(k), jubjubPointY(k), e as Field, d as Field, i as Field]);
+}
+
+pure circuit same(a: JubjubPoint, b: JubjubPoint): Boolean {
+  return jubjubPointX(a) == jubjubPointX(b) && jubjubPointY(a) == jubjubPointY(b);
+}
+
+pure circuit isIdentity(a: JubjubPoint): Boolean {
+  return jubjubPointX(a) == (0 as Field) && jubjubPointY(a) == (1 as Field);
+}
+
+pure circuit identity(): JubjubPoint {
+  return ecMulGenerator((0 as Field) as JubjubScalar);
+}
+
+pure circuit small(i: Uint<8>): JubjubScalar {
+  return (i as Field) as JubjubScalar;
+}
+
+// Horner: c0 + i·c1 + i²·c2 + i³·c3.
+export pure circuit evalCommitments(c0: JubjubPoint, c1: JubjubPoint, c2: JubjubPoint, c3: JubjubPoint, i: Uint<8>): JubjubPoint {
+  const s = small(i);
+  return ecAdd(ecMul(ecAdd(ecMul(ecAdd(ecMul(c3, s), c2), s), c1), s), c0);
+}
+
+// |a - i|, or 1 when there is no such other position (a = 0).
+pure circuit distOr1(a: Uint<8>, i: Uint<8>): Field {
+  return a == 0 ? (1 as Field) : (a > i ? (a - i) as Field : (i - a) as Field);
+}
+
+pure circuit orOne(a: Uint<8>): Field {
+  return a == 0 ? (1 as Field) : (a as Field);
+}
+
+// ---------------------------------------------------------------- the ceremony
+
+// Open the next epoch's committee: 1 of 1, 3 of 5 or 4 of 7, with its ceremony due by `dealBy`.
+// Only when the newest epoch opened is being served or has failed. (Stage 1: anyone may. Stage 2:
+// the size and the seats come from the registry.)
+export circuit openEpoch(n: Uint<8>, t: Uint<8>, dealBy: Uint<64>): Uint<64> {
+  const nn = disclose(n);
+  const tt = disclose(t);
+  const by = disclose(dealBy);
+  assert((nn == 1 && tt == 1) || (nn == 5 && tt == 3) || (nn == 7 && tt == 4), "a committee is 1 of 1, 3 of 5 or 4 of 7");
+  assert(by >= maxWindow, "the ceremony's deadline is out of range");
+  assert(blockTimeLt(by - minWindow), "the ceremony's deadline is too soon");
+  assert(blockTimeGte(by - maxWindow), "the ceremony's deadline is too far away");
+  if (opened != current) {
+    assert(committees.lookup(opened).phase == Phase.failed, "the newest epoch's ceremony is still running");
+  }
+  const e = (opened + 1) as Uint<64>;
+  opened = e;
+  committees.insert(e, Committee { n: nn, t: tt, phase: Phase.seating, seated: 0, dealt: 0, dealBy: by });
+  return e;
+}
+
+// Take position i in epoch e's committee, with a key made from the caller's seat secret.
+export circuit takeSeat(e: Uint<64>, i: Uint<8>, key: JubjubPoint): [] {
+  const ee = disclose(e);
+  const ii = disclose(i);
+  const kk = disclose(key);
+  assert(committees.member(ee), "no such epoch");
+  const c = committees.lookup(ee);
+  assert(c.phase == Phase.seating, "that committee isn't seating");
+  assert(ii >= 1 && ii <= c.n, "no such position");
+  assert(!seats.member(seatKey(ee, ii)), "that position is taken");
+  assert(!isIdentity(kk), "identity key not allowed");
+  assert(disclose(same(ecMulGenerator(seatSecret() as JubjubScalar), kk)), "not this secret's key");
+  seats.insert(seatKey(ee, ii), kk);
+  const now = (c.seated + 1) as Uint<8>;
+  committees.insert(ee, Committee { ...c, seated: now, phase: now == c.n ? Phase.dealing : Phase.seating });
+}
+
+// The holder of position d posts its polynomial's commitments: each A_k is proved to be a secret
+// coefficient times G, and past the threshold it must be the identity (a zero coefficient).
+export circuit dealCommit(e: Uint<64>, d: Uint<8>, c: Vector<4, JubjubPoint>): [] {
+  const ee = disclose(e);
+  const dd = disclose(d);
+  const cc = disclose(c);
+  assert(committees.member(ee), "no such epoch");
+  const com = committees.lookup(ee);
+  assert(com.phase == Phase.dealing, "that committee isn't dealing");
+  assert(dd >= 1 && dd <= com.n, "no such position");
+  assert(disclose(same(ecMulGenerator(seatSecret() as JubjubScalar), seats.lookup(seatKey(ee, dd)))), "not this position's holder");
+  assert(!committed.member(seatKey(ee, dd)), "this position has dealt");
+  committed.insert(seatKey(ee, dd), true);
+  sent.insert(seatKey(ee, dd), 0);
+  const a = coefficients();
+  for (const k of 0..4) {
+    const kk = k as Uint<8>;
+    if (kk < com.t) {
+      assert(disclose(same(ecMulGenerator(a[k] as JubjubScalar), cc[k])), "not this coefficient's commitment");
+    } else {
+      assert(isIdentity(cc[k]), "a commitment past the threshold must be the identity");
+    }
+    commitments.insert(cellKey(ee, dd, kk), cc[k]);
+  }
+}
+
+// Dealer d posts position i's share, encrypted to i's seat key, and proves it is the right
+// share. With its last parcel the dealer has finished: its commitments join the group's.
+export circuit dealShare(e: Uint<64>, d: Uint<8>, i: Uint<8>): [] {
+  const ee = disclose(e);
+  const dd = disclose(d);
+  const ii = disclose(i);
+  assert(committees.member(ee), "no such epoch");
+  const com = committees.lookup(ee);
+  assert(com.phase == Phase.dealing, "that committee isn't dealing");
+  assert(dd >= 1 && dd <= com.n && ii >= 1 && ii <= com.n, "no such position");
+  assert(committed.member(seatKey(ee, dd)), "that dealer hasn't posted its commitments");
+  assert(!parcels.member(cellKey(ee, dd, ii)), "already sent");
+  const s = shareFor(ii);
+  const x = ephemeral(ii);
+  const expected = evalCommitments(commitments.lookup(cellKey(ee, dd, 0)), commitments.lookup(cellKey(ee, dd, 1)), commitments.lookup(cellKey(ee, dd, 2)), commitments.lookup(cellKey(ee, dd, 3)), ii);
+  assert(disclose(same(ecMulGenerator(s as JubjubScalar), expected)), "not this dealer's share for that position");
+  const k = ecMul(seats.lookup(seatKey(ee, ii)), x as JubjubScalar);
+  parcels.insert(cellKey(ee, dd, ii), Parcel { r: disclose(ecMulGenerator(x as JubjubScalar)), c: disclose(s + padOf(k, ee, dd, ii)) });
+  const count = (sent.lookup(seatKey(ee, dd)) + 1) as Uint<8>;
+  sent.insert(seatKey(ee, dd), count);
+  if (count == com.n) {
+    for (const j of 0..4) {
+      const jj = j as Uint<8>;
+      const mine = commitments.lookup(cellKey(ee, dd, jj));
+      if (aggregate.member(seatKey(ee, jj))) {
+        aggregate.insert(seatKey(ee, jj), ecAdd(aggregate.lookup(seatKey(ee, jj)), mine));
+      } else {
+        aggregate.insert(seatKey(ee, jj), mine);
+      }
+    }
+    committees.insert(ee, Committee { ...com, dealt: (com.dealt + 1) as Uint<8> });
+  }
+}
+
+// Anyone ends epoch e's ceremony. Once every dealer has finished, or once its deadline has passed
+// with at least t finished, the committee serves (every seat holds shares from the finished
+// dealers, whether or not it dealt). Past the deadline with fewer, it has failed, and the epoch
+// before carries on.
+export circuit finish(e: Uint<64>): Boolean {
+  const ee = disclose(e);
+  assert(committees.member(ee), "no such epoch");
+  const c = committees.lookup(ee);
+  assert(c.phase == Phase.seating || c.phase == Phase.dealing, "that ceremony is over");
+  if (c.phase == Phase.dealing && c.dealt == c.n) {
+    committees.insert(ee, Committee { ...c, phase: Phase.serving });
+    current = ee;
+    return true;
+  }
+  assert(blockTimeGte(c.dealBy), "the ceremony isn't finished and its deadline hasn't passed");
+  if (c.phase == Phase.dealing && c.dealt >= c.t) {
+    committees.insert(ee, Committee { ...c, phase: Phase.serving });
+    current = ee;
+    return true;
+  }
+  committees.insert(ee, Committee { ...c, phase: Phase.failed });
+  return false;
+}
+
+// Position i's share key in epoch e, from the group's commitments.
+circuit keyOf(e: Uint<64>, i: Uint<8>): JubjubPoint {
+  return evalCommitments(aggregate.lookup(seatKey(e, 0)), aggregate.lookup(seatKey(e, 1)), aggregate.lookup(seatKey(e, 2)), aggregate.lookup(seatKey(e, 3)), i);
+}
+
+export circuit shareKey(e: Uint<64>, i: Uint<8>): JubjubPoint {
+  return keyOf(disclose(e), disclose(i));
+}
+
+// ---------------------------------------------------------------- requests
+
+// Ask the serving committee for a random value. The id comes from the contract's own counter
+// (and the caller's requester secret and tag), so it can't be shaped, and the input point H is
+// fixed now. Returns the request id.
+export circuit request(tag: Bytes<32>, deadline: Uint<64>): Bytes<32> {
+  const d = disclose(deadline);
+  assert(current > 0, "no committee is serving yet");
+  assert(d >= maxWindow, "deadline is out of range");
+  assert(blockTimeLt(d - minWindow), "deadline is too soon");
+  assert(blockTimeGte(d - maxWindow), "deadline is too far away");
+  const requester = disclose(requesterCommitmentOf(requesterSecret()));
+  const id = requestIdOf(kernel.self(), nextRequest, requester, disclose(tag));
+  nextRequest = (nextRequest + 1) as Uint<64>;
+  requests.insert(id, Request {
+    epoch: current,
+    status: Status.pending,
+    requester: requester,
+    tag: disclose(tag),
+    point: hashToCurve<[Bytes<32>, Bytes<32>]>([pad(32, "nightcast:h2c:v0"), id]),
+    deadline: d,
+    answers: 0,
+    voided: false,
+    output: default<Bytes<32>>
+  });
+  return id;
+}
+
+// Position i of the request's committee posts its share Γ_i = sk_i·H, proving sk_i is its share
+// of the group key. Accepted whenever it comes (stage 2 decides what a late one earns).
+export circuit answer(id: Bytes<32>, i: Uint<8>): [] {
+  const rid = disclose(id);
+  const ii = disclose(i);
+  assert(requests.member(rid), "unknown request");
+  const r = requests.lookup(rid);
+  assert(ii >= 1 && ii <= committees.lookup(r.epoch).n, "no such position");
+  const sid = shareId(rid, ii);
+  assert(!shares.member(sid), "already answered");
+  const sk = shareSecret();
+  assert(disclose(same(ecMulGenerator(sk as JubjubScalar), keyOf(r.epoch, ii))), "not this position's share");
+  shares.insert(sid, disclose(ecMul(r.point, sk as JubjubScalar)));
+  requests.insert(rid, Request { ...r, answers: (r.answers + 1) as Uint<8> });
+}
+
+// One term of the combination, ±|c_i|·Γ_i, or the identity when the slot isn't used.
+circuit term(use: Boolean, rid: Bytes<32>, i: Uint<8>, a: Uint<8>, b: Uint<8>, c: Uint<8>, negative: Boolean): JubjubPoint {
+  if (use) {
+    const sid = shareId(rid, i);
+    assert(shares.member(sid), "a share is missing");
+    const m = disclose(coefficient(i, a, b, c));
+    assert((m as Field) * distOr1(a, i) * distOr1(b, i) * distOr1(c, i) == (720 as Field) * orOne(a) * orOne(b) * orOne(c), "wrong coefficient");
+    const r = 6554484396890773809930967563523245729705921265872317281365359162392183254199 as Field;
+    const scalar = negative ? r - (m as Field) : (m as Field);
+    return ecMul(shares.lookup(sid), scalar as JubjubScalar);
+  }
+  return identity();
+}
+
+// Anyone combines t answers: the committee's t positions in increasing order, then zeros. Any t
+// give the same value.
+export circuit finalise(id: Bytes<32>, s: Vector<4, Uint<8>>): Bytes<32> {
+  const rid = disclose(id);
+  const p = disclose(s);
+  assert(requests.member(rid), "unknown request");
+  const r = requests.lookup(rid);
+  assert(r.status == Status.pending, "already finalised");
+  const c = committees.lookup(r.epoch);
+  const u1 = c.t >= 2;
+  const u2 = c.t >= 3;
+  const u3 = c.t >= 4;
+  assert(p[0] >= 1 && p[0] <= c.n, "the first position isn't in this committee");
+  assert(u1 ? (p[1] > p[0] && p[1] <= c.n) : p[1] == 0, "positions: the committee's threshold of them, in increasing order, then zeros");
+  assert(u2 ? (p[2] > p[1] && p[2] <= c.n) : p[2] == 0, "positions: the committee's threshold of them, in increasing order, then zeros");
+  assert(u3 ? (p[3] > p[2] && p[3] <= c.n) : p[3] == 0, "positions: the committee's threshold of them, in increasing order, then zeros");
+  // in increasing order, the k-th position has k others below it: c_i's sign is (-1)^k
+  const g = ecAdd(ecAdd(term(true, rid, p[0], p[1], p[2], p[3], false), term(u1, rid, p[1], p[0], p[2], p[3], true)),
+                  ecAdd(term(u2, rid, p[2], p[0], p[1], p[3], false), term(u3, rid, p[3], p[0], p[1], p[2], true)));
+  const out = outputOf(g);
+  requests.insert(rid, Request { ...r, status: Status.fulfilled, output: out });
+  return out;
+}
+
+// Past its deadline without a value, a request is void. It keeps its input point and can still
+// be answered and finalised, so going silent never buys a different value.
+export circuit expire(id: Bytes<32>): [] {
+  const rid = disclose(id);
+  assert(requests.member(rid), "unknown request");
+  const r = requests.lookup(rid);
+  assert(r.status == Status.pending, "it has its value");
+  assert(!r.voided, "already void");
+  assert(blockTimeGte(r.deadline), "deadline has not passed");
+  requests.insert(rid, Request { ...r, voided: true });
+}
