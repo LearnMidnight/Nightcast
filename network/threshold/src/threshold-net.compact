@@ -1,19 +1,24 @@
-// Nightcast threshold network, stage 1 (NOT for deployment): the value path.
+// Nightcast threshold network, stage 2a (NOT for deployment): the value path and the registry.
 //
 // A committee of n operators (positions 1..n) shares one key that nobody holds. Any t of them
 // give the same random value for a request; fewer than t can't work it out. The design, the
 // decisions and the first review are in the design doc ("Nightcast threshold network: design").
 //
-// Stage 1 has everything a value depends on:
-//   epochs      a committee per epoch, of 1 of 1, 3 of 5 or 4 of 7, each with a fresh key
-//   ceremony    takeSeat, dealCommit, dealShare, finish: a dealer PROVES its deal as it posts it
-//               (no complaints), and the group key is the sum of the dealers that finished
+//   registry    register (a key, a payout address, a bond), leave, withdraw. Independent operators
+//               wait in a queue; the house's operators (named when the contract is deployed) only
+//               fill the seats independents can't.
+//   epochs      openEpoch sizes the next committee from the number of independents (1 of 1 with
+//               none, 3 of 5 with 1 to 3, 4 of 7 from 4), and `seat` fills it: independents from
+//               the front of the queue (the longest-waiting first; a committee that has served
+//               goes to the back), then the house. No randomness, nothing anyone chooses.
+//   ceremony    dealCommit, dealShare, finish: a dealer PROVES its deal as it posts it (no
+//               complaints); the group key is the sum of the dealers that finished. A seat that
+//               didn't finish a failed ceremony loses part of its bond.
 //   requests    request (the id comes from the contract's counter, the input point H is fixed
 //               then), answer, finalise (any t answers, one value), expire (void, but the request
 //               keeps its H and stays answerable: no second roll)
-// Stage 2 adds what it leaves open: who may open an epoch and take a seat (the registry, bonds,
-// the waiting list and the house cap), fees and penalties. Stage 3: the stake pool link and the
-// recommended successor. Until then anyone can open an epoch and sit, so this must not be deployed.
+// Stage 2b adds fees and what silence costs. Stage 3: the stake pool link (until then anyone who
+// registers counts as independent, so this must not be deployed) and the recommended successor.
 //
 //   share key of position i    pk_i = A0 + i·A1 + i²·A2 + i³·A3     (A_k: the dealers' sums)
 //   its answer to a request    Γ_i  = sk_i·H, proved against pk_i
@@ -33,9 +38,25 @@ import CompactStandardLibrary;
 export enum Phase { seating, dealing, serving, failed }
 export enum Status { pending, fulfilled }
 
+export struct Operator {
+  // Its key: its id is this key's hash, parcels are encrypted to it, and it proves the secret.
+  key: JubjubPoint;
+  // Where its withdrawn bond (and, from stage 2b, its fees) go.
+  payout: UserAddress;
+  // One of the house's operators (named at deploy): it never queues, and fills only spare seats.
+  house: Boolean;
+  active: Boolean;
+  // Waiting in the queue for a seat (independents only).
+  queued: Boolean;
+  // The newest epoch opened when it left (0 while active): its bond waits two served epochs.
+  leftAt: Uint<64>;
+}
+
 export struct Committee {
   n: Uint<8>;
   t: Uint<8>;
+  // Seats for independents (positions 1..indepSeats, from the queue); the rest are the house's.
+  indepSeats: Uint<8>;
   phase: Phase;
   // Seats taken, and dealers that finished (posted every parcel).
   seated: Uint<8>;
@@ -83,9 +104,26 @@ struct OutputPreimage {
 export ledger current: Uint<64>;
 export ledger opened: Uint<64>;
 export ledger committees: Map<Uint<64>, Committee>;
-// (epoch, position) -> that seat's key; (epoch, dealer, k) -> A_k; (epoch, dealer) -> it has
-// committed / parcels sent; (epoch, dealer, to) -> the parcel; (epoch, k) -> the group's A_k.
+// Operators by id, their bonds (in slots), and how many are active.
+export ledger operators: Map<Bytes<32>, Operator>;
+export ledger bonds: Map<Bytes<32>, Counter>;
+export ledger independents: Uint<16>;
+export ledger houseActive: Uint<8>;
+// The independents' queue: entries head..tail-1. A stale entry (its operator left, or was seated
+// through a newer entry) is skipped when it reaches the front.
+export ledger queue: Map<Uint<64>, Bytes<32>>;
+export ledger head: Uint<64>;
+export ledger tail: Uint<64>;
+// The last epoch each operator was seated in.
+export ledger lastSeat: Map<Bytes<32>, Uint<64>>;
+// Bond slots taken as penalties (stage 2b pays them to the operators that behaved).
+export ledger pot: Uint<64>;
+// (epoch, position) -> the operator seated there, and its key; (epoch, dealer, k) -> A_k;
+// (epoch, dealer) -> it has committed / parcels sent / finished; (epoch, dealer, to) -> the
+// parcel; (epoch, k) -> the group's A_k.
+export ledger members: Map<Field, Bytes<32>>;
 export ledger seats: Map<Field, JubjubPoint>;
+export ledger finished: Map<Field, Boolean>;
 export ledger commitments: Map<Field, JubjubPoint>;
 export ledger committed: Map<Field, Boolean>;
 export ledger sent: Map<Field, Uint<8>>;
@@ -97,9 +135,16 @@ export ledger nextRequest: Uint<64>;
 
 export sealed ledger minWindow: Uint<64>;
 export sealed ledger maxWindow: Uint<64>;
+// NIGHT atoms per bond slot, the smallest bond, and the slots a seat loses for not finishing a
+// failed ceremony.
+export sealed ledger collateralPerSlot: Uint<128>;
+export sealed ledger minBondSlots: Uint<16>;
+export sealed ledger ceremonyPenalty: Uint<16>;
+// The house's operator ids (unused entries are zero).
+export sealed ledger house: Vector<4, Bytes<32>>;
 
-// A seat's own secret (its key is that times G; parcels are encrypted to it).
-witness seatSecret(): Field;
+// An operator's secret (its key is that times G).
+witness operatorSecret(): Field;
 // A dealer's polynomial a_0..a_3 (zeros past the threshold), a share of it, and a one-time number.
 witness coefficients(): Vector<4, Field>;
 witness shareFor(i: Uint<8>): Field;
@@ -110,12 +155,18 @@ witness shareSecret(): Field;
 witness coefficient(i: Uint<8>, a: Uint<8>, b: Uint<8>, c: Uint<8>): Uint<64>;
 witness requesterSecret(): Bytes<32>;
 
-constructor(minSecs: Uint<64>, maxSecs: Uint<64>) {
+constructor(minSecs: Uint<64>, maxSecs: Uint<64>, collateral: Uint<128>, minBond: Uint<16>, penalty: Uint<16>, houseIds: Vector<4, Bytes<32>>) {
   assert(minSecs >= 60, "minWindow must be at least 60 seconds");
   assert(minSecs < maxSecs, "minWindow must be below maxWindow");
   assert(maxSecs <= 2592000, "maxWindow must be at most 30 days");
+  assert(collateral > 0, "a bond slot must be worth something");
+  assert(minBond >= 1 && penalty <= minBond, "the penalty can't be more than the smallest bond");
   minWindow = disclose(minSecs);
   maxWindow = disclose(maxSecs);
+  collateralPerSlot = disclose(collateral);
+  minBondSlots = disclose(minBond);
+  ceremonyPenalty = disclose(penalty);
+  house = disclose(houseIds);
 }
 
 // ---------------------------------------------------------------- pure helpers
@@ -126,6 +177,15 @@ export pure circuit seatKey(e: Uint<64>, i: Uint<8>): Field {
 
 export pure circuit cellKey(e: Uint<64>, d: Uint<8>, k: Uint<8>): Field {
   return (e as Field) * 64 + (d as Field) * 8 + (k as Field);
+}
+
+// An operator's id: a hash of its key.
+export pure circuit keyIdOf(key: JubjubPoint): Bytes<32> {
+  return persistentHash<[Bytes<32>, Field, Field]>([pad(32, "nightcast:operator-key:v1"), jubjubPointX(key), jubjubPointY(key)]);
+}
+
+pure circuit toUser(a: UserAddress): Either<ContractAddress, UserAddress> {
+  return right<ContractAddress, UserAddress>(a);
 }
 
 export pure circuit shareId(id: Bytes<32>, i: Uint<8>): Bytes<32> {
@@ -181,46 +241,172 @@ pure circuit orOne(a: Uint<8>): Field {
   return a == 0 ? (1 as Field) : (a as Field);
 }
 
+// ---------------------------------------------------------------- the registry
+
+// NIGHT atoms in `n` bond slots (fails rather than wrapping).
+circuit slotsValue(n: Uint<64>): Uint<128> {
+  return ((n as Field) * (collateralPerSlot as Field)) as Uint<128>;
+}
+
+circuit isHouse(id: Bytes<32>): Boolean {
+  const h = house;
+  return id == h[0] || id == h[1] || id == h[2] || id == h[3];
+}
+
+// Join (or rejoin after leaving) as an operator, with `slots` more bond paid in by the caller.
+// Proving the key's secret rules out the identity, odd points and keys nobody can use. An
+// independent joins the back of the queue.
+export circuit register(payout: UserAddress, slots: Uint<16>): [] {
+  const key = disclose(ecMulGenerator(operatorSecret() as JubjubScalar));
+  assert(!isIdentity(key), "identity key not allowed");
+  const id = keyIdOf(key);
+  const n = disclose(slots);
+  const hs = isHouse(id);
+  if (operators.member(id)) {
+    assert(!operators.lookup(id).active, "already registered");
+  } else {
+    bonds.insertDefault(id);
+  }
+  if (n > 0) {
+    receiveUnshielded(nativeToken(), slotsValue(n));
+    bonds.lookup(id).increment(n);
+  }
+  assert(!bonds.lookup(id).lessThan(minBondSlots), "the bond is below the minimum");
+  operators.insert(id, Operator { key: key, payout: disclose(payout), house: hs, active: true, queued: !hs, leftAt: 0 });
+  if (hs) {
+    houseActive = (houseActive + 1) as Uint<8>;
+  } else {
+    independents = (independents + 1) as Uint<16>;
+    queue.insert(tail, id);
+    tail = (tail + 1) as Uint<64>;
+  }
+}
+
+// Stop being seated in new committees. A seat already held keeps its duties.
+export circuit leave(): [] {
+  const id = disclose(keyIdOf(ecMulGenerator(operatorSecret() as JubjubScalar)));
+  assert(operators.member(id), "not a registered operator");
+  const o = operators.lookup(id);
+  assert(o.active, "already left");
+  operators.insert(id, Operator { ...o, active: false, queued: false, leftAt: opened });
+  if (o.house) {
+    houseActive = (houseActive - 1) as Uint<8>;
+  } else {
+    independents = (independents - 1) as Uint<16>;
+  }
+}
+
+// Take `slots` of bond back, to the payout address. An active operator keeps the minimum; one
+// that has left can take it all once two epochs opened after it left are being served.
+export circuit withdraw(slots: Uint<16>): [] {
+  const id = disclose(keyIdOf(ecMulGenerator(operatorSecret() as JubjubScalar)));
+  assert(operators.member(id), "not a registered operator");
+  const o = operators.lookup(id);
+  const n = disclose(slots);
+  assert(n > 0, "nothing to withdraw");
+  assert(!bonds.lookup(id).lessThan(n), "not that much bond");
+  bonds.lookup(id).decrement(n);
+  if (o.active) {
+    assert(!bonds.lookup(id).lessThan(minBondSlots), "an active operator keeps the minimum bond");
+  } else {
+    assert(current >= o.leftAt + 2, "the bond waits until two epochs opened after leaving are served");
+  }
+  sendUnshielded(nativeToken(), slotsValue(n), toUser(o.payout));
+}
+
 // ---------------------------------------------------------------- the ceremony
 
-// Open the next epoch's committee: 1 of 1, 3 of 5 or 4 of 7, with its ceremony due by `dealBy`.
-// Only when the newest epoch opened is being served or has failed. (Stage 1: anyone may. Stage 2:
-// the size and the seats come from the registry.)
-export circuit openEpoch(n: Uint<8>, t: Uint<8>, dealBy: Uint<64>): Uint<64> {
-  const nn = disclose(n);
-  const tt = disclose(t);
+// Put epoch e's independent members that are still active back in the queue. With `penalise`
+// (a failed ceremony), a seat that didn't finish dealing first loses part of its bond.
+circuit requeue(e: Uint<64>, penalise: Boolean): [] {
+  for (const k of 0..7) {
+    const sk = seatKey(e, (k + 1) as Uint<8>);
+    if (members.member(sk)) {
+      const id = members.lookup(sk);
+      if (penalise && !finished.member(sk) && !bonds.lookup(id).lessThan(ceremonyPenalty)) {
+        bonds.lookup(id).decrement(ceremonyPenalty);
+        pot = (pot + ceremonyPenalty) as Uint<64>;
+      }
+      const o = operators.lookup(id);
+      if (o.active && !o.house && !o.queued) {
+        operators.insert(id, Operator { ...o, queued: true });
+        queue.insert(tail, id);
+        tail = (tail + 1) as Uint<64>;
+      }
+    }
+  }
+}
+
+// Anyone opens the next epoch's committee, with its ceremony due by `dealBy`. Only when the
+// newest epoch opened is being served or has failed. The committees that are done seating (the
+// failed one, then the one serving) rejoin the back of the queue, and the size follows the
+// number of independents: none 1 of 1; 1 to 3, 3 of 5; 4 or more, 4 of 7. Independents take as
+// many seats as there are of them; the house fills the rest, so from 3 independents it is
+// below the threshold, and from 7 it has no seat.
+export circuit openEpoch(dealBy: Uint<64>): Uint<64> {
   const by = disclose(dealBy);
-  assert((nn == 1 && tt == 1) || (nn == 5 && tt == 3) || (nn == 7 && tt == 4), "a committee is 1 of 1, 3 of 5 or 4 of 7");
   assert(by >= maxWindow, "the ceremony's deadline is out of range");
   assert(blockTimeLt(by - minWindow), "the ceremony's deadline is too soon");
   assert(blockTimeGte(by - maxWindow), "the ceremony's deadline is too far away");
   if (opened != current) {
     assert(committees.lookup(opened).phase == Phase.failed, "the newest epoch's ceremony is still running");
+    requeue(opened, true);
   }
+  if (current > 0) {
+    requeue(current, false);
+  }
+  const i = independents;
+  const n = (i == 0 ? 1 : (i <= 3 ? 5 : 7)) as Uint<8>;
+  const t = (i == 0 ? 1 : (i <= 3 ? 3 : 4)) as Uint<8>;
+  const mine = (i >= 7 ? 7 : i) as Uint<8>;
+  assert(houseActive >= n - mine, "not enough house operators to fill the committee");
   const e = (opened + 1) as Uint<64>;
   opened = e;
-  committees.insert(e, Committee { n: nn, t: tt, phase: Phase.seating, seated: 0, dealt: 0, dealBy: by });
+  committees.insert(e, Committee { n: n, t: t, indepSeats: mine, phase: Phase.seating, seated: 0, dealt: 0, dealBy: by });
   return e;
 }
 
-// Take position i in epoch e's committee, with a key made from the caller's seat secret.
-export circuit takeSeat(e: Uint<64>, i: Uint<8>, key: JubjubPoint): [] {
+// Operator `id` takes the next position of epoch e's committee.
+circuit place(e: Uint<64>, c: Committee, id: Bytes<32>, o: Operator): [] {
+  const pos = (c.seated + 1) as Uint<8>;
+  members.insert(seatKey(e, pos), id);
+  seats.insert(seatKey(e, pos), o.key);
+  lastSeat.insert(id, e);
+  operators.insert(id, Operator { ...o, queued: false });
+  committees.insert(e, Committee { ...c, seated: pos, phase: pos == c.n ? Phase.dealing : Phase.seating });
+}
+
+// Anyone fills the next seat of epoch e's committee. While independents' seats are open, it is
+// the front of the queue (a stale entry is dropped, and the call does nothing more). After
+// them, a house operator: `houseSlot` says which of the house's four, and it must be active and
+// not yet seated in this epoch.
+export circuit seat(e: Uint<64>, houseSlot: Uint<8>): [] {
   const ee = disclose(e);
-  const ii = disclose(i);
-  const kk = disclose(key);
   assert(committees.member(ee), "no such epoch");
   const c = committees.lookup(ee);
   assert(c.phase == Phase.seating, "that committee isn't seating");
-  assert(ii >= 1 && ii <= c.n, "no such position");
-  assert(!seats.member(seatKey(ee, ii)), "that position is taken");
-  assert(!isIdentity(kk), "identity key not allowed");
-  assert(disclose(same(ecMulGenerator(seatSecret() as JubjubScalar), kk)), "not this secret's key");
-  seats.insert(seatKey(ee, ii), kk);
-  const now = (c.seated + 1) as Uint<8>;
-  committees.insert(ee, Committee { ...c, seated: now, phase: now == c.n ? Phase.dealing : Phase.seating });
+  if (c.seated < c.indepSeats) {
+    assert(head < tail, "the queue is empty");
+    const id = queue.lookup(head);
+    head = (head + 1) as Uint<64>;
+    const o = operators.lookup(id);
+    if (o.active && o.queued) {
+      place(ee, c, id, o);
+    }
+  } else {
+    const hh = disclose(houseSlot);
+    assert(hh < 4, "the house has four slots");
+    const h = house;
+    const id = hh == 0 ? h[0] : (hh == 1 ? h[1] : (hh == 2 ? h[2] : h[3]));
+    assert(operators.member(id), "that house operator isn't registered");
+    const o = operators.lookup(id);
+    assert(o.active, "that house operator has left");
+    assert(!lastSeat.member(id) || lastSeat.lookup(id) != ee, "that house operator is already seated");
+    place(ee, c, id, o);
+  }
 }
 
-// The holder of position d posts its polynomial's commitments: each A_k is proved to be a secret
+// The operator seated at position d posts its polynomial's commitments: each A_k is proved to be a secret
 // coefficient times G, and past the threshold it must be the identity (a zero coefficient).
 export circuit dealCommit(e: Uint<64>, d: Uint<8>, c: Vector<4, JubjubPoint>): [] {
   const ee = disclose(e);
@@ -230,7 +416,7 @@ export circuit dealCommit(e: Uint<64>, d: Uint<8>, c: Vector<4, JubjubPoint>): [
   const com = committees.lookup(ee);
   assert(com.phase == Phase.dealing, "that committee isn't dealing");
   assert(dd >= 1 && dd <= com.n, "no such position");
-  assert(disclose(same(ecMulGenerator(seatSecret() as JubjubScalar), seats.lookup(seatKey(ee, dd)))), "not this position's holder");
+  assert(disclose(same(ecMulGenerator(operatorSecret() as JubjubScalar), seats.lookup(seatKey(ee, dd)))), "not this position's holder");
   assert(!committed.member(seatKey(ee, dd)), "this position has dealt");
   committed.insert(seatKey(ee, dd), true);
   sent.insert(seatKey(ee, dd), 0);
@@ -276,6 +462,7 @@ export circuit dealShare(e: Uint<64>, d: Uint<8>, i: Uint<8>): [] {
         aggregate.insert(seatKey(ee, jj), mine);
       }
     }
+    finished.insert(seatKey(ee, dd), true);
     committees.insert(ee, Committee { ...com, dealt: (com.dealt + 1) as Uint<8> });
   }
 }
@@ -307,10 +494,6 @@ export circuit finish(e: Uint<64>): Boolean {
 // Position i's share key in epoch e, from the group's commitments.
 circuit keyOf(e: Uint<64>, i: Uint<8>): JubjubPoint {
   return evalCommitments(aggregate.lookup(seatKey(e, 0)), aggregate.lookup(seatKey(e, 1)), aggregate.lookup(seatKey(e, 2)), aggregate.lookup(seatKey(e, 3)), i);
-}
-
-export circuit shareKey(e: Uint<64>, i: Uint<8>): JubjubPoint {
-  return keyOf(disclose(e), disclose(i));
 }
 
 // ---------------------------------------------------------------- requests

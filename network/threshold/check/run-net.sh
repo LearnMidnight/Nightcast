@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Compile the threshold network, stage 1 (with keys, to measure the circuits) and run its checks
+# Compile the threshold network contract (with keys, to measure the circuits) and run its checks
 # in memory.   bash network/threshold/check/run-net.sh     (COMPACTC: default /root/compactc-0.36.1/compactc)
 set -euo pipefail
 cd "$(dirname "$0")"
