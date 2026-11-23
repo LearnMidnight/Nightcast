@@ -1,0 +1,23 @@
+// Nightcast pool-link probe (feasibility only, not for deployment): can the contract itself
+// check that a Cardano stake pool's key signed an operator key? Cardano pool keys are Ed25519.
+//
+// Compact 0.36.1's standard library has (asked of the compiler on 23 Nov 2026; not yet in the docs):
+//   ed25519Verify<N>(msg: Bytes<N>, sig: Ed25519Signature { r: Curve25519Point, s: Curve25519Scalar },
+//                    pk: Curve25519Point): Boolean
+//
+// linkPool records an operator key once a pool's key has signed it. This measures the circuit and
+// checks it against a real Ed25519 signature. What a pool can sign in practice (the message format
+// of Cardano's signing tools) is a separate question: N is generic, so a longer message fits.
+
+pragma language_version >= 0.28;
+
+import CompactStandardLibrary;
+
+export ledger linked: Map<Bytes<32>, Boolean>;
+
+export circuit linkPool(operatorKey: Bytes<32>, sig: Ed25519Signature, pool: Curve25519Point): [] {
+  const k = disclose(operatorKey);
+  assert(!linked.member(k), "this operator key is linked");
+  assert(ed25519Verify<32>(k, disclose(sig), disclose(pool)), "the pool's key didn't sign this operator key");
+  linked.insert(k, true);
+}
