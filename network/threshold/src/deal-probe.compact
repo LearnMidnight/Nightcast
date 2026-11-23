@@ -110,7 +110,7 @@ export circuit dealShare(d: Uint<8>, i: Uint<8>): [] {
 // How Compact treats a number at or past the curve's order when it becomes a scalar.
 export circuit castEdge(x: Field): JubjubPoint {
   const q = fromSecret(disclose(x));
-  edges.insert(1, q);
+  edges.insert(1 as Field, q);
   return q;
 }
 
@@ -118,6 +118,6 @@ export circuit castEdge(x: Field): JubjubPoint {
 export circuit pointEdge(p: JubjubPoint): JubjubPoint {
   const q = disclose(p);
   const d = ecAdd(q, q);
-  edges.insert(2, d);
+  edges.insert(2 as Field, d);
   return d;
 }
