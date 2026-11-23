@@ -1,4 +1,4 @@
-// The threshold network, stage 6, in memory (compact-runtime): the registry and six epochs in a
+// The threshold network, stage 7, in memory (compact-runtime): the registry and six epochs in a
 // row on one contract. The committee's size follows the number of independents (1 of 1, 3 of 5,
 // 4 of 7), seats go to the front of the queue and then to the house, a ceremony that fails costs
 // the seats that didn't deal, and for each size EVERY set of t answers must give the off-chain
@@ -39,7 +39,6 @@ const witnesses = {
   coefficient: ({ privateState }, i, a, b, c) => [privateState, privateState.badCoefficient ?? coeff(Number(i), [a, b, c].map(Number))],
   requesterSecret: ({ privateState }) => [privateState, privateState.requester ?? bytes('requester')],
   quotient: ({ privateState }, total, k) => [privateState, privateState.badQuotient ?? total / k],
-  poolPath: ({ privateState }, pool) => [privateState, pathOf(pool)],
 };
 // Ed25519 (RFC 8032): a 32-byte key or R as the point the runtime wants, and S as a number.
 const q = (1n << 255n) - 19n;
@@ -58,24 +57,18 @@ const decode = (b) => {
 /** A stake pool: an Ed25519 key pair, its key as a point, and its id in the contract. */
 const pool = (name) => { const k = generateKeyPairSync('ed25519'); const key = decode(Buffer.from(k.publicKey.export({ format: 'jwk' }).x, 'base64url')); return { name, secret: k.privateKey, key, id: P.pureCircuits.poolIdOf(key) }; };
 const signed = (p, msg) => { const g = sign(null, Buffer.from(msg), p.secret); return { r: decode(g.subarray(0, 32)), s: le(g.subarray(32)) }; };
-// The contract's list: a 13-level Merkle tree of the listed pools' leaves, empty places 0.
-const DEPTH = 13;
-const POOLS = Array.from({ length: 7 }, (_, k) => pool(`pool${k}`));
+// The contract's list: nine pools, in batches of eight, each batch committed to with the ones
+// after it. The contract is deployed with the first commitment.
+const POOLS = Array.from({ length: 9 }, (_, k) => pool(`pool${k}`));
 const UNLISTED = pool('unlisted');
-const levels = [new Map(POOLS.map((p, k) => [k, P.pureCircuits.poolLeafOf(p.id)]))];
-const empty = [0n];
-for (let d = 0; d < DEPTH; d++) {
-  const up = new Map();
-  for (const k of levels[d].keys()) { const j = k >> 1; if (!up.has(j)) up.set(j, P.pureCircuits.poolNodeOf(levels[d].get(2 * j) ?? empty[d], levels[d].get(2 * j + 1) ?? empty[d])); }
-  levels.push(up);
-  empty.push(P.pureCircuits.poolNodeOf(empty[d], empty[d]));
+const ZERO = new Uint8Array(32);
+const BATCHES = [];
+let ROOT = ZERO;
+for (let k = Math.ceil(POOLS.length / 8) - 1; k >= 0; k--) {
+  const ids = Array.from({ length: 8 }, (_, j) => POOLS[k * 8 + j]?.id ?? ZERO);
+  BATCHES.unshift({ ids, next: ROOT });
+  ROOT = P.pureCircuits.poolBatchOf(ids, ROOT);
 }
-const ROOT = levels[DEPTH].get(0);
-const pathOf = (id) => {
-  let k = POOLS.findIndex((p) => hexOf(p.id) === hexOf(id));
-  if (k < 0) k = 0; // not on the list: any path, and the root won't match
-  return Array.from({ length: DEPTH }, (_, d) => { const step = { sibling: levels[d].get(k ^ 1) ?? empty[d], right: (k & 1) === 1 }; k >>= 1; return step; });
-};
 const hexOf = (b) => Buffer.from(b).toString('hex');
 const G = (x) => rt.ecMulGenerator(x);
 const ID = G(0n);
@@ -118,8 +111,10 @@ const bond = (o) => ledger().bonds.lookup(o.id).read();
 /** This contract's address as a pure circuit takes it. */
 const SELF = () => ({ bytes: new Uint8Array(rt.encodeContractAddress ? rt.encodeContractAddress(address) : Buffer.from(address, 'hex')) });
 /** The message pool p signs to back operator o now, and the link itself. */
-const linkMessage = (o, p) => P.pureCircuits.linkMessageOf(SELF(), o.id, ledger().poolLinks.member(p.id) ? ledger().poolLinks.lookup(p.id) : 0n);
-const link = (o, p = o.pool, sig = signed(p, linkMessage(o, p))) => call('linkPool', [o.id, sig, p.key]);
+const linkMessage = (o, p, revoke = false) => P.pureCircuits.linkMessageOf(SELF(), o.id, ledger().poolLinks.member(p.id) ? ledger().poolLinks.lookup(p.id) : 0n, revoke);
+const link = (o, p = o.pool, sig = signed(p, linkMessage(o, p))) => call('linkPool', [o.id, sig, p.key, false, BigInt(now)]);
+const revoke = (o, p = o.pool, sig = signed(p, linkMessage(o, p, true))) => call('linkPool', [o.id, sig, p.key, true, BigInt(now)]);
+const loadPools = (b) => call('loadPools', [b.ids, b.next]);
 const linked = (o) => ledger().poolOf.member(o.id);
 /** Register; an operator with a stake pool that isn't linked yet is linked too. */
 const register = async (o, n = 12n) => { await call('register', [{ bytes: o.payout }, n], { op: o.op }); if (o.pool && !linked(o)) await link(o); };
@@ -204,6 +199,12 @@ await fails(init({ bounty: FEE }), /half the fee/, 'or with a bounty that leaves
 await fails(init({ ceremony: 600n }), /thirty times the slack/, 'or with a ceremony too short to deal in');
 await fails(init({ house: [H[0].id, H[1].id, H[2].id, H[0].id] }), /four different operators/, 'or without four different house operators');
 
+// ---- the pool list: loaded after deploy, and only as committed
+await fails(loadPools(BATCHES[1]), /not the next batch/, "a batch that isn't the next one of the list the contract was deployed with is refused");
+await fails(loadPools({ ids: [UNLISTED.id, ...BATCHES[0].ids.slice(1)], next: BATCHES[0].next }), /not the next batch/, 'and so is one with another key slipped in');
+await loadPools(BATCHES[0]);
+ok(ledger().listed.member(POOLS[0].id) && !ledger().listed.member(POOLS[8].id) && !ledger().listed.member(UNLISTED.id), 'anyone loads the next batch of the list: its eight pool keys are now in the ledger');
+
 // ---- the registry
 await fails(ask('too early'), /no committee is serving/, 'no request before a committee serves');
 await fails(call('openEpoch', [dl()]), /not enough house operators/, "no committee can open with nobody registered");
@@ -246,6 +247,10 @@ const A = independent('a'), B = independent('b');
   await fails(link(H[0], POOLS[6]), /need no pool/, "the house's operators take no pool");
   await fails(link(B), /not a registered operator/, 'a pool links only a registered operator');
   await fails(link(A, UNLISTED), /isn't on this contract's list/, "a key that isn't on the contract's list of stake pools is refused, whatever it signs");
+  await fails(link(A, POOLS[8]), /isn't on this contract's list/, "a listed key whose batch isn't loaded yet has to wait for it");
+  await loadPools(BATCHES[1]);
+  ok(ledger().listed.member(POOLS[8].id), 'the last batch completes the list');
+  await fails(loadPools(BATCHES[1]), /whole list is loaded/, 'and nothing can be added after it');
   await fails(link(A, A.pool, signed(POOLS[1], linkMessage(A, A.pool))), /didn't sign/, "a listed pool's key with another key's signature is refused");
   await fails(link(A, A.pool, signed(A.pool, linkMessage(B, A.pool))), /didn't sign/, 'and its signature for another operator');
   const first = signed(A.pool, linkMessage(A, A.pool));
@@ -255,14 +260,17 @@ const A = independent('a'), B = independent('b');
   await fails(link(A, POOLS[1]), /is linked to a pool/, 'an operator is linked once');
   await call('register', [{ bytes: B.payout }, 12n], { op: B.op });
   await fails(link(B, A.pool), /still active/, 'a pool backs one operator at a time');
-  await leave(A);
-  ok(ledger().independents === 0n, 'when it leaves it no longer counts');
+  await fails(revoke(A, A.pool, signed(A.pool, linkMessage(A, A.pool))), /didn't sign/, "a pool's signature to link isn't one to revoke");
+  await fails(revoke(B, A.pool), /doesn't back this operator/, 'a pool revokes only the operator it backs');
+  await revoke(A);
+  ok(!active(A) && !linked(A) && ledger().independents === 0n, "the pool's key revokes its operator: it is stood down, is no longer linked and no longer counts");
+  await fails(revoke(A), /doesn't back this operator/, 'once');
   await fails(link(B, A.pool), /pool sits out/, "the pool can't move to a fresh key straight away: it sits out two epoch lengths");
-  await fails(call('register', [{ bytes: A.payout }, 0n], { op: A.op }), /sits out/, 'and the operator that left sits out as long');
+  await fails(call('register', [{ bytes: A.payout }, 0n], { op: A.op }), /sits out/, 'and the operator it revoked sits out as long');
   now += 2 * Number(EPOCH);
-  await fails(link(B, A.pool, signed(A.pool, P.pureCircuits.linkMessageOf(SELF(), B.id, 0n))), /didn't sign/, "a pool's next link signs its next number");
+  await fails(link(B, A.pool, signed(A.pool, P.pureCircuits.linkMessageOf(SELF(), B.id, 0n, false))), /didn't sign/, "a pool's next link signs its next number");
   await link(B, A.pool);
-  ok(linked(B) && !linked(A) && ledger().poolLinks.lookup(A.pool.id) === 2n && ledger().independents === 1n, 'after the sit-out the pool can move to another operator; the one that left is unlinked');
+  ok(linked(B) && !linked(A) && ledger().poolLinks.lookup(A.pool.id) === 3n && ledger().independents === 1n, 'after the sit-out the pool can back another operator');
   await call('register', [{ bytes: A.payout }, 0n], { op: A.op });
   ok(!ledger().operators.lookup(A.id).queued && ledger().independents === 1n, 'the unlinked operator can register again, but waits for a pool');
   await fails(link(A, A.pool, first), /still active/, "and the pool's old signature doesn't bring it back");

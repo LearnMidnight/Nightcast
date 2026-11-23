@@ -1,4 +1,4 @@
-// Nightcast threshold network, stage 6 (not yet deployed; after three reviews on 23 Nov 2026).
+// Nightcast threshold network, stage 7 (not yet deployed; after three reviews on 23 Nov 2026).
 //
 // A committee of n operators (positions 1..n) shares one key that nobody holds. Any t of them
 // give the same random value for a request; fewer than t can't work it out. The design, the
@@ -9,9 +9,13 @@
 //               deployed) only fill the seats independents can't.
 //   pool link   An operator that isn't the house's counts as independent (and queues) only once
 //               `linkPool` has seen a stake pool's Ed25519 key sign for it, AND that key is on
-//               the list of pool keys fixed when the contract was deployed (a Merkle root:
-//               anyone can rebuild the list from Cardano and compare). The contract can't read
-//               Cardano, so without the list anyone could make keys and call them pools. The
+//               the list of pool keys fixed when the contract was deployed. The list is too
+//               long to deploy with, so the contract is deployed with its commitment (a
+//               SHA-256 chain over batches of eight) and anyone loads the batches afterwards
+//               (`loadPools`); only the committed batches are accepted. Anyone can rebuild the
+//               list from Cardano and compare. The contract can't read Cardano, so without the
+//               list anyone could make keys and call them pools. A pool's key can also revoke
+//               its operator (`linkPool` with `revoke`), which stands that operator down. The
 //               POOL is the unit: one operator per pool at a time, and when its operator leaves
 //               or is stood down the pool sits out two epoch lengths before it can back
 //               another (so does the operator before it can register again).
@@ -62,8 +66,9 @@
 // 720 = 6! clears every denominator for positions 1..7, whatever the committee's size, so one
 // rule serves 1 of 1, 3 of 5 and 4 of 7. A negative c_i is applied as (r - |c_i|).
 //
-// Compact 0.36.1. Notes for whoever changes this: transientHash can't take a JubjubPoint (hash its
-// coordinates); never use constructJubjubPoint on anything a caller sends (it doesn't check the
+// Compact 0.36.1. Notes for whoever changes this: nothing kept in the ledger is made with
+// transientHash (it isn't guaranteed to stay the same across upgrades); persistentHash is used
+// throughout. transientHash can't take a JubjubPoint anyway (hash its coordinates); never use constructJubjubPoint on anything a caller sends (it doesn't check the
 // curve); hashToCurve may have several valid outputs, so H is worked out once, by `request`.
 
 pragma language_version >= 0.28;
@@ -148,13 +153,6 @@ struct LinkPreimage {
   number: Field;
 }
 
-// One step up the list's Merkle tree: the node beside this one, and whether this one is the
-// right-hand child.
-export struct Step {
-  sibling: Field;
-  right: Boolean;
-}
-
 struct OutputPreimage {
   domain: Bytes<32>;
   gamma: JubjubPoint;
@@ -181,6 +179,10 @@ export ledger poolKeys: Map<Bytes<32>, Curve25519Point>;
 export ledger poolOperator: Map<Bytes<32>, Bytes<32>>;
 export ledger poolLinks: Map<Bytes<32>, Uint<64>>;
 export ledger poolOf: Map<Bytes<32>, Bytes<32>>;
+// The pool key ids loaded from the list so far, and the commitment the next batch must match
+// (all zeros once the whole list is in).
+export ledger listed: Map<Bytes<32>, Boolean>;
+export ledger poolsNext: Bytes<32>;
 // The epoch served before the current one (0: none). Recommending a successor: the seats that
 // have named an address in their epoch, by (epoch, position); the count for each (epoch,
 // address); the address two-thirds of an epoch's seats named and that epoch; and the
@@ -247,9 +249,9 @@ export sealed ledger missPenalty: Uint<16>;
 export sealed ledger allowedMisses: Uint<16>;
 // The house's four operator ids.
 export sealed ledger house: Vector<4, Bytes<32>>;
-// The root of the list of stake pool keys that can back an operator (a 13-level Merkle tree of
-// poolLeafOf(pool key id), empty places 0), fixed for the life of the contract.
-export sealed ledger poolsRoot: Field;
+// The commitment to the list of stake pool keys that can back an operator, fixed for the life
+// of the contract: poolBatchOf(first eight ids, poolBatchOf(next eight, ... zeros)).
+export sealed ledger poolsRoot: Bytes<32>;
 
 // An operator's secret (its key is that times G).
 witness operatorSecret(): Field;
@@ -264,10 +266,8 @@ witness coefficient(i: Uint<8>, a: Uint<8>, b: Uint<8>, c: Uint<8>): Uint<64>;
 witness requesterSecret(): Bytes<32>;
 // total / k, rounded down (checked in the circuit: there is no division).
 witness quotient(total: Uint<128>, k: Uint<8>): Uint<128>;
-// Where a pool key sits in the list: the 13 steps from its leaf up to the root.
-witness poolPath(pool: Bytes<32>): Vector<13, Step>;
 
-constructor(slackSecs: Uint<64>, epoch: Uint<64>, ceremony: Uint<64>, answer: Uint<64>, collateral: Uint<128>, minBond: Uint<16>, penalty: Uint<16>, fee: Uint<128>, bounty: Uint<128>, miss: Uint<16>, misses: Uint<16>, pendingMax: Uint<32>, houseIds: Vector<4, Bytes<32>>, pools: Field) {
+constructor(slackSecs: Uint<64>, epoch: Uint<64>, ceremony: Uint<64>, answer: Uint<64>, collateral: Uint<128>, minBond: Uint<16>, penalty: Uint<16>, fee: Uint<128>, bounty: Uint<128>, miss: Uint<16>, misses: Uint<16>, pendingMax: Uint<32>, houseIds: Vector<4, Bytes<32>>, pools: Bytes<32>) {
   assert(slackSecs >= 60, "the time slack must be at least 60 seconds");
   assert(answer >= 10 * slackSecs, "the answering time must be at least ten times the slack");
   assert(ceremony >= 30 * slackSecs, "the ceremony's length must be at least thirty times the slack");
@@ -297,6 +297,7 @@ constructor(slackSecs: Uint<64>, epoch: Uint<64>, ceremony: Uint<64>, answer: Ui
   maxPending = disclose(pendingMax);
   house = disclose(houseIds);
   poolsRoot = disclose(pools);
+  poolsNext = disclose(pools);
 }
 
 // ---------------------------------------------------------------- pure helpers
@@ -327,23 +328,22 @@ export pure circuit requestIdOf(deployment: ContractAddress, number: Uint<64>, r
   return persistentHash<IdPreimage>(IdPreimage { domain: pad(32, "nightcast:threshold-id:v1"), deployment: deployment, number: number as Field, requester: requester, tag: tag });
 }
 
-// A pool key's id; its leaf in the list; and a node of the list's tree.
+// A pool key's id.
 export pure circuit poolIdOf(pool: Curve25519Point): Bytes<32> {
   return persistentHash<Curve25519Point>(pool);
 }
 
-export pure circuit poolLeafOf(pool: Bytes<32>): Field {
-  return transientHash<[Field, Bytes<32>]>([1 as Field, pool]);
-}
-
-export pure circuit poolNodeOf(left: Field, right: Field): Field {
-  return transientHash<[Field, Field, Field]>([2 as Field, left, right]);
+// The commitment to a batch of eight pool key ids (zeros fill a short one) and to the batches
+// after it (`next`: the following batch's commitment, zeros after the last).
+export pure circuit poolBatchOf(batch: Vector<8, Bytes<32>>, next: Bytes<32>): Bytes<32> {
+  return persistentHash<[Bytes<32>, Vector<8, Bytes<32>>, Bytes<32>]>([pad(32, "nightcast:pool-list:v1"), batch, next]);
 }
 
 // What a pool's key signs (the 32 bytes themselves, plain Ed25519) to back an operator in this
-// deployment: `number` is how many times the pool has linked before.
-export pure circuit linkMessageOf(deployment: ContractAddress, operator: Bytes<32>, number: Uint<64>): Bytes<32> {
-  return persistentHash<LinkPreimage>(LinkPreimage { domain: pad(32, "nightcast:pool-link:v1"), deployment: deployment, operator: operator, number: number as Field });
+// deployment, or (with `revoke`) to stop backing it: `number` is how many times the pool has
+// signed before.
+export pure circuit linkMessageOf(deployment: ContractAddress, operator: Bytes<32>, number: Uint<64>, revoke: Boolean): Bytes<32> {
+  return persistentHash<LinkPreimage>(LinkPreimage { domain: revoke ? pad(32, "nightcast:pool-unlink:v1") : pad(32, "nightcast:pool-link:v1"), deployment: deployment, operator: operator, number: number as Field });
 }
 
 export pure circuit voteKey(e: Uint<64>, next: Bytes<32>): Bytes<32> {
@@ -359,9 +359,9 @@ export pure circuit outputOf(gamma: JubjubPoint): Bytes<32> {
 }
 
 // The pad for dealer d's parcel to position i in epoch e, from the point they share (by its
-// coordinates). 1852400484 is this contract's tag.
+// coordinates). SHA-256, as a field element: a parcel stays in the ledger.
 export pure circuit padOf(k: JubjubPoint, e: Uint<64>, d: Uint<8>, i: Uint<8>): Field {
-  return transientHash<[Field, Field, Field, Field, Field, Field]>([1852400484 as Field, jubjubPointX(k), jubjubPointY(k), e as Field, d as Field, i as Field]);
+  return degradeToTransient(persistentHash<[Bytes<32>, Field, Field, Field, Field, Field]>([pad(32, "nightcast:parcel:v1"), jubjubPointX(k), jubjubPointY(k), e as Field, d as Field, i as Field]));
 }
 
 pure circuit same(a: JubjubPoint, b: JubjubPoint): Boolean {
@@ -471,41 +471,81 @@ export circuit topUp(operator: Bytes<32>, slots: Uint<16>): [] {
   bonds.lookup(id).increment(n);
 }
 
-// Anyone links a stake pool to a registered operator, with the pool key's signature over
-// linkMessageOf(this contract, the operator, the pool's link count). The key must be on the
-// contract's list. The operator then counts as independent and joins the queue. A pool backs one
-// operator at a time: it can move to another only once the one it backed has left or been stood
-// down, is no longer in the serving committee, and two epoch lengths have passed since (that
-// one is then unlinked).
-export circuit linkPool(operator: Bytes<32>, sig: Ed25519Signature, pool: Curve25519Point): [] {
+// Anyone loads the next batch of the pool list: the eight pool key ids (zeros fill a short one)
+// and the commitment to the batches after it. Only the batch the contract is committed to is
+// accepted, so the list that ends up in the ledger is the one fixed at deploy.
+export circuit loadPools(batch: Vector<8, Bytes<32>>, next: Bytes<32>): [] {
+  const b = disclose(batch);
+  const n = disclose(next);
+  const zero = default<Bytes<32>>;
+  assert(poolsNext != zero, "the whole list is loaded");
+  assert(poolBatchOf(b, n) == poolsNext, "not the next batch of this contract's pool list");
+  for (const k of 0..8) {
+    if (b[k] != zero) {
+      listed.insert(b[k], true);
+    }
+  }
+  poolsNext = n;
+}
+
+// Anyone brings a stake pool key's signature over linkMessageOf(this contract, the operator,
+// the pool's count, revoke), giving the time now.
+//  - To link: the key must be on the contract's list (and that part of it loaded). The operator
+//    then counts as independent and joins the queue. A pool backs one operator at a time: it
+//    can move to another only once the one it backed has left or been stood down, is no longer
+//    in the serving committee, and two epoch lengths have passed since.
+//  - To revoke: the pool stops backing its operator, which is stood down if it was active (a
+//    seat it holds keeps its duties) and is no longer linked. Not while a committee is being
+//    seated. So a pool is never held by an operator key that has gone astray.
+// Either way the pool's count goes up, so a signature can't be used twice.
+export circuit linkPool(operator: Bytes<32>, sig: Ed25519Signature, pool: Curve25519Point, revoke: Boolean, now: Uint<64>): [] {
   const id = disclose(operator);
+  const undo = disclose(revoke);
+  const at = timeNow(disclose(now));
   assert(operators.member(id), "not a registered operator");
   const o = operators.lookup(id);
-  assert(o.active, "that operator has left");
-  assert(!o.house, "the house's operators need no pool");
-  assert(!poolOf.member(id), "that operator is linked to a pool");
   const key = disclose(pool);
   const pid = poolIdOf(key);
-  const top = fold((acc, s) => s.right ? poolNodeOf(s.sibling, acc) : poolNodeOf(acc, s.sibling), poolLeafOf(pid), poolPath(pid));
-  assert(disclose(top) == poolsRoot, "that key isn't on this contract's list of stake pools");
   const n = poolLinks.member(pid) ? poolLinks.lookup(pid) : 0;
-  if (poolOperator.member(pid)) {
-    const old = poolOperator.lookup(pid);
-    const was = operators.lookup(old);
-    assert(!was.active, "that pool's operator is still active");
-    assert(blockTimeGte((was.leftTime + 2 * epochSecs) as Uint<64>), "a pool sits out two epoch lengths after its operator left");
-    assert(current == 0 || !seatedIn(current, old), "that pool's last operator is still in the serving committee");
-    poolOf.remove(old);
+  if (undo) {
+    assert(poolOf.member(id) && poolOf.lookup(id) == pid, "that pool doesn't back this operator");
+    assert(opened == current || committees.lookup(opened).phase != Phase.seating, "nobody leaves while a committee is being seated");
+  } else {
+    assert(o.active, "that operator has left");
+    assert(!o.house, "the house's operators need no pool");
+    assert(!poolOf.member(id), "that operator is linked to a pool");
+    assert(listed.member(pid), "that key isn't on this contract's list of stake pools");
+    if (poolOperator.member(pid)) {
+      const old = poolOperator.lookup(pid);
+      const was = operators.lookup(old);
+      assert(!was.active, "that pool's operator is still active");
+      assert(blockTimeGte((was.leftTime + 2 * epochSecs) as Uint<64>), "a pool sits out two epoch lengths after its operator left");
+      assert(current == 0 || !seatedIn(current, old), "that pool's last operator is still in the serving committee");
+    }
   }
-  assert(ed25519Verify<32>(linkMessageOf(kernel.self(), id, n), disclose(sig), key), "the pool's key didn't sign for this operator");
-  poolKeys.insert(pid, key);
-  poolOperator.insert(pid, id);
+  assert(ed25519Verify<32>(linkMessageOf(kernel.self(), id, n, undo), disclose(sig), key), "the pool's key didn't sign for this operator");
   poolLinks.insert(pid, (n + 1) as Uint<64>);
-  poolOf.insert(id, pid);
-  operators.insert(id, Operator { ...o, queued: true, entry: tail });
-  independents = (independents + 1) as Uint<16>;
-  queue.insert(tail, id);
-  tail = (tail + 1) as Uint<64>;
+  if (undo) {
+    poolOf.remove(id);
+    if (o.active) {
+      operators.insert(id, Operator { ...o, active: false, queued: false, leftTime: at });
+      independents = (independents - 1) as Uint<16>;
+    }
+  } else {
+    if (poolOperator.member(pid)) {
+      const old = poolOperator.lookup(pid);
+      if (poolOf.member(old)) {
+        poolOf.remove(old);
+      }
+    }
+    poolKeys.insert(pid, key);
+    poolOperator.insert(pid, id);
+    poolOf.insert(id, pid);
+    operators.insert(id, Operator { ...o, queued: true, entry: tail });
+    independents = (independents + 1) as Uint<16>;
+    queue.insert(tail, id);
+    tail = (tail + 1) as Uint<64>;
+  }
 }
 
 // Stop being seated in new committees. A seat already held keeps its duties. Not while a
