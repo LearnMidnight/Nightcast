@@ -417,7 +417,8 @@ ok(!active(H[1]) && !active(H[2]) && ledger().houseActive === 2n, 'and the two h
 {
   // with only two house operators active, 4 of 7 can't be filled (on a copy of the state)
   const before = snapshot();
-  const c = ledger().committees.lookup(await open());
+  const opened = await open();
+  const c = ledger().committees.lookup(opened);
   ok(c.n === 5n && c.t === 3n && c.indepSeats === 4n, "when the house can't fill the size the independents call for, the committee is the largest it can: 3 of 5 with four independents, not no epoch at all");
   restore(before);
 }
@@ -525,7 +526,8 @@ await fails(call('withdraw', [1n], { op: Dd.op }), /not that much bond/, 'and no
   // a lone independent, and a house operator away (on a copy of the state)
   const before = snapshot(), t0 = now;
   await leave(H[0]);
-  const c = ledger().committees.lookup(await open());
+  const opened = await open();
+  const c = ledger().committees.lookup(opened);
   ok(ledger().independents === 1n && ledger().houseActive === 3n && c.n === 1n && c.indepSeats === 0n, 'one independent needs four house operators for 3 of 5; with three, the committee falls back to 1 of 1 and the epoch still opens');
   now = t0;
   restore(before);
