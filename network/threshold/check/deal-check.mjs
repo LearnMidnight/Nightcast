@@ -36,14 +36,17 @@ const at = (a, x) => mod(a.reduce((s, c, k) => s + c * BigInt(x) ** BigInt(k), 0
 
 // ---- every position posts an encryption key
 const ek = Array.from({ length: N }, rand);
-for (let i = 1; i <= N; i++) await call('registerKey', [BigInt(i)], { ek: ek[i - 1] });
+for (let i = 1; i <= N; i++) await call('registerKey', [BigInt(i), rt.ecMulGenerator(ek[i - 1])], { ek: ek[i - 1] });
+await fails(call('registerKey', [1n, rt.ecMulGenerator(rand())], { ek: ek[0] }), /has a key|not this secret/, "a key is posted once");
 ok(eq(ledger().encKeys.lookup(3n), rt.ecMulGenerator(ek[2])), "a position's encryption key is its secret's");
 
 // ---- dealer 1 proves its commitments, then each share
 const a = Array.from({ length: T }, rand);
-await call('dealCommit', [1n], { a });
-ok([0, 1, 2, 3].every((k) => eq(ledger().commitments.lookup(P.pureCircuits.cell(1n, BigInt(k))), rt.ecMulGenerator(a[k]))), 'the commitments are made in the circuit from the dealer\'s secret numbers');
-await fails(call('dealCommit', [1n], { a }), /has dealt/, 'a position deals only once');
+const commitsOf = (x) => x.map((c) => rt.ecMulGenerator(c));
+await fails(call('dealCommit', [1n, commitsOf([a[0], a[1], a[2], rand()])], { a }), /not this coefficient/, "a commitment the dealer doesn't know the secret number of can't be posted");
+await call('dealCommit', [1n, commitsOf(a)], { a });
+ok([0, 1, 2, 3].every((k) => eq(ledger().commitments.lookup(P.pureCircuits.cell(1n, BigInt(k))), rt.ecMulGenerator(a[k]))), 'the commitments on chain are the dealer\'s secret numbers times G');
+await fails(call('dealCommit', [1n, commitsOf(a)], { a }), /has dealt/, 'a position deals only once');
 
 await fails(call('dealShare', [1n, 5n], { s: mod(at(a, 5) + 1n), e: rand() }), /not this dealer's share/, 'a wrong share can\'t be posted');
 await fails(call('dealShare', [1n, 5n], { s: at(a, 4), e: rand() }), /not this dealer's share/, 'nor another position\'s share');
@@ -66,8 +69,8 @@ console.log(`${checks} checks passed`);
 const report = async (what, f) => { try { console.log(`edge  ${what}: ${await f()}`); } catch (e) { console.log(`edge  ${what}: REFUSED (${String(e?.message ?? e).slice(0, 100)})`); } };
 const G = rt.ecMulGenerator(1n);
 const show = (pt) => (eq(pt, G) ? 'gave 1·G (so it was reduced mod r)' : pt.x === 0n && pt.y === 1n ? 'gave the identity (so it was reduced mod r)' : `gave another point x=${String(pt.x).slice(0, 12)}…`);
-await report('a scalar equal to r', async () => show(await call('castEdge', [r])));
-await report('a scalar equal to r + 1', async () => show(await call('castEdge', [r + 1n])));
-await report('a share of s + r (the same point)', async () => { await call('dealCommit', [2n], { a }); await call('dealShare', [2n, 1n], { s: at(a, 1) + r, e: rand() }); return 'accepted (the receiver must reduce what it opens mod r)'; });
+await report('a scalar equal to r', async () => show(await call('castEdge', [r, G])));
+await report('a scalar equal to r + 1', async () => show(await call('castEdge', [r + 1n, G])));
+await report('a share of s + r (the same point)', async () => { await call('dealCommit', [2n, commitsOf(a)], { a }); await call('dealShare', [2n, 1n], { s: at(a, 1) + r, e: rand() }); return 'accepted (the receiver must reduce what it opens mod r)'; });
 await report('a point off the curve (1, 2)', async () => { const q = await call('pointEdge', [{ x: 1n, y: 2n }]); return `accepted, doubled to x=${String(q.x).slice(0, 12)}…`; });
 await report('the point of order 2 (0, -1)', async () => { const q = await call('pointEdge', [{ x: 0n, y: p - 1n }]); return `accepted, doubled to (${q.x}, ${q.y})${q.x === 0n && q.y === 1n ? ' = the identity' : ''}`; });

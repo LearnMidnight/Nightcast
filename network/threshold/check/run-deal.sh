@@ -8,7 +8,23 @@ read -r -a C <<< "${COMPACTC:-compactc}"
 "${C[@]}" --version | grep -q '0\.36\.' || { echo "needs Compact 0.36.x (got $("${C[@]}" --version))" >&2; exit 1; }
 rm -rf out-deal
 start=$(date +%s)
-"${C[@]}" ../src/deal-probe.compact out-deal
+if ! "${C[@]}" ../src/deal-probe.compact out-deal; then
+  # Which circuit stops the compiler? Compile each on its own (the others cut out).
+  echo "== the compiler stopped: trying each circuit on its own"
+  for c in registerKey dealCommit dealShare castEdge pointEdge; do
+    awk -v keep="$c" '
+      /^export circuit / { name = $3; sub(/\(.*/, "", name); skip = (name != keep) }
+      !skip { print }
+      skip && /^}/ { skip = 0 }
+    ' ../src/deal-probe.compact > "/tmp/deal-probe-$c.compact"
+    if "${C[@]}" "/tmp/deal-probe-$c.compact" "/tmp/deal-probe-out-$c" > "/tmp/deal-probe-$c.log" 2>&1; then
+      echo "$c: compiles"
+    else
+      echo "$c: STOPS ($(grep -m1 -E "must enable|Exception|error" "/tmp/deal-probe-$c.log" | cut -c1-120))"
+    fi
+  done
+  exit 1
+fi
 echo "compiled with keys in $(( $(date +%s) - start )) s"
 echo "== circuit sizes (prover key, verifier key, zkir)"
 for f in out-deal/keys/*.prover; do
