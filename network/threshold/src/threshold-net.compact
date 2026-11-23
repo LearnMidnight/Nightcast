@@ -1,4 +1,4 @@
-// Nightcast threshold network, stage 8 (not yet deployed; after three reviews on 23 Nov 2026).
+// Nightcast threshold network, stage 9 (not yet deployed; after four reviews on 23 Nov 2026).
 //
 // A committee of n operators (positions 1..n) shares one key that nobody holds. Any t of them
 // give the same random value for a request; fewer than t can't work it out. The design, the
@@ -27,9 +27,12 @@
 //               chooses, and an operator's place is its pool's place in the list (fixed at
 //               deploy, by a public rule), not the moment it chose to join: pools can't
 //               arrange to sit together. If the house can't fill the size the independents
-//               call for, the committee is the largest it can fill (7, then 5, then 1).
-//               Nobody can leave while a committee is being seated, so a committee that was
-//               sized can always be filled.
+//               call for, the committee is the largest it can fill (7, then 5; and 1, a house
+//               seat, only while there are two independents or fewer, when the house holds
+//               the threshold anyway).
+//               Nobody can leave or join the ring while a committee is being seated, so a
+//               committee that was sized can always be filled, and by the operators it was
+//               sized for.
 //   ceremony    dealCommit, dealShare, finish: a dealer PROVES its deal as it posts it (no
 //               complaints); the group key is the sum of the dealers that finished. Seating has
 //               its own time; dealing's clock starts when the last seat is taken. A seat that
@@ -182,6 +185,8 @@ export ledger poolKeys: Map<Bytes<32>, Curve25519Point>;
 export ledger poolOperator: Map<Bytes<32>, Bytes<32>>;
 export ledger poolLinks: Map<Bytes<32>, Uint<64>>;
 export ledger poolOf: Map<Bytes<32>, Bytes<32>>;
+// When a pool last revoked its operator: it sits out from then.
+export ledger poolFreed: Map<Bytes<32>, Uint<64>>;
 // The pool key ids loaded from the list so far, each with its place in the list (from 1); how
 // many places have been loaded; and the commitment the next batch must match (all zeros once
 // the whole list is in).
@@ -248,8 +253,8 @@ export sealed ledger epochSecs: Uint<64>;
 // What a request costs, and the part of it that goes to whoever sends `finalise`.
 export sealed ledger requestFee: Uint<128>;
 export sealed ledger finaliseBounty: Uint<128>;
-// The slots a seat loses for not answering a request that goes void, and how many requests a
-// seat may miss in a term before it is stood down.
+// The slots a seat loses for not answering a request that goes void, and how many answering
+// times a seat may miss between two epoch openings before it is stood down.
 export sealed ledger missPenalty: Uint<16>;
 export sealed ledger allowedMisses: Uint<16>;
 // The house's four operator ids.
@@ -433,7 +438,10 @@ circuit seatedIn(e: Uint<64>, id: Bytes<32>): Boolean {
 
 // Operator `id` takes its pool's place `i` in the ring. `prior` is the place just before it (0
 // if it is the first): the caller names it, and it is checked, so the ring stays in list order.
+// Not while a committee is being seated: it was sized for the ring as it was, and a place just
+// after the turn would be seated at once.
 circuit ringJoin(i: Uint<32>, id: Bytes<32>, prior: Uint<32>): [] {
+  assert(opened == current || committees.lookup(opened).phase != Phase.seating, "nobody joins the ring while a committee is being seated");
   assert(!ringOp.member(i), "that pool's place in the ring is taken");
   assert(prior == 0 || ringOp.member(prior), "that isn't a place in the ring");
   const nx = ringNext.lookup(prior);
@@ -515,7 +523,8 @@ export circuit topUp(operator: Bytes<32>, slots: Uint<16>): [] {
 // Anyone loads the next batch of the pool list: the eight pool key ids (zeros fill a short one)
 // and the commitment to the batches after it. Only the batch the contract is committed to is
 // accepted, so the list that ends up in the ledger is the one fixed at deploy, in its order:
-// each key's place in the list is its operator's place in the ring.
+// each key's place in the list is its operator's place in the ring (a key listed twice keeps
+// its first place).
 export circuit loadPools(batch: Vector<8, Bytes<32>>, next: Bytes<32>): [] {
   const b = disclose(batch);
   const n = disclose(next);
@@ -523,7 +532,7 @@ export circuit loadPools(batch: Vector<8, Bytes<32>>, next: Bytes<32>): [] {
   assert(poolsNext != zero, "the whole list is loaded");
   assert(poolBatchOf(b, n) == poolsNext, "not the next batch of this contract's pool list");
   for (const k of 0..8) {
-    if (b[k] != zero) {
+    if (b[k] != zero && !listed.member(b[k])) {
       listed.insert(b[k], (poolCount + k + 1) as Uint<32>);
     }
   }
@@ -536,8 +545,9 @@ export circuit loadPools(batch: Vector<8, Bytes<32>>, next: Bytes<32>): [] {
 //  - To link: the key must be on the contract's list (and that part of it loaded). The operator
 //    then counts as independent and takes its pool's place in the ring (`prior`: the place
 //    before it, 0 if it is first; ignored when revoking). A pool backs one operator at a time: it
-//    can move to another only once the one it backed has left or been stood down, is no longer
-//    in the serving committee, and two epoch lengths have passed since.
+//    can move to another only once the one it backed has left, been stood down or been revoked,
+//    is no longer in the serving committee, and two epoch lengths have passed since. What an
+//    operator does after its pool revoked it doesn't hold the pool.
 //  - To revoke: the pool stops backing its operator, which is stood down if it was active (a
 //    seat it holds keeps its duties) and is no longer linked. Not while a committee is being
 //    seated. So a pool is never held by an operator key that has gone astray.
@@ -561,9 +571,15 @@ export circuit linkPool(operator: Bytes<32>, sig: Ed25519Signature, pool: Curve2
     assert(listed.member(pid), "that key isn't on this contract's list of stake pools");
     if (poolOperator.member(pid)) {
       const old = poolOperator.lookup(pid);
-      const was = operators.lookup(old);
-      assert(!was.active, "that pool's operator is still active");
-      assert(blockTimeGte((was.leftTime + 2 * epochSecs) as Uint<64>), "a pool sits out two epoch lengths after its operator left");
+      if (poolOf.member(old) && poolOf.lookup(old) == pid) {
+        // the pool still backs `old`: it must have left or been stood down, two epoch lengths ago
+        const was = operators.lookup(old);
+        assert(!was.active, "that pool's operator is still active");
+        assert(blockTimeGte((was.leftTime + 2 * epochSecs) as Uint<64>), "a pool sits out two epoch lengths after its operator left");
+      } else {
+        // the pool revoked `old`, which is no longer its concern whatever it has done since
+        assert(!poolFreed.member(pid) || blockTimeGte((poolFreed.lookup(pid) + 2 * epochSecs) as Uint<64>), "a pool sits out two epoch lengths after its operator left");
+      }
       assert(current == 0 || !seatedIn(current, old), "that pool's last operator is still in the serving committee");
     }
   }
@@ -571,6 +587,7 @@ export circuit linkPool(operator: Bytes<32>, sig: Ed25519Signature, pool: Curve2
   poolLinks.insert(pid, (n + 1) as Uint<64>);
   if (undo) {
     poolOf.remove(id);
+    poolFreed.insert(pid, at);
     if (o.active) {
       operators.insert(id, Operator { ...o, active: false, leftTime: at });
       ringLeave(listed.lookup(pid));
@@ -578,7 +595,7 @@ export circuit linkPool(operator: Bytes<32>, sig: Ed25519Signature, pool: Curve2
   } else {
     if (poolOperator.member(pid)) {
       const old = poolOperator.lookup(pid);
-      if (poolOf.member(old)) {
+      if (poolOf.member(old) && poolOf.lookup(old) == pid) {
         poolOf.remove(old);
       }
     }
@@ -677,8 +694,10 @@ circuit review(e: Uint<64>, at: Uint<64>): [] {
 // none 1 of 1; 1 to 3, 3 of 5; 4 or more, 4 of 7. Independents take as many seats as there are
 // of them; the house fills the rest, so from 3 independents it is below the threshold, and from
 // 7 it has no seat. If the house hasn't the operators for that size, the committee is the
-// largest it can fill: 5 (independents first), or 1 (a house seat), so a new epoch can open
-// whenever one house operator is active.
+// largest it can fill: 5 (independents first), or, while there are two independents or fewer
+// (when the house holds the threshold anyway), 1 (a house seat). With three or more
+// independents and too few house operators even for 5, no epoch opens until the house is back:
+// a committee of the house alone never replaces one the independents had a say in.
 export circuit openEpoch(now: Uint<64>): Uint<64> {
   const at = timeNow(disclose(now));
   if (opened != current) {
@@ -698,7 +717,7 @@ export circuit openEpoch(now: Uint<64>): Uint<64> {
   const mine5 = (i >= 5 ? 5 : i) as Uint<8>;
   const ok7 = i >= 4 && h >= 7 - mine7;
   const ok5 = i >= 1 && h >= 5 - mine5;
-  assert(ok7 || ok5 || h >= 1, "not enough house operators to fill the committee");
+  assert(ok7 || ok5 || (h >= 1 && i <= 2), "not enough house operators to fill the committee");
   const n = (ok7 ? 7 : (ok5 ? 5 : 1)) as Uint<8>;
   const t = (ok7 ? 4 : (ok5 ? 3 : 1)) as Uint<8>;
   const mine = (ok7 ? mine7 : (ok5 ? mine5 : 0)) as Uint<8>;

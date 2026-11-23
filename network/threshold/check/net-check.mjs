@@ -1,4 +1,4 @@
-// The threshold network, stage 8, in memory (compact-runtime): the registry and six epochs in a
+// The threshold network, stage 9, in memory (compact-runtime): the registry and six epochs in a
 // row on one contract. The committee's size follows the number of independents (1 of 1, 3 of 5,
 // 4 of 7), seats go round the ring of independents and then to the house, a ceremony that fails costs
 // the seats that didn't deal, and for each size EVERY set of t answers must give the off-chain
@@ -273,11 +273,11 @@ const A = independent('a'), B = independent('b');
   await fails(link(B, A.pool), /pool sits out/, "the pool can't move to a fresh key straight away: it sits out two epoch lengths");
   await fails(call('register', [{ bytes: A.payout }, 0n, 0n], { op: A.op }), /sits out/, 'and the operator it revoked sits out as long');
   now += 2 * Number(EPOCH);
+  await call('register', [{ bytes: A.payout }, 0n, 0n], { op: A.op });
+  ok(active(A) && !linked(A) && ledger().independents === 0n, 'after the sit-out the revoked operator can register again, but it has no pool');
   await fails(link(B, A.pool, signed(A.pool, P.pureCircuits.linkMessageOf(SELF(), B.id, 0n, false))), /didn't sign/, "a pool's next link signs its next number");
   await link(B, A.pool);
-  ok(linked(B) && !linked(A) && ledger().poolLinks.lookup(A.pool.id) === 3n && ledger().independents === 1n, 'after the sit-out the pool can back another operator');
-  await call('register', [{ bytes: A.payout }, 0n, 0n], { op: A.op });
-  ok(active(A) && !linked(A) && ledger().independents === 1n, 'the unlinked operator can register again, but waits for a pool');
+  ok(linked(B) && !linked(A) && ledger().poolLinks.lookup(A.pool.id) === 3n && ledger().independents === 1n, "and the pool can back another operator, whatever the one it revoked is doing: it can't hold the pool");
   await fails(link(A, A.pool, first), /still active/, "and the pool's old signature doesn't bring it back");
   now = t0;
   restore(before);
@@ -404,6 +404,10 @@ const e3 = await open();
   ok(c.n === 7n && c.t === 4n && c.indepSeats === 4n, 'with 4 independents the committee is 4 of 7: four seats for them, three for the house (below the threshold)');
 }
 await fails(leave(A), /being seated/, "an operator the committee was sized for can't leave while it is being seated");
+const F = operator('f');
+F.pool = POOLS[7];
+await call('register', [{ bytes: F.payout }, 12n, 0n], { op: F.op });
+await fails(link(F), /joins the ring while a committee is being seated/, "and nobody can join the ring while it is being seated: a place just after the turn would take a seat the committee wasn't sized for");
 {
   // the seats aren't all filled in time (on a copy of the state)
   const before = snapshot(), t0 = now;
