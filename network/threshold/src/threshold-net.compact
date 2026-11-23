@@ -1,13 +1,14 @@
-// Nightcast threshold network, stage 7 (not yet deployed; after three reviews on 23 Nov 2026).
+// Nightcast threshold network, stage 8 (not yet deployed; after three reviews on 23 Nov 2026).
 //
 // A committee of n operators (positions 1..n) shares one key that nobody holds. Any t of them
 // give the same random value for a request; fewer than t can't work it out. The design, the
 // decisions and the reviews are in the design doc ("Nightcast threshold network: design").
 //
 //   registry    register (a key, a payout address, a bond), topUp, leave, withdraw. Independent
-//               operators wait in a queue; the house's operators (named when the contract is
-//               deployed) only fill the seats independents can't.
-//   pool link   An operator that isn't the house's counts as independent (and queues) only once
+//               operators stand in a ring, in the order of their pools in the contract's pool
+//               list; the house's operators (named when the contract is deployed) only fill
+//               the seats independents can't.
+//   pool link   An operator that isn't the house's counts as independent (and joins the ring) only once
 //               `linkPool` has seen a stake pool's Ed25519 key sign for it, AND that key is on
 //               the list of pool keys fixed when the contract was deployed. The list is too
 //               long to deploy with, so the contract is deployed with its commitment (a
@@ -20,11 +21,13 @@
 //               or is stood down the pool sits out two epoch lengths before it can back
 //               another (so does the operator before it can register again).
 //   epochs      openEpoch sizes the next committee from the number of independents (1 of 1 with
-//               none, 3 of 5 with 1 to 3, 4 of 7 from 4), and `seat` fills it: independents from
-//               the front of the queue (the longest-waiting first; a committee that has served
-//               goes to the back), then the house, taken in turn. No randomness, and nothing
-//               the caller chooses. If the house can't fill the size the independents call
-//               for, the committee is the largest it can fill (7, then 5, then 1).
+//               none, 3 of 5 with 1 to 3, 4 of 7 from 4), and `seat` fills it: independents
+//               round the ring from where the last committee stopped, then the house, taken in
+//               turn. So everyone serves in turn, with no randomness and nothing the caller
+//               chooses, and an operator's place is its pool's place in the list (fixed at
+//               deploy, by a public rule), not the moment it chose to join: pools can't
+//               arrange to sit together. If the house can't fill the size the independents
+//               call for, the committee is the largest it can fill (7, then 5, then 1).
 //               Nobody can leave while a committee is being seated, so a committee that was
 //               sized can always be filled.
 //   ceremony    dealCommit, dealShare, finish: a dealer PROVES its deal as it posts it (no
@@ -81,22 +84,19 @@ export enum Status { pending, fulfilled }
 export struct Operator {
   // Its key: its id is this key's hash, parcels are encrypted to it, and it proves the secret.
   key: JubjubPoint;
-  // Where its withdrawn bond (and, from stage 2b, its fees) go.
+  // Where its withdrawn bond and its fees go.
   payout: UserAddress;
-  // One of the house's operators (named at deploy): it never queues, and fills only spare seats.
+  // One of the house's operators (named at deploy): it fills only the seats independents can't.
   house: Boolean;
   active: Boolean;
-  // Waiting in the queue for a seat (independents only).
-  queued: Boolean;
-  // When it left or was stood down (seconds; 0 while active), and its one live place in the queue.
+  // When it left or was stood down (seconds; 0 while active).
   leftTime: Uint<64>;
-  entry: Uint<64>;
 }
 
 export struct Committee {
   n: Uint<8>;
   t: Uint<8>;
-  // Seats for independents (positions 1..indepSeats, from the queue); the rest are the house's.
+  // Seats for independents (positions 1..indepSeats, from the ring); the rest are the house's.
   indepSeats: Uint<8>;
   phase: Phase;
   // Seats taken, and dealers that finished (posted every parcel).
@@ -167,11 +167,14 @@ export ledger operators: Map<Bytes<32>, Operator>;
 export ledger bonds: Map<Bytes<32>, Counter>;
 export ledger independents: Uint<16>;
 export ledger houseActive: Uint<8>;
-// The independents' queue: entries head..tail-1. A stale entry (its operator left, or was seated
-// through a newer entry) is skipped when it reaches the front.
-export ledger queue: Map<Uint<64>, Bytes<32>>;
-export ledger head: Uint<64>;
-export ledger tail: Uint<64>;
+// The ring of independents: every active operator with a pool behind it, at its pool's place in
+// the list (1, 2, 3, ...), linked both ways in that order. Place 0 is the ring's start and end,
+// and holds nobody. `cursor` is the place seated last (0 before any): the next seat goes to the
+// place after it, round and round.
+export ledger ringNext: Map<Uint<32>, Uint<32>>;
+export ledger ringPrev: Map<Uint<32>, Uint<32>>;
+export ledger ringOp: Map<Uint<32>, Bytes<32>>;
+export ledger cursor: Uint<32>;
 // Stake pools, by pool key id (a hash of the key): the key itself, the operator it is linked to
 // now, and how many times it has linked (each link signs the next number, so an old signature
 // can't be used again). And each linked operator's pool key id.
@@ -179,9 +182,11 @@ export ledger poolKeys: Map<Bytes<32>, Curve25519Point>;
 export ledger poolOperator: Map<Bytes<32>, Bytes<32>>;
 export ledger poolLinks: Map<Bytes<32>, Uint<64>>;
 export ledger poolOf: Map<Bytes<32>, Bytes<32>>;
-// The pool key ids loaded from the list so far, and the commitment the next batch must match
-// (all zeros once the whole list is in).
-export ledger listed: Map<Bytes<32>, Boolean>;
+// The pool key ids loaded from the list so far, each with its place in the list (from 1); how
+// many places have been loaded; and the commitment the next batch must match (all zeros once
+// the whole list is in).
+export ledger listed: Map<Bytes<32>, Uint<32>>;
+export ledger poolCount: Uint<32>;
 export ledger poolsNext: Bytes<32>;
 // The epoch served before the current one (0: none). Recommending a successor: the seats that
 // have named an address in their epoch, by (epoch, position); the count for each (epoch,
@@ -221,7 +226,7 @@ export ledger pending: Counter;
 export ledger lastMiss: Map<Bytes<32>, Uint<64>>;
 export ledger houseNext: Uint<8>;
 // What each operator has earned and not yet claimed (atoms); requests it missed since it was
-// last queued or checked; and atoms left over from sharing fees (they stay in the contract).
+// last reviewed; and atoms left over from sharing fees (they stay in the contract).
 export ledger earned: Map<Bytes<32>, Uint<128>>;
 export ledger missed: Map<Bytes<32>, Uint<16>>;
 export ledger dust: Uint<128>;
@@ -298,6 +303,8 @@ constructor(slackSecs: Uint<64>, epoch: Uint<64>, ceremony: Uint<64>, answer: Ui
   house = disclose(houseIds);
   poolsRoot = disclose(pools);
   poolsNext = disclose(pools);
+  ringNext.insert(0, 0);
+  ringPrev.insert(0, 0);
 }
 
 // ---------------------------------------------------------------- pure helpers
@@ -424,12 +431,49 @@ circuit seatedIn(e: Uint<64>, id: Bytes<32>): Boolean {
   return sits(e, 1, id) || sits(e, 2, id) || sits(e, 3, id) || sits(e, 4, id) || sits(e, 5, id) || sits(e, 6, id) || sits(e, 7, id);
 }
 
+// Operator `id` takes its pool's place `i` in the ring. `prior` is the place just before it (0
+// if it is the first): the caller names it, and it is checked, so the ring stays in list order.
+circuit ringJoin(i: Uint<32>, id: Bytes<32>, prior: Uint<32>): [] {
+  assert(!ringOp.member(i), "that pool's place in the ring is taken");
+  assert(prior == 0 || ringOp.member(prior), "that isn't a place in the ring");
+  const nx = ringNext.lookup(prior);
+  assert(prior < i && (nx == 0 || i < nx), "that isn't the place before this pool's in the ring");
+  ringNext.insert(i, nx);
+  ringPrev.insert(i, prior);
+  ringNext.insert(prior, i);
+  ringPrev.insert(nx, i);
+  ringOp.insert(i, id);
+  independents = (independents + 1) as Uint<16>;
+}
+
+// The operator at place `i` steps out of the ring. If it was the one seated last, the turn
+// stays where it was.
+circuit ringLeave(i: Uint<32>): [] {
+  const pv = ringPrev.lookup(i);
+  const nx = ringNext.lookup(i);
+  ringNext.insert(pv, nx);
+  ringPrev.insert(nx, pv);
+  ringNext.remove(i);
+  ringPrev.remove(i);
+  ringOp.remove(i);
+  if (cursor == i) {
+    cursor = pv;
+  }
+  independents = (independents - 1) as Uint<16>;
+}
+
+// The place in the ring of the pool behind operator `id` (which must be linked).
+circuit placeOf(id: Bytes<32>): Uint<32> {
+  return listed.lookup(poolOf.lookup(id));
+}
+
 // Join (or rejoin after leaving) as an operator, with `slots` more bond paid in by the caller.
 // Proving the key's secret rules out the identity, odd points and keys nobody can use. An
-// operator that isn't the house's joins the back of the queue if a stake pool is linked to it;
-// if not, it waits for `linkPool`. One that left or was stood down sits out two epoch lengths
-// first (the house's operators don't: they are the seats of last resort).
-export circuit register(payout: UserAddress, slots: Uint<16>): [] {
+// operator that isn't the house's joins the ring if a stake pool is linked to it (`prior`: the
+// place before its pool's, as for `linkPool`; anything otherwise); if not, it waits for
+// `linkPool`. One that left or was stood down sits out two epoch lengths first (the house's
+// operators don't: they are the seats of last resort).
+export circuit register(payout: UserAddress, slots: Uint<16>, prior: Uint<32>): [] {
   const key = disclose(ecMulGenerator(operatorSecret() as JubjubScalar));
   assert(!isIdentity(key), "identity key not allowed");
   const id = keyIdOf(key);
@@ -447,16 +491,13 @@ export circuit register(payout: UserAddress, slots: Uint<16>): [] {
     bonds.lookup(id).increment(n);
   }
   assert(!bonds.lookup(id).lessThan(minBondSlots), "the bond is below the minimum");
-  const linked = poolOf.member(id);
   missed.insert(id, 0);
-  operators.insert(id, Operator { key: key, payout: disclose(payout), house: hs, active: true, queued: !hs && linked, leftTime: 0, entry: tail });
+  operators.insert(id, Operator { key: key, payout: disclose(payout), house: hs, active: true, leftTime: 0 });
   if (hs) {
     houseActive = (houseActive + 1) as Uint<8>;
   } else {
-    if (linked) {
-      independents = (independents + 1) as Uint<16>;
-      queue.insert(tail, id);
-      tail = (tail + 1) as Uint<64>;
+    if (poolOf.member(id)) {
+      ringJoin(placeOf(id), id, disclose(prior));
     }
   }
 }
@@ -473,7 +514,8 @@ export circuit topUp(operator: Bytes<32>, slots: Uint<16>): [] {
 
 // Anyone loads the next batch of the pool list: the eight pool key ids (zeros fill a short one)
 // and the commitment to the batches after it. Only the batch the contract is committed to is
-// accepted, so the list that ends up in the ledger is the one fixed at deploy.
+// accepted, so the list that ends up in the ledger is the one fixed at deploy, in its order:
+// each key's place in the list is its operator's place in the ring.
 export circuit loadPools(batch: Vector<8, Bytes<32>>, next: Bytes<32>): [] {
   const b = disclose(batch);
   const n = disclose(next);
@@ -482,23 +524,25 @@ export circuit loadPools(batch: Vector<8, Bytes<32>>, next: Bytes<32>): [] {
   assert(poolBatchOf(b, n) == poolsNext, "not the next batch of this contract's pool list");
   for (const k of 0..8) {
     if (b[k] != zero) {
-      listed.insert(b[k], true);
+      listed.insert(b[k], (poolCount + k + 1) as Uint<32>);
     }
   }
+  poolCount = (poolCount + 8) as Uint<32>;
   poolsNext = n;
 }
 
 // Anyone brings a stake pool key's signature over linkMessageOf(this contract, the operator,
 // the pool's count, revoke), giving the time now.
 //  - To link: the key must be on the contract's list (and that part of it loaded). The operator
-//    then counts as independent and joins the queue. A pool backs one operator at a time: it
+//    then counts as independent and takes its pool's place in the ring (`prior`: the place
+//    before it, 0 if it is first; ignored when revoking). A pool backs one operator at a time: it
 //    can move to another only once the one it backed has left or been stood down, is no longer
 //    in the serving committee, and two epoch lengths have passed since.
 //  - To revoke: the pool stops backing its operator, which is stood down if it was active (a
 //    seat it holds keeps its duties) and is no longer linked. Not while a committee is being
 //    seated. So a pool is never held by an operator key that has gone astray.
 // Either way the pool's count goes up, so a signature can't be used twice.
-export circuit linkPool(operator: Bytes<32>, sig: Ed25519Signature, pool: Curve25519Point, revoke: Boolean, now: Uint<64>): [] {
+export circuit linkPool(operator: Bytes<32>, sig: Ed25519Signature, pool: Curve25519Point, revoke: Boolean, now: Uint<64>, prior: Uint<32>): [] {
   const id = disclose(operator);
   const undo = disclose(revoke);
   const at = timeNow(disclose(now));
@@ -528,8 +572,8 @@ export circuit linkPool(operator: Bytes<32>, sig: Ed25519Signature, pool: Curve2
   if (undo) {
     poolOf.remove(id);
     if (o.active) {
-      operators.insert(id, Operator { ...o, active: false, queued: false, leftTime: at });
-      independents = (independents - 1) as Uint<16>;
+      operators.insert(id, Operator { ...o, active: false, leftTime: at });
+      ringLeave(listed.lookup(pid));
     }
   } else {
     if (poolOperator.member(pid)) {
@@ -541,10 +585,7 @@ export circuit linkPool(operator: Bytes<32>, sig: Ed25519Signature, pool: Curve2
     poolKeys.insert(pid, key);
     poolOperator.insert(pid, id);
     poolOf.insert(id, pid);
-    operators.insert(id, Operator { ...o, queued: true, entry: tail });
-    independents = (independents + 1) as Uint<16>;
-    queue.insert(tail, id);
-    tail = (tail + 1) as Uint<64>;
+    ringJoin(listed.lookup(pid), id, disclose(prior));
   }
 }
 
@@ -557,12 +598,12 @@ export circuit leave(now: Uint<64>): [] {
   const o = operators.lookup(id);
   assert(o.active, "already left");
   assert(opened == current || committees.lookup(opened).phase != Phase.seating, "nobody leaves while a committee is being seated");
-  operators.insert(id, Operator { ...o, active: false, queued: false, leftTime: at });
+  operators.insert(id, Operator { ...o, active: false, leftTime: at });
   if (o.house) {
     houseActive = (houseActive - 1) as Uint<8>;
   } else {
     if (poolOf.member(id)) {
-      independents = (independents - 1) as Uint<16>;
+      ringLeave(placeOf(id));
     }
   }
 }
@@ -601,11 +642,11 @@ export circuit withdraw(slots: Uint<16>): [] {
 
 // ---------------------------------------------------------------- the ceremony
 
-// Epoch e's committee is done seating: go through its seats. An operator that missed in too
+// Epoch e's committee has had its time: go through its seats. An operator that missed in too
 // many answering times, or whose bond is now below the minimum, is stood down (an independent
-// and its pool sit out, then it must register again; a house operator can register again at
-// once). Otherwise an independent goes back in the queue.
-circuit requeue(e: Uint<64>, at: Uint<64>): [] {
+// leaves the ring, and it and its pool sit out before it can register again; a house operator
+// can register again at once).
+circuit review(e: Uint<64>, at: Uint<64>): [] {
   for (const k of 0..7) {
     const sk = seatKey(e, (k + 1) as Uint<8>);
     if (members.member(sk)) {
@@ -615,19 +656,13 @@ circuit requeue(e: Uint<64>, at: Uint<64>): [] {
         const m = missed.member(id) ? missed.lookup(id) : 0;
         missed.insert(id, 0);
         if (m > allowedMisses || bonds.lookup(id).lessThan(minBondSlots)) {
-          operators.insert(id, Operator { ...o, active: false, queued: false, leftTime: at });
+          operators.insert(id, Operator { ...o, active: false, leftTime: at });
           if (o.house) {
             houseActive = (houseActive - 1) as Uint<8>;
           } else {
             if (poolOf.member(id)) {
-              independents = (independents - 1) as Uint<16>;
+              ringLeave(placeOf(id));
             }
-          }
-        } else {
-          if (!o.house && !o.queued && poolOf.member(id)) {
-            operators.insert(id, Operator { ...o, queued: true, entry: tail });
-            queue.insert(tail, id);
-            tail = (tail + 1) as Uint<64>;
           }
         }
       }
@@ -637,8 +672,8 @@ circuit requeue(e: Uint<64>, at: Uint<64>): [] {
 
 // Anyone opens the next epoch's committee, giving the time now; its seats must be filled within
 // one ceremony length from now. Only when the newest epoch opened has failed, or is being served and
-// has served its epoch length. The committees that are done seating (the failed one, then the
-// one serving) rejoin the back of the queue, and the size follows the number of independents:
+// has served its epoch length. The seats of the failed one and of the one serving are reviewed
+// (stood down if they missed too much), and the size follows the number of independents:
 // none 1 of 1; 1 to 3, 3 of 5; 4 or more, 4 of 7. Independents take as many seats as there are
 // of them; the house fills the rest, so from 3 independents it is below the threshold, and from
 // 7 it has no seat. If the house hasn't the operators for that size, the committee is the
@@ -648,14 +683,14 @@ export circuit openEpoch(now: Uint<64>): Uint<64> {
   const at = timeNow(disclose(now));
   if (opened != current) {
     assert(committees.lookup(opened).phase == Phase.failed, "the newest epoch's ceremony is still running");
-    requeue(opened, at);
+    review(opened, at);
   } else {
     if (current > 0) {
       assert(blockTimeGte((committees.lookup(current).since + epochSecs) as Uint<64>), "the serving epoch isn't over");
     }
   }
   if (current > 0) {
-    requeue(current, at);
+    review(current, at);
   }
   const i = independents;
   const h = houseActive;
@@ -680,7 +715,6 @@ circuit place(e: Uint<64>, c: Committee, id: Bytes<32>, o: Operator, at: Uint<64
   members.insert(seatKey(e, pos), id);
   seats.insert(seatKey(e, pos), o.key);
   lastSeat.insert(id, e);
-  operators.insert(id, Operator { ...o, queued: false });
   if (pos == c.n) {
     committees.insert(e, Committee { ...c, seated: pos, phase: Phase.dealing, dealBy: (at + ceremonySecs) as Uint<64> });
   } else {
@@ -703,11 +737,9 @@ circuit after(k: Uint<8>): Uint<8> {
 }
 
 // Anyone fills the next seat of epoch e's committee, giving the time now (before the seating
-// deadline). While independents' seats are open, it is the front of the queue: entries that
-// aren't their operator's one live place (it left, was seated, or queued again since) are
-// dropped, up to eight in a call, until one is seated. After the independents, the house: the
-// next of its four in turn that is active and not yet seated in this epoch. The caller chooses
-// nothing.
+// deadline). While independents' seats are open, it is the next place round the ring after the
+// one seated last. After the independents, the house: the next of its four in turn that is
+// active and not yet seated in this epoch. The caller chooses nothing.
 export circuit seat(e: Uint<64>, now: Uint<64>): [] {
   const ee = disclose(e);
   const at = timeNow(disclose(now));
@@ -716,22 +748,12 @@ export circuit seat(e: Uint<64>, now: Uint<64>): [] {
   assert(c.phase == Phase.seating, "that committee isn't seating");
   assert(blockTimeLt(c.dealBy), "the time for seating is over");
   if (c.seated < c.indepSeats) {
-    assert(head < tail, "the queue is empty");
-    for (const k of 0..8) {
-      if (head < tail && committees.lookup(ee).seated == c.seated) {
-        const here = head;
-        const id = queue.lookup(here);
-        head = (here + 1) as Uint<64>;
-        const o = operators.lookup(id);
-        if (o.active && o.queued && o.entry == here) {
-          if (lastSeat.member(id) && lastSeat.lookup(id) == ee) {
-            operators.insert(id, Operator { ...o, queued: false });
-          } else {
-            place(ee, c, id, o, at);
-          }
-        }
-      }
-    }
+    const nx = ringNext.lookup(cursor);
+    const i = nx == 0 ? ringNext.lookup(0) : nx;
+    assert(i != 0, "the ring is empty");
+    const id = ringOp.lookup(i);
+    cursor = i;
+    place(ee, c, id, operators.lookup(id), at);
   } else {
     const k0 = houseNext;
     const k1 = after(k0);
@@ -822,7 +844,7 @@ circuit fineUnfinished(e: Uint<64>, at: Uint<64>): [] {
       }
       const o = operators.lookup(id);
       if (o.house && o.active) {
-        operators.insert(id, Operator { ...o, active: false, queued: false, leftTime: at });
+        operators.insert(id, Operator { ...o, active: false, leftTime: at });
         houseActive = (houseActive - 1) as Uint<8>;
       }
     }

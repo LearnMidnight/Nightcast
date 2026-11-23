@@ -1,6 +1,6 @@
-// The threshold network, stage 7, in memory (compact-runtime): the registry and six epochs in a
+// The threshold network, stage 8, in memory (compact-runtime): the registry and six epochs in a
 // row on one contract. The committee's size follows the number of independents (1 of 1, 3 of 5,
-// 4 of 7), seats go to the front of the queue and then to the house, a ceremony that fails costs
+// 4 of 7), seats go round the ring of independents and then to the house, a ceremony that fails costs
 // the seats that didn't deal, and for each size EVERY set of t answers must give the off-chain
 // value. Cheating and out-of-turn calls must fail, a void request must keep its value, fees must
 // reach the seats that answered in time, and the NIGHT the contract holds must always equal the
@@ -112,12 +112,15 @@ const bond = (o) => ledger().bonds.lookup(o.id).read();
 const SELF = () => ({ bytes: new Uint8Array(rt.encodeContractAddress ? rt.encodeContractAddress(address) : Buffer.from(address, 'hex')) });
 /** The message pool p signs to back operator o now, and the link itself. */
 const linkMessage = (o, p, revoke = false) => P.pureCircuits.linkMessageOf(SELF(), o.id, ledger().poolLinks.member(p.id) ? ledger().poolLinks.lookup(p.id) : 0n, revoke);
-const link = (o, p = o.pool, sig = signed(p, linkMessage(o, p))) => call('linkPool', [o.id, sig, p.key, false, BigInt(now)]);
-const revoke = (o, p = o.pool, sig = signed(p, linkMessage(o, p, true))) => call('linkPool', [o.id, sig, p.key, true, BigInt(now)]);
+/** A pool's place in the list (0: not loaded), and the occupied place in the ring just before place i. */
+const placeIn = (p) => (ledger().listed.member(p.id) ? ledger().listed.lookup(p.id) : 0n);
+const prior = (i) => { let best = 0n; for (const [k] of ledger().ringOp) if (k < i && k > best) best = k; return best; };
+const link = (o, p = o.pool, sig = signed(p, linkMessage(o, p)), hint = prior(placeIn(p))) => call('linkPool', [o.id, sig, p.key, false, BigInt(now), hint]);
+const revoke = (o, p = o.pool, sig = signed(p, linkMessage(o, p, true))) => call('linkPool', [o.id, sig, p.key, true, BigInt(now), 0n]);
 const loadPools = (b) => call('loadPools', [b.ids, b.next]);
 const linked = (o) => ledger().poolOf.member(o.id);
 /** Register; an operator with a stake pool that isn't linked yet is linked too. */
-const register = async (o, n = 12n) => { await call('register', [{ bytes: o.payout }, n], { op: o.op }); if (o.pool && !linked(o)) await link(o); };
+const register = async (o, n = 12n) => { await call('register', [{ bytes: o.payout }, n, linked(o) ? prior(placeIn(o.pool)) : 0n], { op: o.op }); if (o.pool && !linked(o)) await link(o); };
 const everyone = new Map(H.map((h) => [hexOf(h.id), h]));
 let pooled = 0;
 const independent = (name) => { const o = operator(name); o.pool = POOLS[pooled++]; everyone.set(hexOf(o.id), o); return o; };
@@ -125,7 +128,7 @@ const independent = (name) => { const o = operator(name); o.pool = POOLS[pooled+
 const seated = (e) => { const c = ledger().committees.lookup(e); return Array.from({ length: Number(c.seated) }, (_, k) => everyone.get(hexOf(ledger().members.lookup(P.pureCircuits.seatKey(e, BigInt(k + 1)))))); };
 const names = (e) => seated(e).map((o) => o.name).join(' ');
 const seat = (e) => call('seat', [e, BigInt(now)]);
-/** Fill epoch e's committee: the queue for the independents' seats, then the house in turn. */
+/** Fill epoch e's committee: the ring for the independents' seats, then the house in turn. */
 const fill = async (e) => { for (let guard = 0; guard < 40 && ledger().committees.lookup(e).phase === P.Phase.seating; guard++) await seat(e); };
 /** The dealers at `positions` deal in full. Returns their polynomials. */
 const deal = async (e, positions, polys = new Map()) => {
@@ -211,7 +214,7 @@ await fails(call('openEpoch', [dl()]), /not enough house operators/, "no committ
 await fails(register(H[0], 9n), /below the minimum/, 'a bond below the minimum is refused');
 for (const h of H) await register(h, 20n);
 await fails(register(H[0]), /already registered/, 'an operator registers once');
-ok(ledger().houseActive === 4n && ledger().independents === 0n && ledger().tail === 0n, 'the four keys named at deploy register as the house, and the house never queues');
+ok(ledger().houseActive === 4n && ledger().independents === 0n && ledger().ringNext.lookup(0n) === 0n, 'the four keys named at deploy register as the house, and the house has no place in the ring');
 books('after registering');
 
 // ---- epoch 1: nobody independent, so 1 of 1, a house seat (today's single oracle)
@@ -242,8 +245,8 @@ const A = independent('a'), B = independent('b');
 {
   // the stake pool link, on a copy of the state (so the epochs below start as before)
   const before = snapshot(), t0 = now;
-  await call('register', [{ bytes: A.payout }, 12n], { op: A.op });
-  ok(ledger().operators.lookup(A.id).active && !ledger().operators.lookup(A.id).queued && ledger().independents === 0n && ledger().tail === 0n, 'an operator that registers with no stake pool behind it is not an independent, and does not queue');
+  await call('register', [{ bytes: A.payout }, 12n, 0n], { op: A.op });
+  ok(active(A) && !ledger().ringOp.member(1n) && ledger().independents === 0n, 'an operator that registers with no stake pool behind it is not an independent, and has no place in the ring');
   await fails(link(H[0], POOLS[6]), /need no pool/, "the house's operators take no pool");
   await fails(link(B), /not a registered operator/, 'a pool links only a registered operator');
   await fails(link(A, UNLISTED), /isn't on this contract's list/, "a key that isn't on the contract's list of stake pools is refused, whatever it signs");
@@ -255,38 +258,40 @@ const A = independent('a'), B = independent('b');
   await fails(link(A, A.pool, signed(A.pool, linkMessage(B, A.pool))), /didn't sign/, 'and its signature for another operator');
   const first = signed(A.pool, linkMessage(A, A.pool));
   await link(A, A.pool, first);
-  ok(linked(A) && ledger().operators.lookup(A.id).queued && ledger().independents === 1n && ledger().tail === 1n && hexOf(ledger().poolOperator.lookup(A.pool.id)) === hexOf(A.id), "once a listed pool's key has signed for it, the operator is an independent and joins the queue");
+  ok(linked(A) && hexOf(ledger().ringOp.lookup(1n)) === hexOf(A.id) && ledger().independents === 1n && hexOf(ledger().poolOperator.lookup(A.pool.id)) === hexOf(A.id), "once a listed pool's key has signed for it, the operator is an independent and takes its pool's place in the ring: the pool's place in the list");
   ok(eq(ledger().poolKeys.lookup(A.pool.id), A.pool.key), "the pool's key is on chain for anyone to look up on Cardano");
   await fails(link(A, POOLS[1]), /is linked to a pool/, 'an operator is linked once');
-  await call('register', [{ bytes: B.payout }, 12n], { op: B.op });
+  await call('register', [{ bytes: B.payout }, 12n, 0n], { op: B.op });
   await fails(link(B, A.pool), /still active/, 'a pool backs one operator at a time');
+  await fails(link(B, POOLS[2], signed(POOLS[2], linkMessage(B, POOLS[2])), 0n), /place before this pool's/, "an operator can't be put anywhere in the ring but its pool's place");
+  await fails(link(B, POOLS[2], signed(POOLS[2], linkMessage(B, POOLS[2])), 7n), /isn't a place in the ring/, 'nor after a place nobody holds');
   await fails(revoke(A, A.pool, signed(A.pool, linkMessage(A, A.pool))), /didn't sign/, "a pool's signature to link isn't one to revoke");
   await fails(revoke(B, A.pool), /doesn't back this operator/, 'a pool revokes only the operator it backs');
   await revoke(A);
   ok(!active(A) && !linked(A) && ledger().independents === 0n, "the pool's key revokes its operator: it is stood down, is no longer linked and no longer counts");
   await fails(revoke(A), /doesn't back this operator/, 'once');
   await fails(link(B, A.pool), /pool sits out/, "the pool can't move to a fresh key straight away: it sits out two epoch lengths");
-  await fails(call('register', [{ bytes: A.payout }, 0n], { op: A.op }), /sits out/, 'and the operator it revoked sits out as long');
+  await fails(call('register', [{ bytes: A.payout }, 0n, 0n], { op: A.op }), /sits out/, 'and the operator it revoked sits out as long');
   now += 2 * Number(EPOCH);
   await fails(link(B, A.pool, signed(A.pool, P.pureCircuits.linkMessageOf(SELF(), B.id, 0n, false))), /didn't sign/, "a pool's next link signs its next number");
   await link(B, A.pool);
   ok(linked(B) && !linked(A) && ledger().poolLinks.lookup(A.pool.id) === 3n && ledger().independents === 1n, 'after the sit-out the pool can back another operator');
-  await call('register', [{ bytes: A.payout }, 0n], { op: A.op });
-  ok(!ledger().operators.lookup(A.id).queued && ledger().independents === 1n, 'the unlinked operator can register again, but waits for a pool');
+  await call('register', [{ bytes: A.payout }, 0n, 0n], { op: A.op });
+  ok(active(A) && !linked(A) && ledger().independents === 1n, 'the unlinked operator can register again, but waits for a pool');
   await fails(link(A, A.pool, first), /still active/, "and the pool's old signature doesn't bring it back");
   now = t0;
   restore(before);
 }
 await register(A);
 await register(B);
-ok(ledger().independents === 2n && ledger().tail === 2n, 'anyone else who registers is an independent, and joins the queue');
+ok(ledger().independents === 2n && ledger().ringNext.lookup(1n) === 2n && ledger().ringNext.lookup(2n) === 0n, 'a and b stand in the ring in the order of their pools in the list');
 const e2 = await open();
 {
   const c = ledger().committees.lookup(e2);
   ok(c.n === 5n && c.t === 3n && c.indepSeats === 2n, 'with 1 to 3 independents the committee is 3 of 5, with a seat for each independent');
 }
 await fill(e2);
-ok(names(e2) === 'a b h1 h2 h3', 'the independents sit first, in the order they queued, then the house, taking up its turn where it left off');
+ok(names(e2) === 'a b h1 h2 h3', 'the independents sit first, in ring order, then the house, taking up its turn where it left off');
 {
   const who = seated(e2);
   const a = Array.from({ length: 4 }, (_, k) => (k < 3 ? rand() : 0n));
@@ -415,7 +420,7 @@ await fails(leave(A), /being seated/, "an operator the committee was sized for c
   restore(before);
 }
 await fill(e3);
-ok(names(e3) === 'c d a b h0 h1 h2', 'the longest-waiting sit first: c and d, who had not served, then a and b from the committee that has');
+ok(names(e3) === 'c d a b h0 h1 h2', 'the turn goes on round the ring from where it stopped: c and d, who had not served, then round to a and b');
 await deal(e3, [1, 2, 5]); // c, d and h0 deal; a, b, h1 and h2 don't
 now += 1801;
 ok((await finish(e3)) === false && ledger().committees.lookup(e3).phase === P.Phase.failed && ledger().current === 2n, 'with 3 finished dealers of 7 (below the threshold) the ceremony fails at its deadline, and epoch 2 carries on');
@@ -435,7 +440,7 @@ await register(H[2], 0n);
 const e4 = await open();
 books('after the failed ceremony');
 await fill(e4);
-ok(names(e4) === 'c d a b h3 h0 h1', 'the failed committee rejoined the queue in its order, and any active house operators fill the rest');
+ok(names(e4) === 'c d a b h3 h0 h1', 'after a failed ceremony the turn simply goes on round the ring, and the house fills the rest');
 const p4 = await deal(e4, [1, 2, 3, 4, 5, 6, 7]);
 ok((await finish(e4)) === true && ledger().current === 4n, 'epoch 4 (4 of 7) serves as soon as all 7 dealers have finished, before its deadline');
 const sk4 = sharesOf(e4, p4);
@@ -457,7 +462,7 @@ ok(Buffer.from(await fin(old, [1])).equals(Buffer.from(oldExpected)), "with epoc
   ok(hexOf(ledger().successor) === hexOf(NEXT_X) && balance === before && ledger().current === 4n, 'a recommendation moves no NIGHT and changes nothing else');
 }
 
-// ---- leaving, the queue's stale entries, and taking the bond back
+// ---- leaving, the ring, and taking the bond back
 await leave(Dd);
 await fails(leave(Dd), /already left/, 'an operator leaves once');
 await fails(call('withdraw', [12n], { op: Dd.op }), /one epoch length/, "an operator that left can't take its bond straight away");
@@ -488,9 +493,9 @@ const e5 = await open();
   const c = ledger().committees.lookup(e5);
   ok(c.n === 5n && c.t === 3n && c.indepSeats === 3n, 'with 3 independents the committee is 3 of 5 again: three seats for them, two for the house');
 }
-const headBefore = ledger().head;
+ok(!ledger().ringOp.member(4n) && !ledger().ringOp.member(5n) && ledger().ringNext.lookup(3n) === 0n, 'd and e, who left, are no longer in the ring: there is nothing to pass over');
 await seat(e5);
-ok(ledger().committees.lookup(e5).seated === 1n && ledger().head === headBefore + 2n, "e queued and then left: its place is passed over and the next in line is seated, in one call");
+ok(ledger().committees.lookup(e5).seated === 1n && ledger().cursor === 3n, "the turn goes on to c");
 await fill(e5);
 ok(names(e5) === 'c a b h2 h3', 'd, who left while serving, is not seated again; the rest keep their order');
 const p5 = await deal(e5, [1, 2, 3, 4, 5]);
@@ -544,7 +549,7 @@ const e6 = await open();
 ok(!ledger().operators.lookup(C.id).active && !ledger().operators.lookup(A.id).active && ledger().independents === 1n && ledger().houseActive === 4n, 'c and a missed more requests than a term allows: they are stood down when the next epoch opens');
 await fails(register(C, 0n), /sits out/, 'a stood-down operator sits out before it can register again');
 const X = operator('x');
-await call('register', [{ bytes: X.payout }, 12n], { op: X.op });
+await call('register', [{ bytes: X.payout }, 12n, 0n], { op: X.op });
 await fails(link(X, C.pool), /pool sits out/, "and its pool can't simply back a fresh key: the pool sits out too");
 await fill(e6);
 ok(names(e6) === 'b h0 h1 h2 h3', 'the house fills the seats they left');
@@ -553,7 +558,7 @@ ok((await finish(e6)) === true && ledger().current === 6n, 'epoch 6 serves');
 for (const i of [1, 2, 3, 4]) await name(e6, i, NEXT_Y);
 ok(hexOf(ledger().successor) === hexOf(NEXT_Y) && ledger().successorEpoch === 6n, 'epoch 6 names Y too: now Y is the recommended successor');
 await register(Dd);
-ok(ledger().operators.lookup(Dd.id).active && ledger().independents === 2n, 'd, who left more than two epoch lengths ago, can rejoin with a fresh bond, at the back of the queue');
+ok(ledger().operators.lookup(Dd.id).active && ledger().independents === 2n && ledger().ringNext.lookup(2n) === 4n, 'd, who left more than two epoch lengths ago, can rejoin with a fresh bond, at its pool\'s place in the ring');
 {
   // only so many requests can be open at once; one finalised in time frees its place
   const sk6 = sharesOf(e6, p6);
