@@ -1,11 +1,13 @@
-// The threshold network, stage 2a, in memory (compact-runtime): the registry and six epochs in a
+// The threshold network, stage 3a, in memory (compact-runtime): the registry and six epochs in a
 // row on one contract. The committee's size follows the number of independents (1 of 1, 3 of 5,
 // 4 of 7), seats go to the front of the queue and then to the house, a ceremony that fails costs
 // the seats that didn't deal, and for each size EVERY set of t answers must give the off-chain
 // value. Cheating and out-of-turn calls must fail, a void request must keep its value, fees must
 // reach the seats that answered in time, and the NIGHT the contract holds must always equal the
 // bonds, the pot, the fees of unsettled requests, what operators have earned and the dust.
-import { webcrypto } from 'node:crypto';
+// An operator counts as independent only once a stake pool's Ed25519 key (real signatures, from
+// Node's crypto) on the contract's list has signed for it.
+import { generateKeyPairSync, sign, webcrypto } from 'node:crypto';
 import * as rt from '@midnight-ntwrk/compact-runtime';
 import * as P from './out-net/contract/index.js';
 
@@ -37,10 +39,46 @@ const witnesses = {
   coefficient: ({ privateState }, i, a, b, c) => [privateState, privateState.badCoefficient ?? coeff(Number(i), [a, b, c].map(Number))],
   requesterSecret: ({ privateState }) => [privateState, privateState.requester ?? bytes('requester')],
   quotient: ({ privateState }, total, k) => [privateState, privateState.badQuotient ?? total / k],
+  poolPath: ({ privateState }, pool) => [privateState, pathOf(pool)],
 };
+// Ed25519 (RFC 8032): a 32-byte key or R as the point the runtime wants, and S as a number.
+const q = (1n << 255n) - 19n;
+const pw = (b, e) => { let x = 1n; b = mod(b, q); while (e > 0n) { if (e & 1n) x = mod(x * b, q); b = mod(b * b, q); e >>= 1n; } return x; };
+const dEd = mod(-121665n * pw(121666n, q - 2n), q);
+const le = (b) => BigInt('0x' + Buffer.from(b).reverse().toString('hex'));
+const decode = (b) => {
+  const n = le(b), y = n & ((1n << 255n) - 1n), sgn = n >> 255n;
+  const u = mod(y * y - 1n, q), v = mod(dEd * y * y + 1n, q);
+  let x = mod(u * pw(v, 3n) * pw(u * pw(v, 7n), (q - 5n) / 8n), q);
+  if (mod(v * x * x, q) !== u) x = mod(x * pw(2n, (q - 1n) / 4n), q);
+  if (mod(v * x * x, q) !== u) throw new Error('not a point');
+  if ((x & 1n) !== sgn) x = mod(-x, q);
+  return { x, y };
+};
+/** A stake pool: an Ed25519 key pair, its key as a point, and its id in the contract. */
+const pool = (name) => { const k = generateKeyPairSync('ed25519'); const key = decode(Buffer.from(k.publicKey.export({ format: 'jwk' }).x, 'base64url')); return { name, secret: k.privateKey, key, id: P.pureCircuits.poolIdOf(key) }; };
+const signed = (p, msg) => { const g = sign(null, Buffer.from(msg), p.secret); return { r: decode(g.subarray(0, 32)), s: le(g.subarray(32)) }; };
+// The contract's list: a 13-level Merkle tree of the listed pools' leaves, empty places 0.
+const DEPTH = 13;
+const POOLS = Array.from({ length: 7 }, (_, k) => pool(`pool${k}`));
+const UNLISTED = pool('unlisted');
+const levels = [new Map(POOLS.map((p, k) => [k, P.pureCircuits.poolLeafOf(p.id)]))];
+const empty = [0n];
+for (let d = 0; d < DEPTH; d++) {
+  const up = new Map();
+  for (const k of levels[d].keys()) { const j = k >> 1; if (!up.has(j)) up.set(j, P.pureCircuits.poolNodeOf(levels[d].get(2 * j) ?? empty[d], levels[d].get(2 * j + 1) ?? empty[d])); }
+  levels.push(up);
+  empty.push(P.pureCircuits.poolNodeOf(empty[d], empty[d]));
+}
+const ROOT = levels[DEPTH].get(0);
+const pathOf = (id) => {
+  let k = POOLS.findIndex((p) => hexOf(p.id) === hexOf(id));
+  if (k < 0) k = 0; // not on the list: any path, and the root won't match
+  return Array.from({ length: DEPTH }, (_, d) => { const step = { sibling: levels[d].get(k ^ 1) ?? empty[d], right: (k & 1) === 1 }; k >>= 1; return step; });
+};
+const hexOf = (b) => Buffer.from(b).toString('hex');
 const G = (x) => rt.ecMulGenerator(x);
 const ID = G(0n);
-const hexOf = (b) => Buffer.from(b).toString('hex');
 const NATIVE = '0'.repeat(64);
 const SLOT = 1_000_000n, MINBOND = 10n, PENALTY = 2n, EPOCH = 3600n, FEE = 700_000n, BOUNTY = 100_000n, MISS = 1n, MISSES = 1n;
 const REFUND = new Uint8Array(32).fill(0xfe), FINALISER = new Uint8Array(32).fill(0xfd);
@@ -50,7 +88,7 @@ const operator = (name) => { const op = rand(); made++; return { name, op, id: P
 const H = ['h0', 'h1', 'h2', 'h3'].map(operator);
 const contract = new P.Contract(witnesses);
 const address = rt.sampleContractAddress();
-let state = (await contract.initialState(rt.createConstructorContext({}, COIN), MIN, MAX, EPOCH, SLOT, MINBOND, PENALTY, FEE, BOUNTY, MISS, MISSES, H.map((h) => h.id))).currentContractState;
+let state = (await contract.initialState(rt.createConstructorContext({}, COIN), MIN, MAX, EPOCH, SLOT, MINBOND, PENALTY, FEE, BOUNTY, MISS, MISSES, H.map((h) => h.id), ROOT)).currentContractState;
 let balance = 0n;
 let paidOut = new Map();
 const snapshot = () => ({ data: state.data, balance, paidOut: new Map(paidOut) });
@@ -76,9 +114,17 @@ const at = (a, x) => mod(a.reduce((s, c, k) => s + c * BigInt(x) ** BigInt(k), 0
 const subsets = (n, t) => { const out = []; const go = (from, acc) => { if (acc.length === t) { out.push(acc); return; } for (let i = from; i <= n; i++) go(i + 1, [...acc, i]); }; go(1, []); return out; };
 const slots = (s) => [...s, 0, 0, 0, 0].slice(0, 4).map(BigInt);
 const bond = (o) => ledger().bonds.lookup(o.id).read();
-const register = (o, n = 12n) => call('register', [{ bytes: o.payout }, n], { op: o.op });
+/** This contract's address as a pure circuit takes it. */
+const SELF = () => ({ bytes: new Uint8Array(rt.encodeContractAddress ? rt.encodeContractAddress(address) : Buffer.from(address, 'hex')) });
+/** The message pool p signs to back operator o now, and the link itself. */
+const linkMessage = (o, p) => P.pureCircuits.linkMessageOf(SELF(), o.id, ledger().poolLinks.member(p.id) ? ledger().poolLinks.lookup(p.id) : 0n);
+const link = (o, p = o.pool, sig = signed(p, linkMessage(o, p))) => call('linkPool', [o.id, sig, p.key]);
+const linked = (o) => ledger().poolOf.member(o.id);
+/** Register; an operator with a stake pool that isn't linked yet is linked too. */
+const register = async (o, n = 12n) => { await call('register', [{ bytes: o.payout }, n], { op: o.op }); if (o.pool && !linked(o)) await link(o); };
 const everyone = new Map(H.map((h) => [hexOf(h.id), h]));
-const independent = (name) => { const o = operator(name); everyone.set(hexOf(o.id), o); return o; };
+let pooled = 0;
+const independent = (name) => { const o = operator(name); o.pool = POOLS[pooled++]; everyone.set(hexOf(o.id), o); return o; };
 /** Who sits where in epoch e, as the ledger has it. */
 const seated = (e) => { const c = ledger().committees.lookup(e); return Array.from({ length: Number(c.seated) }, (_, k) => everyone.get(hexOf(ledger().members.lookup(P.pureCircuits.seatKey(e, BigInt(k + 1)))))); };
 const names = (e) => seated(e).map((o) => o.name).join(' ');
@@ -176,6 +222,33 @@ const oldExpected = P.pureCircuits.outputOf(rt.ecMul(ledger().requests.lookup(ol
 
 // ---- epoch 2: two independents, so 3 of 5: they sit first, the house fills three seats
 const A = independent('a'), B = independent('b');
+{
+  // the stake pool link, on a copy of the state (so the epochs below start as before)
+  const before = snapshot();
+  await call('register', [{ bytes: A.payout }, 12n], { op: A.op });
+  ok(ledger().operators.lookup(A.id).active && !ledger().operators.lookup(A.id).queued && ledger().independents === 0n && ledger().tail === 0n, 'an operator that registers with no stake pool behind it is not an independent, and does not queue');
+  await fails(link(H[0], POOLS[6]), /need no pool/, "the house's operators take no pool");
+  await fails(link(B), /not a registered operator/, 'a pool links only a registered operator');
+  await fails(link(A, UNLISTED), /isn't on this contract's list/, "a key that isn't on the contract's list of stake pools is refused, whatever it signs");
+  await fails(link(A, A.pool, signed(POOLS[1], linkMessage(A, A.pool))), /didn't sign/, "a listed pool's key with another key's signature is refused");
+  await fails(link(A, A.pool, signed(A.pool, linkMessage(B, A.pool))), /didn't sign/, 'and its signature for another operator');
+  const first = signed(A.pool, linkMessage(A, A.pool));
+  await link(A, A.pool, first);
+  ok(linked(A) && ledger().operators.lookup(A.id).queued && ledger().independents === 1n && ledger().tail === 1n && hexOf(ledger().poolOperator.lookup(A.pool.id)) === hexOf(A.id), "once a listed pool's key has signed for it, the operator is an independent and joins the queue");
+  ok(eq(ledger().poolKeys.lookup(A.pool.id), A.pool.key), "the pool's key is on chain for anyone to look up on Cardano");
+  await fails(link(A, POOLS[1]), /is linked to a pool/, 'an operator is linked once');
+  await call('register', [{ bytes: B.payout }, 12n], { op: B.op });
+  await fails(link(B, A.pool), /still active/, 'a pool backs one operator at a time');
+  await call('leave', [], { op: A.op });
+  ok(ledger().independents === 0n, 'when it leaves it no longer counts');
+  await fails(link(B, A.pool, signed(A.pool, P.pureCircuits.linkMessageOf(SELF(), B.id, 0n))), /didn't sign/, "a pool's next link signs its next number");
+  await link(B, A.pool);
+  ok(linked(B) && !linked(A) && ledger().poolLinks.lookup(A.pool.id) === 2n && ledger().independents === 1n, 'once its operator has left, the pool can move to another; the one that left is unlinked');
+  await call('register', [{ bytes: A.payout }, 0n], { op: A.op });
+  ok(!ledger().operators.lookup(A.id).queued && ledger().independents === 1n, 'the unlinked operator can register again, but waits for a pool');
+  await fails(link(A, A.pool, first), /still active|didn't sign/, "and the pool's old signature doesn't bring it back");
+  restore(before);
+}
 await register(A);
 await register(B);
 ok(ledger().independents === 2n && ledger().tail === 2n, 'anyone else who registers is an independent, and joins the queue');
