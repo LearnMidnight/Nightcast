@@ -36,6 +36,8 @@ export ledger commitments: Map<Field, JubjubPoint>;
 export ledger committed: Map<Uint<8>, Boolean>;
 export ledger encKeys: Map<Uint<8>, JubjubPoint>;
 export ledger parcels: Map<Field, Parcel>;
+// the edge circuits write here so that they are real (proved) circuits, not pure ones
+export ledger edges: Map<Field, JubjubPoint>;
 
 witness coefficients(): Vector<4, Field>;
 witness shareFor(i: Uint<8>): Field;
@@ -58,6 +60,13 @@ pure circuit small(i: Uint<8>): JubjubScalar {
   return (i as Field) as JubjubScalar;
 }
 
+// x·G. Compact 0.36's circuit compiler stops with "ZkStdLibArch must enable jubjub" on a circuit
+// whose only curve operation is ecMulGenerator (found 23 Nov 2026), so the identity is added on:
+// the same point, and ecAdd switches the curve on.
+pure circuit fromSecret(x: Field): JubjubPoint {
+  return ecAdd(ecMulGenerator(x as JubjubScalar), ecMulGenerator((0 as Field) as JubjubScalar));
+}
+
 export pure circuit evalCommitments(c0: JubjubPoint, c1: JubjubPoint, c2: JubjubPoint, c3: JubjubPoint, i: Uint<8>): JubjubPoint {
   const s = small(i);
   return ecAdd(ecMul(ecAdd(ecMul(ecAdd(ecMul(c3, s), c2), s), c1), s), c0);
@@ -68,7 +77,7 @@ export circuit registerKey(i: Uint<8>): [] {
   const ii = disclose(i);
   assert(ii >= 1 && ii <= 7, "a position is 1..7");
   assert(!encKeys.member(ii), "this position has a key");
-  encKeys.insert(ii, disclose(ecMulGenerator(encSecret() as JubjubScalar)));
+  encKeys.insert(ii, disclose(fromSecret(encSecret())));
 }
 
 // Dealer d posts its commitments, made in the circuit from its secret coefficients.
@@ -79,7 +88,7 @@ export circuit dealCommit(d: Uint<8>): [] {
   committed.insert(dd, true);
   const a = coefficients();
   for (const k of 0..4) {
-    commitments.insert(cell(dd, k as Uint<8>), disclose(ecMulGenerator(a[k] as JubjubScalar)));
+    commitments.insert(cell(dd, k as Uint<8>), disclose(fromSecret(a[k])));
   }
 }
 
@@ -100,11 +109,15 @@ export circuit dealShare(d: Uint<8>, i: Uint<8>): [] {
 
 // How Compact treats a number at or past the curve's order when it becomes a scalar.
 export circuit castEdge(x: Field): JubjubPoint {
-  return ecMulGenerator(disclose(x) as JubjubScalar);
+  const q = fromSecret(disclose(x));
+  edges.insert(1, q);
+  return q;
 }
 
 // How Compact treats a point handed in from outside (off the curve, or of small order).
 export circuit pointEdge(p: JubjubPoint): JubjubPoint {
   const q = disclose(p);
-  return ecAdd(q, q);
+  const d = ecAdd(q, q);
+  edges.insert(2, d);
+  return d;
 }
