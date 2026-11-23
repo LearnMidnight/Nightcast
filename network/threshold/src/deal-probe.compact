@@ -24,13 +24,6 @@ struct Parcel {
   c: Field;
 }
 
-struct PadPreimage {
-  domain: Bytes<32>;
-  k: JubjubPoint;
-  dealer: Field;
-  to: Field;
-}
-
 // (dealer, k) -> A_k;  position -> its encryption key;  (dealer, position) -> the parcel.
 export ledger commitments: Map<Field, JubjubPoint>;
 export ledger committed: Map<Uint<8>, Boolean>;
@@ -48,8 +41,11 @@ export pure circuit cell(d: Uint<8>, k: Uint<8>): Field {
   return (d as Field) * 8 + (k as Field);
 }
 
+// The pad for dealer d's parcel to position i, from the shared point k. The point goes in by its
+// coordinates: Compact 0.36's circuit compiler can't hash a JubjubPoint with transientHash
+// ("cannot convert JubjubPoint to Native", found 23 Nov 2026). 1852400484 is this probe's tag.
 export pure circuit padOf(k: JubjubPoint, d: Uint<8>, i: Uint<8>): Field {
-  return transientHash<PadPreimage>(PadPreimage { domain: pad(32, "nightcast:deal-pad:v0"), k: k, dealer: d as Field, to: i as Field });
+  return transientHash<[Field, Field, Field, Field, Field]>([1852400484 as Field, jubjubPointX(k), jubjubPointY(k), d as Field, i as Field]);
 }
 
 pure circuit same(a: JubjubPoint, b: JubjubPoint): Boolean {
