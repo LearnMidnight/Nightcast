@@ -1,4 +1,4 @@
-// Nightcast threshold network, stage 5 (not yet deployed; after two reviews on 23 Nov 2026).
+// Nightcast threshold network, stage 6 (not yet deployed; after three reviews on 23 Nov 2026).
 //
 // A committee of n operators (positions 1..n) shares one key that nobody holds. Any t of them
 // give the same random value for a request; fewer than t can't work it out. The design, the
@@ -18,13 +18,16 @@
 //   epochs      openEpoch sizes the next committee from the number of independents (1 of 1 with
 //               none, 3 of 5 with 1 to 3, 4 of 7 from 4), and `seat` fills it: independents from
 //               the front of the queue (the longest-waiting first; a committee that has served
-//               goes to the back), then the house. No randomness, nothing anyone chooses.
+//               goes to the back), then the house, taken in turn. No randomness, and nothing
+//               the caller chooses. If the house can't fill the size the independents call
+//               for, the committee is the largest it can fill (7, then 5, then 1).
 //               Nobody can leave while a committee is being seated, so a committee that was
 //               sized can always be filled.
 //   ceremony    dealCommit, dealShare, finish: a dealer PROVES its deal as it posts it (no
 //               complaints); the group key is the sum of the dealers that finished. Seating has
 //               its own time; dealing's clock starts when the last seat is taken. A seat that
-//               didn't finish dealing loses part of its bond (only dealing can cost a bond).
+//               didn't finish dealing loses part of its bond (only dealing can cost a bond),
+//               and a house operator that didn't is stood down until it registers again.
 //   requests    request (the id comes from the contract's counter, the input point H is fixed
 //               then; the requester pays the fee), answer, finalise (any t answers, one value; a
 //               bounty to whoever sends it), settle, claim
@@ -34,9 +37,12 @@
 //               fee back, and every seat that didn't answer in time loses a slice of its bond.
 //               A void request keeps its H and stays answerable: silence buys no second roll.
 //               Bond taken as a penalty is FORFEITED: it stays in the contract and is paid to
-//               nobody, so nobody gains from another's failure (or from their own). An
-//               independent that misses too often, or whose bond fell below the minimum, is
-//               stood down when the next epoch opens. Only so many requests can be open at once.
+//               nobody, so nobody gains from another's failure (or from their own). Whoever
+//               settles a void request is tipped out of its fee, so void requests get settled.
+//               An operator that misses in too many answering times, or whose bond fell below
+//               the minimum, is stood down when the next epoch opens (a miss is counted once
+//               per answering time, however many requests it held). Only so many requests can
+//               be open at once.
 //   bonds       A seat of the serving committee always has its bond behind it: one that left
 //               can take it back only once its committee has been replaced (or has overstayed
 //               four epoch lengths, after which it takes no more requests).
@@ -112,9 +118,8 @@ export struct Request {
   // H, fixed when the request was made.
   point: JubjubPoint;
   deadline: Uint<64>;
-  // Shares posted so far, and how many of them before the deadline (those are paid).
-  answers: Uint<8>;
-  timely: Uint<8>;
+  // Its number, from the contract's counter: its shares are kept under (number, position).
+  number: Uint<64>;
   // What the request still holds of its fee, and where it goes back if the request is void.
   fee: Uint<128>;
   refundTo: UserAddress;
@@ -203,19 +208,24 @@ export ledger sent: Map<Field, Uint<8>>;
 export ledger parcels: Map<Field, Parcel>;
 export ledger aggregate: Map<Field, JubjubPoint>;
 export ledger requests: Map<Bytes<32>, Request>;
-export ledger shares: Map<Bytes<32>, JubjubPoint>;
+export ledger shares: Map<Field, JubjubPoint>;
 // The shares that landed before their request's deadline.
-export ledger timelyShares: Map<Bytes<32>, Boolean>;
+export ledger timelyShares: Map<Field, Boolean>;
 export ledger nextRequest: Uint<64>;
-// Requests made and not yet settled.
-export ledger pending: Uint<32>;
+// Requests that count as open: made, and not yet finalised in time or settled.
+export ledger pending: Counter;
+// For each operator, the deadline of the last request counted as a miss against it; and which
+// of the house's four sits next.
+export ledger lastMiss: Map<Bytes<32>, Uint<64>>;
+export ledger houseNext: Uint<8>;
 // What each operator has earned and not yet claimed (atoms); requests it missed since it was
 // last queued or checked; and atoms left over from sharing fees (they stay in the contract).
 export ledger earned: Map<Bytes<32>, Uint<128>>;
 export ledger missed: Map<Bytes<32>, Uint<16>>;
 export ledger dust: Uint<128>;
 export sealed ledger slack: Uint<64>;
-// How long a ceremony has from the moment its epoch is opened, and how long a committee has to
+// How long seating has from the moment an epoch is opened, and dealing from the moment the
+// last seat is taken (the same length); and how long a committee has to
 // answer a request (seconds).
 export sealed ledger ceremonySecs: Uint<64>;
 export sealed ledger answerSecs: Uint<64>;
@@ -235,7 +245,7 @@ export sealed ledger finaliseBounty: Uint<128>;
 // seat may miss in a term before it is stood down.
 export sealed ledger missPenalty: Uint<16>;
 export sealed ledger allowedMisses: Uint<16>;
-// The house's operator ids (unused entries are zero).
+// The house's four operator ids.
 export sealed ledger house: Vector<4, Bytes<32>>;
 // The root of the list of stake pool keys that can back an operator (a 13-level Merkle tree of
 // poolLeafOf(pool key id), empty places 0), fixed for the life of the contract.
@@ -260,17 +270,19 @@ witness poolPath(pool: Bytes<32>): Vector<13, Step>;
 constructor(slackSecs: Uint<64>, epoch: Uint<64>, ceremony: Uint<64>, answer: Uint<64>, collateral: Uint<128>, minBond: Uint<16>, penalty: Uint<16>, fee: Uint<128>, bounty: Uint<128>, miss: Uint<16>, misses: Uint<16>, pendingMax: Uint<32>, houseIds: Vector<4, Bytes<32>>, pools: Field) {
   assert(slackSecs >= 60, "the time slack must be at least 60 seconds");
   assert(answer >= 10 * slackSecs, "the answering time must be at least ten times the slack");
-  assert(ceremony >= 10 * slackSecs, "the ceremony's length must be at least ten times the slack");
-  assert(epoch >= 2 * answer + 2 * slackSecs, "an epoch must be longer than two answering times");
+  assert(ceremony >= 30 * slackSecs, "the ceremony's length must be at least thirty times the slack");
+  assert(epoch >= 4 * answer + 2 * slackSecs, "an epoch must be longer than four answering times");
   assert(2 * ceremony <= epoch && epoch <= 31622400, "an epoch is at most 366 days, and at least two ceremony lengths");
   assert(collateral > 0, "a bond slot must be worth something");
-  assert(minBond >= 2 && 2 * penalty <= minBond && 2 * miss <= minBond, "a penalty is at most half the smallest bond");
-  assert(fee > 0 && bounty <= fee, "a request has a fee, and the bounty comes out of it");
-  assert(pendingMax >= 1, "at least one request can be open");
-  assert(misses >= pendingMax && pendingMax * miss <= minBond, "one answering time of missed requests must not stand a seat down, or cost more than the smallest bond");
+  assert(penalty >= 1 && miss >= 1 && 2 * penalty <= minBond, "a penalty is at least one slot and at most half the smallest bond");
+  assert(bounty >= 1 && 2 * bounty <= fee, "the bounty is at most half the fee, and not nothing");
+  assert((((miss as Field) * (collateral as Field)) as Uint<128>) >= fee, "a missed request costs a seat at least the fee");
+  assert(pendingMax >= 1 && 2 * pendingMax * miss <= minBond, "one answering time of void requests costs a seat at most half the smallest bond");
+  assert(misses >= 1 && misses <= 1000, "a seat is allowed between 1 and 1000 missed answering times");
   const zero = default<Bytes<32>>;
-  assert((houseIds[0] != houseIds[1] || houseIds[0] == zero) && (houseIds[0] != houseIds[2] || houseIds[0] == zero) && (houseIds[0] != houseIds[3] || houseIds[0] == zero)
-      && (houseIds[1] != houseIds[2] || houseIds[1] == zero) && (houseIds[1] != houseIds[3] || houseIds[1] == zero) && (houseIds[2] != houseIds[3] || houseIds[2] == zero), "the house's ids must differ");
+  assert(houseIds[0] != zero && houseIds[1] != zero && houseIds[2] != zero && houseIds[3] != zero
+      && houseIds[0] != houseIds[1] && houseIds[0] != houseIds[2] && houseIds[0] != houseIds[3]
+      && houseIds[1] != houseIds[2] && houseIds[1] != houseIds[3] && houseIds[2] != houseIds[3], "the house has four different operators");
   slack = disclose(slackSecs);
   epochSecs = disclose(epoch);
   ceremonySecs = disclose(ceremony);
@@ -306,8 +318,9 @@ pure circuit toUser(a: UserAddress): Either<ContractAddress, UserAddress> {
   return right<ContractAddress, UserAddress>(a);
 }
 
-export pure circuit shareId(id: Bytes<32>, i: Uint<8>): Bytes<32> {
-  return persistentHash<[Bytes<32>, Bytes<32>, Field]>([pad(32, "nightcast:threshold-share:v1"), id, i as Field]);
+// Where position i's share of request `number` is kept.
+export pure circuit shareKey(number: Uint<64>, i: Uint<8>): Field {
+  return (number as Field) * 8 + (i as Field);
 }
 
 export pure circuit requestIdOf(deployment: ContractAddress, number: Uint<64>, requester: Bytes<32>, tag: Bytes<32>): Bytes<32> {
@@ -518,8 +531,9 @@ export circuit leave(now: Uint<64>): [] {
 // that has left can take it all one epoch length later, but never from under a seat that still
 // has duties: not while it sits in the newest committee, and if it sits in the serving
 // committee, only once that committee has overstayed (four epoch lengths; it then takes no
-// more requests) and its last requests could be settled. Otherwise it waits until the serving
-// committee's first requests could be settled, so the committee before it is finished with.
+// more requests) and its last requests could be settled. Otherwise it waits three answering
+// times from when the serving committee began, so the committee before it is finished with
+// and its last requests have been settled (whoever settles a void request is tipped).
 export circuit withdraw(slots: Uint<16>): [] {
   const id = disclose(keyIdOf(ecMulGenerator(operatorSecret() as JubjubScalar)));
   assert(operators.member(id), "not a registered operator");
@@ -532,13 +546,13 @@ export circuit withdraw(slots: Uint<16>): [] {
     assert(!bonds.lookup(id).lessThan(minBondSlots), "an active operator keeps the minimum bond");
   } else {
     assert(blockTimeGte((o.leftTime + epochSecs) as Uint<64>), "the bond waits one epoch length after leaving");
-    assert(opened == current || !seatedIn(opened, id), "the bond waits while its seat is in the newest committee");
+    assert(opened == current || committees.lookup(opened).phase == Phase.failed || !seatedIn(opened, id), "the bond waits while its seat is in a committee whose ceremony is running");
     if (current > 0) {
       const since = committees.lookup(current).since;
       if (seatedIn(current, id)) {
-        assert(blockTimeGte((since + 4 * epochSecs + 2 * answerSecs) as Uint<64>), "a serving seat keeps its bond until its committee is replaced or has overstayed");
+        assert(blockTimeGte((since + 4 * epochSecs + 3 * answerSecs) as Uint<64>), "a serving seat keeps its bond until its committee is replaced or has overstayed");
       } else {
-        assert(blockTimeGte((since + 2 * answerSecs) as Uint<64>), "the bond waits until the last committee's requests can be settled");
+        assert(blockTimeGte((since + 3 * answerSecs) as Uint<64>), "the bond waits until the last committee's requests can be settled");
       }
     }
   }
@@ -547,28 +561,27 @@ export circuit withdraw(slots: Uint<16>): [] {
 
 // ---------------------------------------------------------------- the ceremony
 
-// Epoch e's committee is done seating: go through its seats. With `penalise` (a ceremony that
-// reached dealing and failed), a seat that didn't finish dealing first loses part of its bond.
-// An independent that missed too many requests, or whose bond is now below the minimum, is
-// stood down (it and its pool sit out, then it must register again); otherwise it goes back in the queue. The
-// house's operators are never stood down: they are the seats of last resort.
-circuit requeue(e: Uint<64>, penalise: Boolean, at: Uint<64>): [] {
+// Epoch e's committee is done seating: go through its seats. An operator that missed in too
+// many answering times, or whose bond is now below the minimum, is stood down (an independent
+// and its pool sit out, then it must register again; a house operator can register again at
+// once). Otherwise an independent goes back in the queue.
+circuit requeue(e: Uint<64>, at: Uint<64>): [] {
   for (const k of 0..7) {
     const sk = seatKey(e, (k + 1) as Uint<8>);
     if (members.member(sk)) {
       const id = members.lookup(sk);
-      if (penalise && !finished.member(sk) && !bonds.lookup(id).lessThan(ceremonyPenalty)) {
-        bonds.lookup(id).decrement(ceremonyPenalty);
-        forfeited = (forfeited + ceremonyPenalty) as Uint<64>;
-      }
       const o = operators.lookup(id);
       if (o.active) {
         const m = missed.member(id) ? missed.lookup(id) : 0;
         missed.insert(id, 0);
-        if (!o.house && (m > allowedMisses || bonds.lookup(id).lessThan(minBondSlots))) {
+        if (m > allowedMisses || bonds.lookup(id).lessThan(minBondSlots)) {
           operators.insert(id, Operator { ...o, active: false, queued: false, leftTime: at });
-          if (poolOf.member(id)) {
-            independents = (independents - 1) as Uint<16>;
+          if (o.house) {
+            houseActive = (houseActive - 1) as Uint<8>;
+          } else {
+            if (poolOf.member(id)) {
+              independents = (independents - 1) as Uint<16>;
+            }
           }
         } else {
           if (!o.house && !o.queued && poolOf.member(id)) {
@@ -588,27 +601,32 @@ circuit requeue(e: Uint<64>, penalise: Boolean, at: Uint<64>): [] {
 // one serving) rejoin the back of the queue, and the size follows the number of independents:
 // none 1 of 1; 1 to 3, 3 of 5; 4 or more, 4 of 7. Independents take as many seats as there are
 // of them; the house fills the rest, so from 3 independents it is below the threshold, and from
-// 7 it has no seat. A failed ceremony costs its seats only if every seat was filled (so dealing
-// began, and each had a full ceremony length to deal).
+// 7 it has no seat. If the house hasn't the operators for that size, the committee is the
+// largest it can fill: 5 (independents first), or 1 (a house seat), so a new epoch can open
+// whenever one house operator is active.
 export circuit openEpoch(now: Uint<64>): Uint<64> {
   const at = timeNow(disclose(now));
   if (opened != current) {
-    const last = committees.lookup(opened);
-    assert(last.phase == Phase.failed, "the newest epoch's ceremony is still running");
-    requeue(opened, last.seated == last.n, at);
+    assert(committees.lookup(opened).phase == Phase.failed, "the newest epoch's ceremony is still running");
+    requeue(opened, at);
   } else {
     if (current > 0) {
       assert(blockTimeGte((committees.lookup(current).since + epochSecs) as Uint<64>), "the serving epoch isn't over");
     }
   }
   if (current > 0) {
-    requeue(current, false, at);
+    requeue(current, at);
   }
   const i = independents;
-  const n = (i == 0 ? 1 : (i <= 3 ? 5 : 7)) as Uint<8>;
-  const t = (i == 0 ? 1 : (i <= 3 ? 3 : 4)) as Uint<8>;
-  const mine = (i >= 7 ? 7 : i) as Uint<8>;
-  assert(houseActive >= n - mine, "not enough house operators to fill the committee");
+  const h = houseActive;
+  const mine7 = (i >= 7 ? 7 : i) as Uint<8>;
+  const mine5 = (i >= 5 ? 5 : i) as Uint<8>;
+  const ok7 = i >= 4 && h >= 7 - mine7;
+  const ok5 = i >= 1 && h >= 5 - mine5;
+  assert(ok7 || ok5 || h >= 1, "not enough house operators to fill the committee");
+  const n = (ok7 ? 7 : (ok5 ? 5 : 1)) as Uint<8>;
+  const t = (ok7 ? 4 : (ok5 ? 3 : 1)) as Uint<8>;
+  const mine = (ok7 ? mine7 : (ok5 ? mine5 : 0)) as Uint<8>;
   const e = (opened + 1) as Uint<64>;
   opened = e;
   committees.insert(e, Committee { n: n, t: t, indepSeats: mine, phase: Phase.seating, seated: 0, dealt: 0, dealBy: (at + ceremonySecs) as Uint<64>, since: 0 });
@@ -630,17 +648,33 @@ circuit place(e: Uint<64>, c: Committee, id: Bytes<32>, o: Operator, at: Uint<64
   }
 }
 
-// Anyone fills the next seat of epoch e's committee, giving the time now. While independents'
-// seats are open, it is the front of the queue: entries that aren't their operator's one live
-// place (it left, was seated, or queued again since) are dropped, up to eight in a call, until
-// one is seated. After the independents, a house operator: `houseSlot` says which of the
-// house's four, and it must be active and not yet seated in this epoch.
-export circuit seat(e: Uint<64>, houseSlot: Uint<8>, now: Uint<64>): [] {
+// Whether house operator `id` can take a seat of epoch e: registered, active, not seated in it.
+circuit houseFree(e: Uint<64>, id: Bytes<32>): Boolean {
+  return operators.member(id) && operators.lookup(id).active && !(lastSeat.member(id) && lastSeat.lookup(id) == e);
+}
+
+circuit houseAt(k: Uint<8>): Bytes<32> {
+  const h = house;
+  return k == 0 ? h[0] : (k == 1 ? h[1] : (k == 2 ? h[2] : h[3]));
+}
+
+circuit after(k: Uint<8>): Uint<8> {
+  return (k >= 3 ? 0 : k + 1) as Uint<8>;
+}
+
+// Anyone fills the next seat of epoch e's committee, giving the time now (before the seating
+// deadline). While independents' seats are open, it is the front of the queue: entries that
+// aren't their operator's one live place (it left, was seated, or queued again since) are
+// dropped, up to eight in a call, until one is seated. After the independents, the house: the
+// next of its four in turn that is active and not yet seated in this epoch. The caller chooses
+// nothing.
+export circuit seat(e: Uint<64>, now: Uint<64>): [] {
   const ee = disclose(e);
   const at = timeNow(disclose(now));
   assert(committees.member(ee), "no such epoch");
   const c = committees.lookup(ee);
   assert(c.phase == Phase.seating, "that committee isn't seating");
+  assert(blockTimeLt(c.dealBy), "the time for seating is over");
   if (c.seated < c.indepSeats) {
     assert(head < tail, "the queue is empty");
     for (const k of 0..8) {
@@ -659,15 +693,18 @@ export circuit seat(e: Uint<64>, houseSlot: Uint<8>, now: Uint<64>): [] {
       }
     }
   } else {
-    const hh = disclose(houseSlot);
-    assert(hh < 4, "the house has four slots");
-    const h = house;
-    const id = hh == 0 ? h[0] : (hh == 1 ? h[1] : (hh == 2 ? h[2] : h[3]));
-    assert(operators.member(id), "that house operator isn't registered");
-    const o = operators.lookup(id);
-    assert(o.active, "that house operator has left");
-    assert(!lastSeat.member(id) || lastSeat.lookup(id) != ee, "that house operator is already seated");
-    place(ee, c, id, o, at);
+    const k0 = houseNext;
+    const k1 = after(k0);
+    const k2 = after(k1);
+    const k3 = after(k2);
+    const f0 = houseFree(ee, houseAt(k0));
+    const f1 = houseFree(ee, houseAt(k1));
+    const f2 = houseFree(ee, houseAt(k2));
+    assert(f0 || f1 || f2 || houseFree(ee, houseAt(k3)), "no house operator is free");
+    const k = f0 ? k0 : (f1 ? k1 : (f2 ? k2 : k3));
+    const id = houseAt(k);
+    houseNext = after(k);
+    place(ee, c, id, operators.lookup(id), at);
   }
 }
 
@@ -732,8 +769,9 @@ export circuit dealShare(e: Uint<64>, d: Uint<8>, i: Uint<8>): [] {
   }
 }
 
-// A seat of epoch e that didn't finish dealing forfeits the ceremony penalty.
-circuit fineUnfinished(e: Uint<64>): [] {
+// A seat of epoch e that didn't finish dealing forfeits the ceremony penalty, and a house
+// operator that didn't is stood down (it can register again at once).
+circuit fineUnfinished(e: Uint<64>, at: Uint<64>): [] {
   for (const k of 0..7) {
     const sk = seatKey(e, (k + 1) as Uint<8>);
     if (members.member(sk) && !finished.member(sk)) {
@@ -742,15 +780,21 @@ circuit fineUnfinished(e: Uint<64>): [] {
         bonds.lookup(id).decrement(ceremonyPenalty);
         forfeited = (forfeited + ceremonyPenalty) as Uint<64>;
       }
+      const o = operators.lookup(id);
+      if (o.house && o.active) {
+        operators.insert(id, Operator { ...o, active: false, queued: false, leftTime: at });
+        houseActive = (houseActive - 1) as Uint<8>;
+      }
     }
   }
 }
 
 // Anyone ends epoch e's ceremony, giving the time now. Once every dealer has finished, or once
 // its deadline has passed with at least t finished, the committee serves from now (every seat
-// holds shares from the finished dealers, whether or not it dealt; a seat that didn't deal
-// forfeits the ceremony penalty). Past the deadline with fewer, or with seats still empty, it
-// has failed, and the epoch before carries on.
+// holds shares from the finished dealers, whether or not it dealt). Past the deadline with
+// fewer, or with seats still empty, it has failed, and the epoch before carries on. Whenever
+// dealing ran to its deadline, the seats that didn't finish forfeit the ceremony penalty
+// (a committee that was never fully seated costs nobody anything).
 export circuit finish(e: Uint<64>, now: Uint<64>): Boolean {
   const ee = disclose(e);
   const at = timeNow(disclose(now));
@@ -764,8 +808,10 @@ export circuit finish(e: Uint<64>, now: Uint<64>): Boolean {
     return true;
   }
   assert(blockTimeGte(c.dealBy), "the ceremony isn't finished and its deadline hasn't passed");
+  if (c.phase == Phase.dealing) {
+    fineUnfinished(ee, at);
+  }
   if (c.phase == Phase.dealing && c.dealt >= c.t) {
-    fineUnfinished(ee);
     committees.insert(ee, Committee { ...c, phase: Phase.serving, since: at });
     previous = current;
     current = ee;
@@ -792,11 +838,12 @@ export circuit request(tag: Bytes<32>, now: Uint<64>, refundTo: UserAddress): By
   const at = timeNow(disclose(now));
   assert(current > 0, "no committee is serving yet");
   assert(blockTimeLt((committees.lookup(current).since + 4 * epochSecs) as Uint<64>), "the serving committee has overstayed: a new epoch must open first");
-  assert(pending < maxPending, "too many requests are waiting to be settled");
-  pending = (pending + 1) as Uint<32>;
+  assert(pending.lessThan(maxPending), "too many requests are waiting to be settled");
+  pending.increment(1);
   const requester = disclose(requesterCommitmentOf(requesterSecret()));
-  const id = requestIdOf(kernel.self(), nextRequest, requester, disclose(tag));
-  nextRequest = (nextRequest + 1) as Uint<64>;
+  const number = nextRequest;
+  const id = requestIdOf(kernel.self(), number, requester, disclose(tag));
+  nextRequest = (number + 1) as Uint<64>;
   receiveUnshielded(nativeToken(), requestFee);
   const h = ecMul(hashToCurve<[Bytes<32>, Bytes<32>]>([pad(32, "nightcast:h2c:v0"), id]), (8 as Field) as JubjubScalar);
   assert(!isIdentity(h), "that request has no usable point");
@@ -807,8 +854,7 @@ export circuit request(tag: Bytes<32>, now: Uint<64>, refundTo: UserAddress): By
     tag: disclose(tag),
     point: h,
     deadline: (at + answerSecs) as Uint<64>,
-    answers: 0,
-    timely: 0,
+    number: number,
     fee: requestFee,
     refundTo: disclose(refundTo),
     settled: false,
@@ -820,30 +866,37 @@ export circuit request(tag: Bytes<32>, now: Uint<64>, refundTo: UserAddress): By
 }
 
 // Position i of the request's committee posts its share Γ_i = sk_i·H, proving sk_i is its share
-// of the group key. Accepted whenever it comes; one that lands before the deadline is paid.
+// of the group key. Accepted whenever it comes; one that lands before the deadline is paid. It
+// writes only its own cells, so answers don't wait on each other.
 export circuit answer(id: Bytes<32>, i: Uint<8>): [] {
   const rid = disclose(id);
   const ii = disclose(i);
   assert(requests.member(rid), "unknown request");
   const r = requests.lookup(rid);
   assert(ii >= 1 && ii <= committees.lookup(r.epoch).n, "no such position");
-  const sid = shareId(rid, ii);
-  assert(!shares.member(sid), "already answered");
+  const k = shareKey(r.number, ii);
+  assert(!shares.member(k), "already answered");
   const sk = shareSecret();
   assert(disclose(same(ecMulGenerator(sk as JubjubScalar), keyOf(r.epoch, ii))), "not this position's share");
-  shares.insert(sid, disclose(ecMul(r.point, sk as JubjubScalar)));
+  shares.insert(k, disclose(ecMul(r.point, sk as JubjubScalar)));
   if (blockTimeLt(r.deadline)) {
-    timelyShares.insert(sid, true);
-    requests.insert(rid, Request { ...r, answers: (r.answers + 1) as Uint<8>, timely: (r.timely + 1) as Uint<8> });
-  } else {
-    requests.insert(rid, Request { ...r, answers: (r.answers + 1) as Uint<8> });
+    timelyShares.insert(k, true);
   }
 }
 
+// How many of a request's positions answered before its deadline.
+circuit inTime(number: Uint<64>, i: Uint<8>, n: Uint<8>): Uint<8> {
+  return (i <= n && timelyShares.member(shareKey(number, i)) ? 1 : 0) as Uint<8>;
+}
+
+circuit timelyOf(number: Uint<64>, n: Uint<8>): Uint<8> {
+  return (inTime(number, 1, n) + inTime(number, 2, n) + inTime(number, 3, n) + inTime(number, 4, n) + inTime(number, 5, n) + inTime(number, 6, n) + inTime(number, 7, n)) as Uint<8>;
+}
+
 // One term of the combination, ±|c_i|·Γ_i, or the identity when the slot isn't used.
-circuit term(use: Boolean, rid: Bytes<32>, i: Uint<8>, a: Uint<8>, b: Uint<8>, c: Uint<8>, negative: Boolean): JubjubPoint {
+circuit term(use: Boolean, number: Uint<64>, i: Uint<8>, a: Uint<8>, b: Uint<8>, c: Uint<8>, negative: Boolean): JubjubPoint {
   if (use) {
-    const sid = shareId(rid, i);
+    const sid = shareKey(number, i);
     assert(shares.member(sid), "a share is missing");
     const m = disclose(coefficient(i, a, b, c));
     assert((m as Field) * distOr1(a, i) * distOr1(b, i) * distOr1(c, i) == (720 as Field) * orOne(a) * orOne(b) * orOne(c), "wrong coefficient");
@@ -873,13 +926,13 @@ export circuit finalise(id: Bytes<32>, s: Vector<4, Uint<8>>, bountyTo: UserAddr
   assert(u2 ? (p[2] > p[1] && p[2] <= c.n) : p[2] == 0, "positions: the committee's threshold of them, in increasing order, then zeros");
   assert(u3 ? (p[3] > p[2] && p[3] <= c.n) : p[3] == 0, "positions: the committee's threshold of them, in increasing order, then zeros");
   // in increasing order, the k-th position has k others below it: c_i's sign is (-1)^k
-  const g = ecAdd(ecAdd(term(true, rid, p[0], p[1], p[2], p[3], false), term(u1, rid, p[1], p[0], p[2], p[3], true)),
-                  ecAdd(term(u2, rid, p[2], p[0], p[1], p[3], false), term(u3, rid, p[3], p[0], p[1], p[2], true)));
+  const g = ecAdd(ecAdd(term(true, r.number, p[0], p[1], p[2], p[3], false), term(u1, r.number, p[1], p[0], p[2], p[3], true)),
+                  ecAdd(term(u2, r.number, p[2], p[0], p[1], p[3], false), term(u3, r.number, p[3], p[0], p[1], p[2], true)));
   const out = outputOf(g);
-  const enough = r.timely >= c.t;
+  const enough = timelyOf(r.number, c.n) >= c.t;
   const free = r.slot && enough;
   if (free) {
-    pending = (pending - 1) as Uint<32>;
+    pending.decrement(1);
   }
   if (finaliseBounty > 0 && r.fee >= finaliseBounty && (enough || blockTimeLt(r.deadline))) {
     requests.insert(rid, Request { ...r, status: Status.fulfilled, output: out, slot: r.slot && !free, fee: (r.fee - finaliseBounty) as Uint<128> });
@@ -890,13 +943,19 @@ export circuit finalise(id: Bytes<32>, s: Vector<4, Uint<8>>, bountyTo: UserAddr
   return out;
 }
 
-// Position i of a request: whether it answered in time; if not, a miss is counted against it.
-// Returns the operator seated there.
-circuit tally(e: Uint<64>, i: Uint<8>, answered: Boolean): Bytes<32> {
+// Position i of a request with this deadline: if it didn't answer in time, a miss is counted
+// against it, but only once per answering time (a request whose deadline is less than one
+// answering time after the last one counted adds nothing), so a burst of requests while a seat
+// is briefly away counts as one miss. Returns the operator seated there.
+circuit tally(e: Uint<64>, i: Uint<8>, answered: Boolean, deadline: Uint<64>): Bytes<32> {
   const id = members.lookup(seatKey(e, i));
   if (!answered) {
-    const m = missed.member(id) ? missed.lookup(id) : 0;
-    missed.insert(id, m < 65535 ? (m + 1) as Uint<16> : m);
+    const last = lastMiss.member(id) ? lastMiss.lookup(id) : 0;
+    if (deadline >= last + answerSecs) {
+      const m = missed.member(id) ? missed.lookup(id) : 0;
+      missed.insert(id, m < 65535 ? (m + 1) as Uint<16> : m);
+      lastMiss.insert(id, deadline);
+    }
   }
   return id;
 }
@@ -906,11 +965,13 @@ circuit tally(e: Uint<64>, i: Uint<8>, answered: Boolean): Bytes<32> {
 //    has sent `finalise` yet): what it holds of the fee is shared equally by the seats that
 //    answered in time, to be claimed. If it isn't finalised yet, the bounty stays with it for
 //    whoever does.
-//  - Fewer did: it is void. The refund address gets back what the request holds of the fee, and
-//    every seat that didn't answer in time forfeits the miss penalty (to nobody). It keeps its
-//    H and can still be answered and finalised, so going silent never buys a different value.
+//  - Fewer did: it is void. `tipTo` is paid the bounty's worth out of the fee for settling it
+//    (so void requests don't wait; a requester that settles its own gets the whole fee), the
+//    refund address gets the rest, and every seat that didn't answer in time forfeits the miss
+//    penalty (to nobody). It keeps its H and can still be answered and finalised, so going
+//    silent never buys a different value.
 // Either way a miss is counted against each seat that didn't answer in time.
-export circuit settle(id: Bytes<32>): [] {
+export circuit settle(id: Bytes<32>, tipTo: UserAddress): [] {
   const rid = disclose(id);
   assert(requests.member(rid), "unknown request");
   const r = requests.lookup(rid);
@@ -918,20 +979,21 @@ export circuit settle(id: Bytes<32>): [] {
   assert(blockTimeGte(r.deadline), "deadline has not passed");
   const c = committees.lookup(r.epoch);
   if (r.slot) {
-    pending = (pending - 1) as Uint<32>;
+    pending.decrement(1);
   }
-  if (r.timely >= c.t) {
+  const timely = timelyOf(r.number, c.n);
+  if (timely >= c.t) {
     const keep = (r.status == Status.pending && r.fee >= finaliseBounty ? finaliseBounty : 0) as Uint<128>;
     const total = ((r.fee as Field) - (keep as Field)) as Uint<128>;
-    const each = disclose(quotient(total, r.timely));
-    const left = ((total as Field) - (each as Field) * (r.timely as Field)) as Uint<128>;
-    assert(left < r.timely, "that isn't the fee shared equally");
+    const each = disclose(quotient(total, timely));
+    const left = ((total as Field) - (each as Field) * (timely as Field)) as Uint<128>;
+    assert(left < timely, "that isn't the fee shared equally");
     dust = (dust + left) as Uint<128>;
     for (const k of 0..7) {
       const i = (k + 1) as Uint<8>;
       if (i <= c.n) {
-        const answered = timelyShares.member(shareId(rid, i));
-        const op = tally(r.epoch, i, answered);
+        const answered = timelyShares.member(shareKey(r.number, i));
+        const op = tally(r.epoch, i, answered, r.deadline);
         if (answered) {
           const had = earned.member(op) ? earned.lookup(op) : 0;
           earned.insert(op, (had + each) as Uint<128>);
@@ -943,16 +1005,20 @@ export circuit settle(id: Bytes<32>): [] {
     for (const k of 0..7) {
       const i = (k + 1) as Uint<8>;
       if (i <= c.n) {
-        const answered = timelyShares.member(shareId(rid, i));
-        const op = tally(r.epoch, i, answered);
+        const answered = timelyShares.member(shareKey(r.number, i));
+        const op = tally(r.epoch, i, answered, r.deadline);
         if (!answered && !bonds.lookup(op).lessThan(missPenalty)) {
           bonds.lookup(op).decrement(missPenalty);
           forfeited = (forfeited + missPenalty) as Uint<64>;
         }
       }
     }
-    if (r.fee > 0) {
-      sendUnshielded(nativeToken(), r.fee, toUser(r.refundTo));
+    const tip = (r.fee >= finaliseBounty ? finaliseBounty : 0) as Uint<128>;
+    if (tip > 0) {
+      sendUnshielded(nativeToken(), tip, toUser(disclose(tipTo)));
+    }
+    if (r.fee > tip) {
+      sendUnshielded(nativeToken(), (r.fee - tip) as Uint<128>, toUser(r.refundTo));
     }
     requests.insert(rid, Request { ...r, settled: true, voided: true, slot: false, fee: 0 });
   }
