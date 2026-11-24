@@ -20,7 +20,10 @@
  * A circuit that takes the time is given "now" a little ahead (--lead 60 seconds; --lead-link 240
  * for linkPool, whose proof is the largest), because its proof has to be made before it is sent.
  * The contract accepts a "now" within its slack of the block's time.
+ * With --proof-container <docker name> the proof server's memory is sampled during each call and
+ * its peak reported.
  */
+import { execFile } from 'node:child_process';
 import { appendFileSync, mkdirSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { parseArgs } from 'node:util';
@@ -36,7 +39,7 @@ const { values, positionals } = parseArgs({
   allowPositionals: true,
   options: {
     wallet: { type: 'string' }, dir: { type: 'string' }, log: { type: 'string' }, network: { type: 'string', default: 'preprod' }, 'proof-server-port': { type: 'string', default: '6304' },
-    lead: { type: 'string', default: '60' }, 'lead-link': { type: 'string', default: '240' },
+    lead: { type: 'string', default: '60' }, 'lead-link': { type: 'string', default: '240' }, 'proof-container': { type: 'string' },
   },
 });
 const mode = positionals[0];
@@ -107,22 +110,44 @@ if (mode === 'status') {
         await sleep(5_000);
       }
     };
+    /** The proof server container's memory in MiB now ("6.2GiB / 23.4GiB" -> 6349), or undefined. */
+    const memoryNow = () => new Promise((done) => {
+      if (!values['proof-container']) return done(undefined);
+      execFile('docker', ['stats', '--no-stream', '--format', '{{.MemUsage}}', values['proof-container']], { timeout: 10_000 }, (err, out) => {
+        const m = /^\s*([\d.]+)\s*(KiB|MiB|GiB|B)/.exec(String(out ?? ''));
+        if (err || !m) return done(undefined);
+        done(Math.round(Number(m[1]) * { B: 1 / 1048576, KiB: 1 / 1024, MiB: 1, GiB: 1024 }[m[2]]));
+      });
+    });
     /** One call: up to three tries when it fails for a reason that can pass; a contract assertion is final. */
     const call = async (what, circuit, f) => {
       for (let i = 1; ; i++) {
         proving = 0;
         const started = Date.now();
+        let peak;
+        let sampling = false;
+        const sampler = setInterval(async () => {
+          if (sampling) return;
+          sampling = true;
+          const m = await memoryNow();
+          if (m !== undefined && (peak === undefined || m > peak)) peak = m;
+          sampling = false;
+        }, 5_000);
+        const memory = () => (peak === undefined ? '' : `, proof server up to ${(peak / 1024).toFixed(1)} GiB`);
         try {
           const r = succeeded(await f(), what);
-          const row = { time: new Date().toISOString(), what, circuit, ok: true, provingSeconds: Math.round(proving / 100) / 10, totalSeconds: Math.round((Date.now() - started) / 100) / 10, tries: i, txId: r.public?.txId };
+          clearInterval(sampler);
+          const row = { time: new Date().toISOString(), what, circuit, ok: true, provingSeconds: Math.round(proving / 100) / 10, totalSeconds: Math.round((Date.now() - started) / 100) / 10, tries: i, peakProofServerMiB: peak, txId: r.public?.txId };
           log(row);
-          say(`ok   ${what}: proof ${row.provingSeconds} s, ${row.totalSeconds} s in all${i > 1 ? ` (try ${i})` : ''}, transaction ${row.txId}`);
+          say(`ok   ${what}: proof ${row.provingSeconds} s, ${row.totalSeconds} s in all${memory()}${i > 1 ? ` (try ${i})` : ''}, transaction ${row.txId}`);
           return r;
         } catch (e) {
+          clearInterval(sampler);
           const text = errorText(e);
-          log({ time: new Date().toISOString(), what, circuit, ok: false, provingSeconds: Math.round(proving / 100) / 10, totalSeconds: Math.round((Date.now() - started) / 100) / 10, tries: i, error: text });
-          say(`FAIL ${what} (try ${i}; proof ${Math.round(proving / 1000)} s, ${Math.round((Date.now() - started) / 1000)} s in all): ${text}`);
-          if (i >= 3 || /failed assert|assertion failed/i.test(text)) throw e;
+          log({ time: new Date().toISOString(), what, circuit, ok: false, provingSeconds: Math.round(proving / 100) / 10, totalSeconds: Math.round((Date.now() - started) / 100) / 10, tries: i, peakProofServerMiB: peak, error: text });
+          say(`FAIL ${what} (try ${i}; proof ${Math.round(proving / 1000)} s, ${Math.round((Date.now() - started) / 1000)} s in all${memory()}): ${text}`);
+          // a proof server that failed is not asked again at once: it may have run out of memory
+          if (i >= 3 || /failed assert|assertion failed|Proof Server request failed/i.test(text)) throw e;
           await sleep(20_000);
         }
       }

@@ -13,6 +13,7 @@
 #                                     pool-1 and pool-5, and op-5 leaves. All before any epoch.
 #   bash tnet.sh do <action> ...      any of those actions (see network/threshold/ops/ops.mjs)
 #   bash tnet.sh midnight             read-only: who produces Midnight's blocks on Preprod (for the real pool list)
+#   bash tnet.sh proof-restart        install this checkout's proof server unit (its memory settings) and restart it
 # Settings: see the top of network/threshold/ops/deploy.mjs. Proof times are kept in $DATA/proofs.jsonl.
 set -euo pipefail
 
@@ -50,6 +51,15 @@ case "${1:-}" in
     # Midnight's own Preprod node was retired on 24 Nov 2026: Blockfrost's serves the chain.
     NIGHTCAST_NODE_URL=blockfrost NIGHTCAST_NODE_WS=blockfrost node network/threshold/ops/deploy.mjs deploy --wallet "$REQW" --house "$DATA" --pools "$DATA/pool-list.json" --proof-server-port "$PORT" "${@:2}"
     ;;
+  proof-restart)
+    cp network/vm/nightcast-net-proof.service /etc/systemd/system/nightcast-net-proof.service
+    systemctl daemon-reload
+    systemctl restart nightcast-net-proof
+    for _ in $(seq 1 30); do curl -sf "http://127.0.0.1:$PORT/health" >/dev/null && break; sleep 3; done
+    curl -sf "http://127.0.0.1:$PORT/health" >/dev/null || { echo "the proof server on $PORT isn't answering after 90 s: journalctl -u nightcast-net-proof -n 20" >&2; exit 1; }
+    say "Proof server answering on $PORT; its memory ceiling: $(docker inspect -f '{{.HostConfig.Memory}}' nightcast-net-proof | awk '{ printf "%.1f GiB", $1 / 1073741824 }'); log kept to $(docker inspect -f '{{index .HostConfig.LogConfig.Config "max-size"}}' nightcast-net-proof) x 2"
+    free -m | sed -n 1,2p
+    ;;
   midnight)
     node network/threshold/ops/midnight-committee.mjs
     ;;
@@ -63,7 +73,7 @@ case "${1:-}" in
     if [ "$1" = first ]; then
       set -- do load-pools register:house-1 register:house-2 register:house-3 register:house-4 register:op-1 link:op-1:pool-1 register:op-5 link:op-5:pool-5 leave:op-5
     fi
-    NIGHTCAST_NODE_URL=blockfrost NIGHTCAST_NODE_WS=blockfrost node network/threshold/ops/ops.mjs do --wallet "$OPW" --dir "$DATA" --log "$DATA/proofs.jsonl" --proof-server-port "$PORT" "${@:2}"
+    NIGHTCAST_NODE_URL=blockfrost NIGHTCAST_NODE_WS=blockfrost node network/threshold/ops/ops.mjs do --wallet "$OPW" --dir "$DATA" --log "$DATA/proofs.jsonl" --proof-server-port "$PORT" --proof-container nightcast-net-proof "${@:2}"
     ;;
-  *) sed -n 2,16p "$0"; exit 2 ;;
+  *) sed -n 2,17p "$0"; exit 2 ;;
 esac
