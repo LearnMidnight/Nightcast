@@ -37,7 +37,11 @@ case "${1:-}" in
     ;;
   deploy)
     [ -f "$DATA/pool-list.json" ] || { echo "no keys yet: run bash network/threshold/vm/tnet.sh keys first" >&2; exit 1; }
-    node network/threshold/ops/deploy.mjs deploy --wallet "$REQW" --house "$DATA" --pools "$DATA/pool-list.json" --proof-server-port "$PORT" "${@:2}"
+    # One process per wallet: the old test's requester uses the same one.
+    if systemctl is-active -q nightcast-net-requester; then echo "the old test's requester is running and uses this wallet: stop it first (bash network/vm/net.sh stop)" >&2; exit 1; fi
+    curl -sf "http://127.0.0.1:$PORT/health" >/dev/null || { echo "the proof server on $PORT isn't answering: systemctl start nightcast-net-proof, wait a minute, and try again" >&2; exit 1; }
+    # Midnight's own Preprod node was retired on 24 Nov 2026: Blockfrost's serves the chain.
+    NIGHTCAST_NODE_URL=blockfrost NIGHTCAST_NODE_WS=blockfrost node network/threshold/ops/deploy.mjs deploy --wallet "$REQW" --house "$DATA" --pools "$DATA/pool-list.json" --proof-server-port "$PORT" "${@:2}"
     ;;
   *) sed -n 2,10p "$0"; exit 2 ;;
 esac
