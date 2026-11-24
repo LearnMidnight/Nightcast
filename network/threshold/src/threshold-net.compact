@@ -385,9 +385,16 @@ export pure circuit outputOf(gamma: JubjubPoint): Bytes<32> {
 }
 
 // The pad for dealer d's parcel to position i in epoch e, from the point they share (by its
-// coordinates). SHA-256, as a field element: a parcel stays in the ledger.
+// coordinates). SHA-256, because a parcel stays in the ledger. One SHA-256 output comes down to
+// a field element of 248 bits, four short of a share, so the pad is two of them, the second
+// times 2^248: it covers the whole field.
 export pure circuit padOf(k: JubjubPoint, e: Uint<64>, d: Uint<8>, i: Uint<8>): Field {
-  return degradeToTransient(persistentHash<[Bytes<32>, Field, Field, Field, Field, Field]>([pad(32, "nightcast:parcel:v1"), jubjubPointX(k), jubjubPointY(k), e as Field, d as Field, i as Field]));
+  const x = jubjubPointX(k);
+  const y = jubjubPointY(k);
+  const lo = degradeToTransient(persistentHash<[Bytes<32>, Field, Field, Field, Field, Field]>([pad(32, "nightcast:parcel:v1"), x, y, e as Field, d as Field, i as Field]));
+  const hi = degradeToTransient(persistentHash<[Bytes<32>, Field, Field, Field, Field, Field]>([pad(32, "nightcast:parcel:v1:high"), x, y, e as Field, d as Field, i as Field]));
+  const two32 = 4294967296 as Field;
+  return lo + hi * two32 * two32 * two32 * two32 * two32 * two32 * two32 * (16777216 as Field);
 }
 
 pure circuit same(a: JubjubPoint, b: JubjubPoint): Boolean {

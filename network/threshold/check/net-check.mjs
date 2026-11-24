@@ -201,7 +201,7 @@ const open = async () => { if (ledger().current > 0n && ledger().opened === ledg
 {
   let widest = 0;
   for (let k = 1n; k <= 400n; k++) widest = Math.max(widest, P.pureCircuits.padOf(G(k), k, 1n, 2n).toString(2).length);
-  console.log(`note  the widest of 400 pads is ${widest} bits (a share is up to ${r.toString(2).length} bits, the field ${fp.toString(2).length})`);
+  ok(widest > r.toString(2).length, `the pad on a dealt share covers a whole share: the widest of 400 pads is ${widest} bits, a share is up to ${r.toString(2).length}`);
 }
 
 // ---- what the contract refuses to be deployed with
