@@ -12,6 +12,7 @@
 #                                     list, register the house's four and op-1 and op-5, link those two to
 #                                     pool-1 and pool-5, and op-5 leaves. All before any epoch.
 #   bash tnet.sh do <action> ...      any of those actions (see network/threshold/ops/ops.mjs)
+#   bash tnet.sh midnight             read-only: who produces Midnight's blocks on Preprod (for the real pool list)
 # Settings: see the top of network/threshold/ops/deploy.mjs. Proof times are kept in $DATA/proofs.jsonl.
 set -euo pipefail
 
@@ -49,6 +50,9 @@ case "${1:-}" in
     # Midnight's own Preprod node was retired on 24 Nov 2026: Blockfrost's serves the chain.
     NIGHTCAST_NODE_URL=blockfrost NIGHTCAST_NODE_WS=blockfrost node network/threshold/ops/deploy.mjs deploy --wallet "$REQW" --house "$DATA" --pools "$DATA/pool-list.json" --proof-server-port "$PORT" "${@:2}"
     ;;
+  midnight)
+    node network/threshold/ops/midnight-committee.mjs
+    ;;
   status)
     NIGHTCAST_NODE_URL=blockfrost NIGHTCAST_NODE_WS=blockfrost node network/threshold/ops/ops.mjs status --proof-server-port "$PORT"
     ;;
@@ -61,5 +65,5 @@ case "${1:-}" in
     fi
     NIGHTCAST_NODE_URL=blockfrost NIGHTCAST_NODE_WS=blockfrost node network/threshold/ops/ops.mjs do --wallet "$OPW" --dir "$DATA" --log "$DATA/proofs.jsonl" --proof-server-port "$PORT" "${@:2}"
     ;;
-  *) sed -n 2,15p "$0"; exit 2 ;;
+  *) sed -n 2,16p "$0"; exit 2 ;;
 esac
