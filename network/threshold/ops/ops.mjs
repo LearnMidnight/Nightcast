@@ -43,6 +43,10 @@
  * DUST builds up from the wallet's NIGHT (5 DUST for each NIGHT over a week), and a run of calls
  * can spend it faster than that: a call waits (--dust-wait minutes at most, 120 by default) until
  * the wallet holds about what the last one paid. NIGHT that arrives meanwhile is registered.
+ * A wallet that loses its connection to the network may never report itself in step again, and
+ * whatever waits on it then waits for ever (twice on 24 Nov 2026). So a run that shows no sign
+ * of life for --stall minutes (10 by default) ends with exit code 75, to be started again: it
+ * goes on from what the chain shows. `tnet.sh bg` does that by itself.
  *
  * A circuit that takes the time is given "now" a little ahead (--lead 60 seconds; --lead-link 240
  * for linkPool, whose proof is the largest), because its proof has to be made before it is sent.
@@ -73,7 +77,7 @@ const { values, positionals } = parseArgs({
   options: {
     wallet: { type: 'string' }, dir: { type: 'string' }, log: { type: 'string' }, network: { type: 'string', default: 'preprod' }, 'proof-server-port': { type: 'string', default: '6304' },
     lead: { type: 'string', default: '60' }, 'lead-link': { type: 'string', default: '240' }, 'proof-container': { type: 'string' },
-    'dust-spends': { type: 'string', default: '3' }, 'dust-wait': { type: 'string', default: '120' },
+    'dust-spends': { type: 'string', default: '3' }, 'dust-wait': { type: 'string', default: '120' }, stall: { type: 'string', default: '10' },
   },
 });
 const mode = positionals[0];
@@ -201,11 +205,23 @@ if (mode === 'status') {
     mkdirSync(dirname(values.log), { recursive: true });
     appendFileSync(values.log, JSON.stringify(row) + '\n');
   };
+  // Signs of life: every look at the chain or the wallet that came back, and every proof asked for or made.
+  let lastSign = Date.now();
+  const alive = () => { lastSign = Date.now(); };
+  const stallMs = Math.max(3, Number(values.stall) || 10) * 60_000;
   // How many DUST coins pay each fee (the dust wallet reads this when it balances a transaction).
   const wantSpends = Math.max(1, Math.min(4, Math.floor(Number(values['dust-spends'])) || 1));
   if (wantSpends > 1) process.env.NIGHTCAST_DUST_MIN_SPENDS = String(wantSpends);
   try {
-  await withChain({ network: values.network, proofServerPort: Number(values['proof-server-port']), walletFile: values.wallet, address }, async ({ session, wallet, providers, read, handle, me, meBytes }) => {
+  await withChain({ network: values.network, proofServerPort: Number(values['proof-server-port']), walletFile: values.wallet, address }, async ({ session, wallet, providers, read: readChain, handle, me, meBytes }) => {
+    // Watched from here on, with the wallet open (its first sync can take minutes and says so itself).
+    alive();
+    setInterval(() => {
+      if (Date.now() - lastSign < stallMs) return;
+      say(`stalled: no sign of life for ${Math.round(stallMs / 60_000)} minutes (the wallet has probably lost the network). Stopping, to be started again: it goes on from what the chain shows`);
+      process.exit(75);
+    }, 30_000).unref();
+    const read = async (...a) => { const l = await readChain(...a); alive(); return l; };
     // Look at each transaction as it is sent.
     let lastTx;
     const sender = providers.midnightProvider;
@@ -214,12 +230,16 @@ if (mode === 'status') {
         const v = t[k];
         if (typeof v !== 'function') return v;
         if (k !== 'submitTx') return v.bind(t);
-        return async (tx, ...rest) => { lastTx = describeTx(tx); return v.call(t, tx, ...rest); };
+        return async (tx, ...rest) => { lastTx = describeTx(tx); alive(); try { return await v.call(t, tx, ...rest); } finally { alive(); } };
       },
     });
     const syncedState = () => firstValueFrom(wallet.wallet.state().pipe(filter((s) => s.isSynced)));
     /** The wallet's NIGHT UTXOs (and how many generate DUST) and its DUST coins: free to pay with, and booked by a transaction that hasn't landed. */
-    const coinsNow = async () => ({ ...(await walletBalances(wallet)), booked: (await syncedState()).dust.pendingCoins.length });
+    const coinsNow = async () => {
+      const c = { ...(await walletBalances(wallet)), booked: (await syncedState()).dust.pendingCoins.length };
+      alive();
+      return c;
+    };
     const coinsText = (c) => `${tn(c.night)} in ${c.nightUtxos} NIGHT UTXO${c.nightUtxos === 1 ? '' : 's'} (${c.nightRegistered} generating DUST); ${dustText(c.dust)} DUST in ${c.dustCoins} coin${c.dustCoins === 1 ? '' : 's'} free to pay with${c.booked ? `, ${c.booked} more booked by transactions that haven't landed` : ''}`;
     /** Register NIGHT that doesn't generate DUST yet (change, or NIGHT that has just arrived). */
     const registerNew = async () => {
@@ -279,7 +299,7 @@ if (mode === 'status') {
       get: (t, k) => {
         const v = t[k];
         if (typeof v !== 'function') return v;
-        return async (...a) => { const s = Date.now(); try { return await v.apply(t, a); } finally { proving += Date.now() - s; } };
+        return async (...a) => { const s = Date.now(); alive(); try { return await v.apply(t, a); } finally { proving += Date.now() - s; alive(); } };
       },
     });
     const l0 = await read();

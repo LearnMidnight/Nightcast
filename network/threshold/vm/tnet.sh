@@ -19,7 +19,8 @@
 #   bash tnet.sh ask [tag]            a request to the serving committee, every seat's answer, and the value
 #   bash tnet.sh do <action> ...      any of the actions (see network/threshold/ops/ops.mjs)
 #   bash tnet.sh bg <command> ...     first, epoch, ask, do or coins in the background: it goes on if the window closes or the
-#                                     connection drops. Its output goes to $DATA/run.log
+#                                     connection drops, and is started again if it stalls. Its output goes to $DATA/run.log
+#   bash tnet.sh stop                 stop a run (it can be started again: it goes on from what the chain shows)
 #   bash tnet.sh log [lines]          whether a run is going, and the end of run.log
 #   bash tnet.sh midnight             read-only: who produces Midnight's blocks on Preprod (for the real pool list)
 #   bash tnet.sh proof-restart        install this checkout's proof server unit (its memory settings) and restart it
@@ -99,14 +100,22 @@ case "${1:-}" in
     case "${2:-}" in first|do|epoch|ask|coins) ;; *) echo "bg takes one of: first, epoch, ask, do, coins" >&2; exit 2 ;; esac
     if pgrep -f 'node network/threshold/ops/[o]ps.mjs' >/dev/null; then echo "a run is already going: bash network/threshold/vm/tnet.sh log" >&2; exit 1; fi
     echo "==== $(date -u '+%Y-%m-%d %H:%M:%S') UTC: tnet.sh ${*:2}" >> "$DATA/run.log"
-    nohup bash "$REPO/network/threshold/vm/tnet.sh" "${@:2}" >> "$DATA/run.log" 2>&1 < /dev/null &
+    # A run that stalls (the wallet lost the network) ends with code 75: start it again, up to six times.
+    nohup bash -c 'for n in 1 2 3 4 5 6; do bash "$0" "$@"; code=$?; [ "$code" = 75 ] || exit "$code"; echo "== started again after a stall (start $((n + 1)) of 6)"; sleep 20; done; exit 75' "$REPO/network/threshold/vm/tnet.sh" "${@:2}" >> "$DATA/run.log" 2>&1 < /dev/null &
     sleep 5
     say "Started in the background: it goes on if this window closes. Look at it with: bash network/threshold/vm/tnet.sh log"
     tail -n 6 "$DATA/run.log"
+    ;;
+  stop)
+    pkill -f 'tnet[.]sh (first|do|epoch|ask|coins)' || true
+    pkill -f "ops[.]mjs do --wallet $OPW" || true
+    sleep 3
+    if pgrep -f 'node network/threshold/ops/[o]ps.mjs' >/dev/null; then echo "still running: pgrep -af ops.mjs" >&2; exit 1; fi
+    say "Stopped"
     ;;
   log)
     if pgrep -f 'node network/threshold/ops/[o]ps.mjs' >/dev/null; then say "A run is going"; else say "Nothing is running"; fi
     if [ -f "$DATA/run.log" ]; then tail -n "${2:-40}" "$DATA/run.log"; else echo "no background run has been started yet"; fi
     ;;
-  *) sed -n 2,27p "$0"; exit 2 ;;
+  *) sed -n 2,28p "$0"; exit 2 ;;
 esac
