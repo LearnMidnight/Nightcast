@@ -1,4 +1,4 @@
-// Nightcast threshold network, stage 10 (not yet deployed; after four reviews on 23 Nov 2026).
+// Nightcast threshold network, stage 11 (not yet deployed; after five reviews, 23 and 24 Nov 2026).
 //
 // A committee of n operators (positions 1..n) shares one key that nobody holds. Any t of them
 // give the same random value for a request; fewer than t can't work it out. The design, the
@@ -9,7 +9,8 @@
 //               list; the house's operators (named when the contract is deployed) only fill
 //               the seats independents can't.
 //   pool link   An operator that isn't the house's counts as independent (and joins the ring) only once
-//               `linkPool` has seen a stake pool's Ed25519 key sign for it, AND that key is on
+//               it has brought `linkPool` a stake pool's Ed25519 signature for it (the operator
+//               brings it itself: no pool can claim an operator that didn't ask), AND that key is on
 //               the list of pool keys fixed when the contract was deployed. The list is too
 //               long to deploy with, so the contract is deployed with its commitment (a
 //               SHA-256 chain over batches of eight) and anyone loads the batches afterwards
@@ -20,16 +21,16 @@
 //               POOL is the unit: one operator per pool at a time, and when its operator leaves
 //               or is stood down the pool sits out two epoch lengths before it can back
 //               another (so does the operator before it can register again).
-//   epochs      openEpoch sizes the next committee from the number of independents (1 of 1 with
-//               none, 3 of 5 with 1 to 3, 4 of 7 from 4), and `seat` fills it: independents
+//   epochs      openEpoch sizes the next committee from the number of independents: none, 1 of
+//               1 (a house seat); 1 to 3, a threshold of 3 (3 of 5 when the house can fill it);
+//               4 or more, a threshold of 4 (4 of 7 likewise). `seat` fills it: independents
 //               round the ring from where the last committee stopped, then the house, taken in
 //               turn. So everyone serves in turn, with no randomness and nothing the caller
 //               chooses, and an operator's place is its pool's place in the list (fixed at
 //               deploy, by a public rule), not the moment it chose to join: pools can't
-//               arrange to sit together. If the house can't fill the size the independents
-//               call for, the committee is the largest it can fill (7, then 5; and 1, a house
-//               seat, only while there are two independents or fewer, when the house holds
-//               the threshold anyway).
+//               arrange to sit together. If the house hasn't the operators to fill the size,
+//               the committee is smaller but its threshold is not: the number of pools it
+//               takes to work out a value never drops because the house is away.
 //               Nobody can leave or join the ring while a committee is being seated, so a
 //               committee that was sized can always be filled, and by the operators it was
 //               sized for.
@@ -192,8 +193,11 @@ export ledger poolKeys: Map<Bytes<32>, Curve25519Point>;
 export ledger poolOperator: Map<Bytes<32>, Bytes<32>>;
 export ledger poolLinks: Map<Bytes<32>, Uint<64>>;
 export ledger poolOf: Map<Bytes<32>, Bytes<32>>;
-// When a pool last revoked its operator: it sits out from then.
+// When a pool last revoked its operator (it sits out from then), and the last epoch that
+// operator had been seated in (0: none): a seat it held as this pool's holds the pool, one it
+// wins later behind another pool doesn't.
 export ledger poolFreed: Map<Bytes<32>, Uint<64>>;
+export ledger poolSeat: Map<Bytes<32>, Uint<64>>;
 // The pool key ids loaded from the list so far, each with its place in the list (from 1); how
 // many places have been loaded; and the commitment the next batch must match (all zeros once
 // the whole list is in).
@@ -237,11 +241,14 @@ export ledger pending: Counter;
 // and which of the house's four sits next.
 export ledger missedIn: Map<Field, Boolean>;
 export ledger houseNext: Uint<8>;
-// What each operator has earned and not yet claimed (atoms); requests it missed since it was
-// last reviewed; and atoms left over from sharing fees (they stay in the contract).
+// What each operator has earned and not yet claimed (atoms), and atoms left over from sharing
+// fees (they stay in the contract).
 export ledger earned: Map<Bytes<32>, Uint<128>>;
-export ledger missed: Map<Bytes<32>, Uint<16>>;
 export ledger dust: Uint<128>;
+// The answering times each seat (epoch, position) has missed in, and the count it was last
+// stood down at (it is stood down again only for that many more).
+export ledger missed: Map<Field, Uint<16>>;
+export ledger excused: Map<Field, Uint<16>>;
 export sealed ledger slack: Uint<64>;
 // How long seating has from the moment an epoch is opened, and dealing from the moment the
 // last seat is taken (the same length); and how long a committee has to
@@ -261,7 +268,7 @@ export sealed ledger epochSecs: Uint<64>;
 export sealed ledger requestFee: Uint<128>;
 export sealed ledger finaliseBounty: Uint<128>;
 // The slots a seat loses for not answering a request that goes void, and how many answering
-// times a seat may miss between two epoch openings before it is stood down.
+// times a seat may miss in before its operator is stood down.
 export sealed ledger missPenalty: Uint<16>;
 export sealed ledger allowedMisses: Uint<16>;
 // The house's four operator ids.
@@ -297,7 +304,7 @@ constructor(slackSecs: Uint<64>, epoch: Uint<64>, ceremony: Uint<64>, answer: Ui
   assert(bounty >= 1 && 2 * bounty <= fee, "the bounty is at most half the fee, and not nothing");
   assert((((miss as Field) * (collateral as Field)) as Uint<128>) >= fee, "a missed request costs a seat at least the fee");
   assert(pendingMax >= 1 && 2 * pendingMax * miss <= minBond, "one answering time of void requests costs a seat at most half the smallest bond");
-  assert(misses >= 2 && misses <= 1000 && (misses + 1) * answer <= epoch, "a seat is allowed at least 2 missed answering times, and few enough that an epoch can hold more");
+  assert(misses >= 2 && misses <= 1000 && (misses + 3) * answer <= epoch, "a seat is allowed at least 2 missed answering times, and few enough that an epoch can hold more");
   const zero = default<Bytes<32>>;
   assert(houseIds[0] != zero && houseIds[1] != zero && houseIds[2] != zero && houseIds[3] != zero
       && houseIds[0] != houseIds[1] && houseIds[0] != houseIds[2] && houseIds[0] != houseIds[3]
@@ -520,7 +527,6 @@ export circuit register(payout: UserAddress, slots: Uint<16>, prior: Uint<32>): 
     bonds.lookup(id).increment(n);
   }
   assert(!bonds.lookup(id).lessThan(minBondSlots), "the bond is below the minimum");
-  missed.insert(id, 0);
   operators.insert(id, Operator { key: key, payout: disclose(payout), house: hs, active: true, leftTime: 0 });
   if (hs) {
     houseActive = (houseActive + 1) as Uint<8>;
@@ -561,15 +567,17 @@ export circuit loadPools(batch: Vector<8, Bytes<32>>, next: Bytes<32>): [] {
   poolsNext = n;
 }
 
-// Anyone brings a stake pool key's signature over linkMessageOf(this contract, the operator,
-// the pool's count, revoke), giving the time now.
-//  - To link: the key must be on the contract's list (and that part of it loaded). The operator
+// A stake pool key's signature over linkMessageOf(this contract, the operator, the pool's count,
+// revoke) is brought, with the time now.
+//  - To link: the operator brings it itself (it proves its secret), so no pool can claim an
+//    operator that didn't ask for it. The key must be on the contract's list (and that part of it loaded). The operator
 //    then counts as independent and takes its pool's place in the ring (`prior`: the place
 //    before it, 0 if it is first; ignored when revoking). A pool backs one operator at a time: it
 //    can move to another only once the one it backed has left, been stood down or been revoked,
 //    is no longer in the serving committee, and two epoch lengths have passed since. What an
 //    operator does after its pool revoked it doesn't hold the pool.
-//  - To revoke: the pool stops backing its operator, which is stood down if it was active (a
+//  - To revoke: anyone brings it (the pool needs nothing from the operator). The pool stops
+//    backing its operator, which is stood down if it was active (a
 //    seat it holds keeps its duties) and is no longer linked. Not while a committee is being
 //    seated. So a pool is never held by an operator key that has gone astray.
 // Either way the pool's count goes up, so a signature can't be used twice.
@@ -589,6 +597,7 @@ export circuit linkPool(operator: Bytes<32>, sig: Ed25519Signature, pool: Curve2
     assert(o.active, "that operator has left");
     assert(!o.house, "the house's operators need no pool");
     assert(!poolOf.member(id), "that operator is linked to a pool");
+    assert(keyIdOf(disclose(ecMulGenerator(operatorSecret() as JubjubScalar))) == id, "only the operator itself brings its pool's link");
     assert(listed.member(pid), "that key isn't on this contract's list of stake pools");
     if (poolOperator.member(pid)) {
       const old = poolOperator.lookup(pid);
@@ -597,11 +606,13 @@ export circuit linkPool(operator: Bytes<32>, sig: Ed25519Signature, pool: Curve2
         const was = operators.lookup(old);
         assert(!was.active, "that pool's operator is still active");
         assert(blockTimeGte((was.leftTime + 2 * epochSecs) as Uint<64>), "a pool sits out two epoch lengths after its operator left");
+        assert(current == 0 || !seatedIn(current, old), "that pool's last operator is still in the serving committee");
       } else {
-        // the pool revoked `old`, which is no longer its concern whatever it has done since
+        // the pool revoked `old`, which is no longer its concern whatever it has done since:
+        // only a seat it already held then still holds the pool
         assert(!poolFreed.member(pid) || blockTimeGte((poolFreed.lookup(pid) + 2 * epochSecs) as Uint<64>), "a pool sits out two epoch lengths after its operator left");
+        assert(current == 0 || !poolSeat.member(pid) || poolSeat.lookup(pid) < current || !seatedIn(current, old), "that pool's last operator is still in the serving committee");
       }
-      assert(current == 0 || !seatedIn(current, old), "that pool's last operator is still in the serving committee");
     }
   }
   assert(ed25519Verify<32>(linkMessageOf(kernel.self(), id, n, undo), disclose(sig), key), "the pool's key didn't sign for this operator");
@@ -609,6 +620,7 @@ export circuit linkPool(operator: Bytes<32>, sig: Ed25519Signature, pool: Curve2
   if (undo) {
     poolOf.remove(id);
     poolFreed.insert(pid, at);
+    poolSeat.insert(pid, lastSeat.member(id) ? lastSeat.lookup(id) : 0);
     if (o.active) {
       operators.insert(id, Operator { ...o, active: false, leftTime: at });
       ringLeave(listed.lookup(pid));
@@ -703,10 +715,11 @@ export circuit withdraw(slots: Uint<16>): [] {
 
 // ---------------------------------------------------------------- the ceremony
 
-// Epoch e's committee has had its time: go through its seats. An operator that missed in too
-// many answering times, or whose bond is now below the minimum, is stood down (an independent
-// leaves the ring, and it and its pool sit out before it can register again; a house operator
-// can register again at once).
+// Epoch e's committee has had its time: go through its seats. An operator whose seat has missed
+// in too many answering times (more than the allowance since it was last stood down for that
+// seat), or whose bond is now below the minimum, is stood down (an independent leaves the
+// ring, and it and its pool sit out before it can register again; a house operator can
+// register again at once).
 circuit review(e: Uint<64>, at: Uint<64>): [] {
   for (const k of 0..7) {
     const sk = seatKey(e, (k + 1) as Uint<8>);
@@ -714,9 +727,13 @@ circuit review(e: Uint<64>, at: Uint<64>): [] {
       const id = members.lookup(sk);
       const o = operators.lookup(id);
       if (o.active) {
-        const m = missed.member(id) ? missed.lookup(id) : 0;
-        missed.insert(id, 0);
-        if (m > allowedMisses || bonds.lookup(id).lessThan(minBondSlots)) {
+        const m = missed.member(sk) ? missed.lookup(sk) : 0;
+        const had = excused.member(sk) ? excused.lookup(sk) : 0;
+        const over = m > had + allowedMisses;
+        if (over || bonds.lookup(id).lessThan(minBondSlots)) {
+          if (over) {
+            excused.insert(sk, m);
+          }
           operators.insert(id, Operator { ...o, active: false, leftTime: at });
           if (o.house) {
             houseActive = (houseActive - 1) as Uint<8>;
@@ -735,13 +752,17 @@ circuit review(e: Uint<64>, at: Uint<64>): [] {
 // one ceremony length from now. Only when the newest epoch opened has failed, or is being served and
 // has served its epoch length. The seats of the failed one and of the one serving are reviewed
 // (stood down if they missed too much), and the size follows the number of independents:
-// none 1 of 1; 1 to 3, 3 of 5; 4 or more, 4 of 7. Independents take as many seats as there are
-// of them; the house fills the rest, so from 3 independents it is below the threshold, and from
-// 7 it has no seat. If the house hasn't the operators for that size, the committee is the
-// largest it can fill: 5 (independents first), or, while there are two independents or fewer
-// (when the house holds the threshold anyway), 1 (a house seat). With three or more
-// independents and too few house operators even for 5, no epoch opens until the house is back:
-// a committee of the house alone never replaces one the independents had a say in.
+//   none          1 of 1, a house seat;
+//   1 to 3        a threshold of 3: the independents and enough of the house to make 5 (so
+//                 from 3 independents the house is below the threshold);
+//   4 or more     a threshold of 4: up to 7 independents and enough of the house to make 7
+//                 (from 7 independents the house has no seat).
+// If the house hasn't that many operators active, the committee is smaller (3 of 4, 4 of 5 ...)
+// but its threshold is the same: the number of pools it takes to work out a value never drops
+// because the house is away. With one or two independents and too few house operators to
+// make 3 seats, it is 1 of 1, a house seat (the house holds the threshold at those sizes
+// anyway). Returns the epoch opened, or 0 if nothing could be (no house operator active and
+// fewer than three independents): the review's stand-downs stand either way.
 export circuit openEpoch(now: Uint<64>): Uint<64> {
   const at = timeNow(disclose(now));
   if (opened != current) {
@@ -758,13 +779,19 @@ export circuit openEpoch(now: Uint<64>): Uint<64> {
   const i = independents;
   const h = houseActive;
   const mine7 = (i >= 7 ? 7 : i) as Uint<8>;
-  const mine5 = (i >= 5 ? 5 : i) as Uint<8>;
-  const ok7 = i >= 4 && h >= 7 - mine7;
-  const ok5 = i >= 1 && h >= 5 - mine5;
-  assert(ok7 || ok5 || (h >= 1 && i <= 2), "not enough house operators to fill the committee");
-  const n = (ok7 ? 7 : (ok5 ? 5 : 1)) as Uint<8>;
-  const t = (ok7 ? 4 : (ok5 ? 3 : 1)) as Uint<8>;
-  const mine = (ok7 ? mine7 : (ok5 ? mine5 : 0)) as Uint<8>;
+  const mine3 = (i >= 3 ? 3 : i) as Uint<8>;
+  const room7 = (7 - mine7) as Uint<8>;
+  const room5 = (5 - mine3) as Uint<8>;
+  const house7 = (h >= room7 ? room7 : h) as Uint<8>;
+  const house5 = (h >= room5 ? room5 : h) as Uint<8>;
+  const many = i >= 4;
+  const few = i >= 1 && i <= 3 && mine3 + house5 >= 3;
+  if (!many && !few && h == 0) {
+    return 0;
+  }
+  const n = (many ? mine7 + house7 : (few ? mine3 + house5 : 1)) as Uint<8>;
+  const t = (many ? 4 : (few ? 3 : 1)) as Uint<8>;
+  const mine = (many ? mine7 : (few ? mine3 : 0)) as Uint<8>;
   const e = (opened + 1) as Uint<64>;
   opened = e;
   committees.insert(e, Committee { n: n, t: t, indepSeats: mine, phase: Phase.seating, seated: 0, dealt: 0, dealBy: (at + ceremonySecs) as Uint<64>, since: 0 });
@@ -842,6 +869,7 @@ export circuit dealCommit(e: Uint<64>, d: Uint<8>, c: Vector<4, JubjubPoint>): [
   assert(committees.member(ee), "no such epoch");
   const com = committees.lookup(ee);
   assert(com.phase == Phase.dealing, "that committee isn't dealing");
+  assert(blockTimeLt(com.dealBy), "the time for dealing is over");
   assert(dd >= 1 && dd <= com.n, "no such position");
   assert(disclose(same(ecMulGenerator(operatorSecret() as JubjubScalar), seats.lookup(seatKey(ee, dd)))), "not this position's holder");
   assert(!committed.member(seatKey(ee, dd)), "this position has dealt");
@@ -868,6 +896,7 @@ export circuit dealShare(e: Uint<64>, d: Uint<8>, i: Uint<8>): [] {
   assert(committees.member(ee), "no such epoch");
   const com = committees.lookup(ee);
   assert(com.phase == Phase.dealing, "that committee isn't dealing");
+  assert(blockTimeLt(com.dealBy), "the time for dealing is over");
   assert(dd >= 1 && dd <= com.n && ii >= 1 && ii <= com.n, "no such position");
   assert(committed.member(seatKey(ee, dd)), "that dealer hasn't posted its commitments");
   assert(!parcels.member(cellKey(ee, dd, ii)), "already sent");
@@ -1073,19 +1102,19 @@ export circuit finalise(id: Bytes<32>, s: Vector<4, Uint<8>>, bountyTo: UserAddr
 }
 
 // Position i of a request in answering time `bucket`: if it didn't answer in time, a miss is
-// counted against it, once for that answering time however many requests it missed in it and
-// in whatever order they are settled. Returns the operator seated there.
+// counted against that seat, once for that answering time however many requests it missed in
+// it and in whatever order they are settled. Returns the operator seated there.
 circuit tally(e: Uint<64>, i: Uint<8>, answered: Boolean, bucket: Uint<64>): Bytes<32> {
-  const id = members.lookup(seatKey(e, i));
+  const sk = seatKey(e, i);
   if (!answered) {
     const k = missKey(e, i, bucket);
     if (!missedIn.member(k)) {
       missedIn.insert(k, true);
-      const m = missed.member(id) ? missed.lookup(id) : 0;
-      missed.insert(id, m < 65535 ? (m + 1) as Uint<16> : m);
+      const m = missed.member(sk) ? missed.lookup(sk) : 0;
+      missed.insert(sk, m < 65535 ? (m + 1) as Uint<16> : m);
     }
   }
-  return id;
+  return members.lookup(sk);
 }
 
 // Anyone settles a request once its deadline has passed.
