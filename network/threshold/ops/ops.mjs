@@ -40,6 +40,9 @@
  * did on 24 Nov 2026, by 2.8 ms). Each further spend adds about 3 KB, so 6 ms of allowance, for
  * 2.7 ms of checking. The option is deploy/scripts/patch-dust-two-spends.mjs's; a call isn't
  * sent while the wallet has fewer coins free than that.
+ * DUST builds up from the wallet's NIGHT (5 DUST for each NIGHT over a week), and a run of calls
+ * can spend it faster than that: a call waits (--dust-wait minutes at most, 120 by default) until
+ * the wallet holds about what the last one paid. NIGHT that arrives meanwhile is registered.
  *
  * A circuit that takes the time is given "now" a little ahead (--lead 60 seconds; --lead-link 240
  * for linkPool, whose proof is the largest), because its proof has to be made before it is sent.
@@ -70,7 +73,7 @@ const { values, positionals } = parseArgs({
   options: {
     wallet: { type: 'string' }, dir: { type: 'string' }, log: { type: 'string' }, network: { type: 'string', default: 'preprod' }, 'proof-server-port': { type: 'string', default: '6304' },
     lead: { type: 'string', default: '60' }, 'lead-link': { type: 'string', default: '240' }, 'proof-container': { type: 'string' },
-    'dust-spends': { type: 'string', default: '3' },
+    'dust-spends': { type: 'string', default: '3' }, 'dust-wait': { type: 'string', default: '120' },
   },
 });
 const mode = positionals[0];
@@ -103,6 +106,8 @@ const shareOf = (l, e, i, secret) => {
   return sk;
 };
 
+/** Specks as DUST (10^15 specks each). */
+const dustText = (specks) => (Number(specks) / 1e15).toLocaleString('en', { maximumFractionDigits: 3 });
 /** Picoseconds (the ledger's unit of time) as milliseconds. */
 const msOf = (ps) => Math.round(Number(ps) / 1e6) / 1e3;
 const timeOf = (cost) => (cost.computeTime > cost.readTime ? cost.computeTime : cost.readTime);
@@ -118,20 +123,25 @@ const describeTx = (handle) => {
   let tx = handle;
   try { if (typeof handle.deserialize === 'function') tx = handle.deserialize({ v9: Transaction }); } catch { return d; }
   try {
-    let spends = 0, g = 0, f = 0, gPs = 0n, fPs = 0n;
+    let spends = 0, g = 0, f = 0, gPs = 0n, fPs = 0n, fee = 0n;
     if (!tx.intents) throw new Error('not a decoded transaction');
     for (const intent of tx.intents.values()) {
       spends += intent.dustActions?.spends?.length ?? 0;
+      for (const spend of intent.dustActions?.spends ?? []) fee += spend.vFee;
       for (const action of intent.actions ?? []) {
         const gt = action.guaranteedTranscript, ft = action.fallibleTranscript;
         if (gt) { g += gt.program?.length ?? 0; if (gt.gas) gPs += timeOf(gt.gas); }
         if (ft) { f += ft.program?.length ?? 0; if (ft.gas) fPs += timeOf(ft.gas); }
       }
     }
-    Object.assign(d, { dustSpends: spends, guaranteedSteps: g, guaranteedMs: msOf(gPs), fallibleSteps: f, fallibleMs: msOf(fPs) });
+    Object.assign(d, { dustSpends: spends, feeSpecks: fee.toString(), feeDust: Number(fee) / 1e15, guaranteedSteps: g, guaranteedMs: msOf(gPs), fallibleSteps: f, fallibleMs: msOf(fPs) });
   } catch { /* left out */ }
   const p = LedgerParameters.initialParameters();
-  try { d.pricedMs = msOf(timeOf(tx.cost(p))); } catch { /* left out */ }
+  try {
+    const c = tx.cost(p);
+    d.pricedMs = msOf(timeOf(c));
+    d.cost = { computeMs: msOf(c.computeTime), readMs: msOf(c.readTime), blockUsage: Number(c.blockUsage), bytesWritten: Number(c.bytesWritten), bytesChurned: Number(c.bytesChurned) };
+  } catch { /* left out */ }
   if (d.bytes !== undefined) d.allowedMs = Math.max(15, Math.round(d.bytes * 2) / 1000);
   // The ledger's own check, as the node makes it: it says by how much when it fails.
   try { tx.cost(p, true); d.dismiss = 'ok'; } catch (e) {
@@ -147,7 +157,7 @@ const txText = (d) => {
   if (!d) return '';
   const parts = [];
   if (d.bytes !== undefined) parts.push(`${d.bytes.toLocaleString('en')} bytes`);
-  if (d.dustSpends !== undefined) parts.push(`${d.dustSpends} DUST spend${d.dustSpends === 1 ? '' : 's'}`);
+  if (d.dustSpends !== undefined) parts.push(`${d.dustSpends} DUST spend${d.dustSpends === 1 ? '' : 's'}${d.feeDust ? ` paying ${dustText(d.feeSpecks)} DUST` : ''}`);
   if (d.guaranteedSteps !== undefined) parts.push(`${d.guaranteedSteps} steps before the fee (${d.guaranteedMs} ms) and ${d.fallibleSteps} after (${d.fallibleMs} ms)`);
   if (d.pricedMs !== undefined) parts.push(`priced at ${d.pricedMs} ms in all`);
   if (d.dismiss === 'over') parts.push(`OVER its allowance: ${d.dismissMs ?? '?'} ms to dismiss, ${d.allowedMs} ms allowed`);
@@ -210,7 +220,16 @@ if (mode === 'status') {
     const syncedState = () => firstValueFrom(wallet.wallet.state().pipe(filter((s) => s.isSynced)));
     /** The wallet's NIGHT UTXOs (and how many generate DUST) and its DUST coins: free to pay with, and booked by a transaction that hasn't landed. */
     const coinsNow = async () => ({ ...(await walletBalances(wallet)), booked: (await syncedState()).dust.pendingCoins.length });
-    const coinsText = (c) => `${tn(c.night)} in ${c.nightUtxos} NIGHT UTXO${c.nightUtxos === 1 ? '' : 's'} (${c.nightRegistered} generating DUST); ${c.dustCoins} DUST coin${c.dustCoins === 1 ? '' : 's'} free to pay with${c.booked ? `, ${c.booked} booked by transactions that haven't landed` : ''}`;
+    const coinsText = (c) => `${tn(c.night)} in ${c.nightUtxos} NIGHT UTXO${c.nightUtxos === 1 ? '' : 's'} (${c.nightRegistered} generating DUST); ${dustText(c.dust)} DUST in ${c.dustCoins} coin${c.dustCoins === 1 ? '' : 's'} free to pay with${c.booked ? `, ${c.booked} more booked by transactions that haven't landed` : ''}`;
+    /** Register NIGHT that doesn't generate DUST yet (change, or NIGHT that has just arrived). */
+    const registerNew = async () => {
+      const raw = unshieldedToken().raw, ks = wallet.unshieldedKeystore;
+      const coins = (await syncedState()).unshielded.availableCoins.filter((x) => x.utxo.type === raw && x.meta.registeredForDustGeneration === false);
+      if (!coins.length) return;
+      const recipe = await wallet.wallet.registerNightUtxosForDustGeneration(coins, ks.getPublicKey(), (payload) => ks.signDataAsync(payload));
+      const txId = await wallet.wallet.submitTransaction(await wallet.wallet.finalizeRecipe(recipe));
+      say(`${coins.length} NIGHT UTXO${coins.length === 1 ? '' : 's'} registered to generate DUST, transaction ${txId}`);
+    };
     /** Wait until `ok(coins)`, looking every 10 s. */
     const coinsUntil = async (ok, what, ms) => {
       const until = Date.now() + ms;
@@ -221,10 +240,37 @@ if (mode === 'status') {
         await sleep(10_000);
       }
     };
-    /** Before a call: the coins its fee is to be paid with are free (the last transaction's come back once the wallet has seen it land). */
+    /**
+     * About what the next fee takes, in specks: a quarter more than the last one paid. Until one has been, 1.2 DUST:
+     * a fee is mostly the transaction's size (10 DUST for a block's 200,000 bytes), and these are about 20,000 bytes.
+     */
+    let needDust = 1_200_000_000_000_000n;
+    const dustWaitMs = Math.max(1, Number(values['dust-wait']) || 120) * 60_000;
+    /**
+     * Before a call: the coins its fee is to be paid with are free (the last transaction's come back once the wallet
+     * has seen it land), and the wallet holds about a fee's worth of DUST. Waiting for DUST, it says so every 5 minutes.
+     */
     const coinsReady = async (what) => {
-      if (wantSpends < 2) return;
-      await coinsUntil((c) => c.dustCoins >= wantSpends, `${what} isn't sent: after 5 minutes the wallet still has fewer than ${wantSpends} DUST coins free. Make more with the coins action, or pass --dust-spends`, 5 * 60_000);
+      const started = Date.now();
+      let told = 0, registered = 0;
+      for (;;) {
+        const c = await coinsNow();
+        const enoughCoins = wantSpends < 2 || c.dustCoins >= wantSpends;
+        if (enoughCoins && c.dust >= needDust) return;
+        const waited = Date.now() - started;
+        if (!enoughCoins && waited > 5 * 60_000) throw new Error(`${what} isn't sent: after 5 minutes the wallet still has fewer than ${wantSpends} DUST coins free (${coinsText(c)}). Make more with the coins action, or pass --dust-spends`);
+        if (waited > dustWaitMs) throw new Error(`${what} isn't sent: after ${Math.round(dustWaitMs / 60_000)} minutes the wallet still has too little DUST (${coinsText(c)}; a fee takes about ${dustText(needDust)}). It needs more NIGHT, or more time`);
+        if (enoughCoins && Date.now() - told > 5 * 60_000) {
+          say(`waiting for DUST before ${what}: the wallet has ${dustText(c.dust)} and a fee takes about ${dustText(needDust)} (DUST builds up from the wallet's ${tn(c.night)})`);
+          told = Date.now();
+        }
+        // NIGHT sent to the wallet meanwhile makes DUST only once it is registered.
+        if (c.nightRegistered < c.nightUtxos && Date.now() - registered > 5 * 60_000) {
+          registered = Date.now();
+          await registerNew().catch((e) => say(`registering new NIGHT for DUST failed (trying again later): ${errorText(e).slice(0, 200)}`));
+        }
+        await sleep(15_000);
+      }
     };
     // Time the proof server's part of each call.
     let proving = 0;
@@ -319,6 +365,7 @@ if (mode === 'status') {
           const row = { time: new Date().toISOString(), what, circuit, ok: true, provingSeconds: Math.round(proving / 100) / 10, totalSeconds: Math.round((Date.now() - started) / 100) / 10, tries: i, peakProofServerMiB: peak, txId: r.public?.txId, tx: lastTx };
           log(row);
           say(`ok   ${what}: proof ${row.provingSeconds} s, ${row.totalSeconds} s in all${memory()}${i > 1 ? ` (try ${i})` : ''}, transaction ${row.txId}${txText(lastTx)}`);
+          if (lastTx?.feeSpecks) needDust = (BigInt(lastTx.feeSpecks) * 5n) / 4n;
           return r;
         } catch (e) {
           clearInterval(sampler);
@@ -328,6 +375,12 @@ if (mode === 'status') {
           // A proof server that failed is not asked again at once: it may have run out of memory. A
           // transaction over its time allowance would be built the same way again, and each try books DUST coins.
           if (i >= 3 || /failed assert|assertion failed|Proof Server request failed|isn't sent|time to dismiss|Custom error: 231/i.test(text)) throw e;
+          // Out of DUST: the next try waits until the wallet holds more than it was thought to need.
+          if (/insufficient\s*funds|could not balance dust/i.test(text)) {
+            const have = (await coinsNow()).dust;
+            const floor = needDust > have ? needDust : have;
+            needDust = (floor * 3n) / 2n;
+          }
           await sleep(20_000);
         }
       }
@@ -354,14 +407,7 @@ if (mode === 'status') {
           say(`the wallet's NIGHT is being split: ${make} part${make === 1 ? '' : 's'} of ${tn(each)} sent to its own address, transaction ${txId}`);
           c = await coinsUntil((x) => x.nightUtxos >= utxos, `the split didn't show within 10 minutes`, 10 * 60_000);
         }
-        if (c.nightRegistered < c.nightUtxos) {
-          const coins = (await syncedState()).unshielded.availableCoins.filter((x) => x.utxo.type === raw && x.meta.registeredForDustGeneration === false);
-          if (coins.length) {
-            const recipe = await w.registerNightUtxosForDustGeneration(coins, ks.getPublicKey(), (payload) => ks.signDataAsync(payload));
-            const txId = await w.submitTransaction(await w.finalizeRecipe(recipe));
-            say(`${coins.length} NIGHT UTXO${coins.length === 1 ? '' : 's'} registered to generate DUST, transaction ${txId}`);
-          }
-        }
+        if (c.nightRegistered < c.nightUtxos) await registerNew();
         c = await coinsUntil((x) => x.dustCoins >= n, `the new DUST coins didn't show within 15 minutes`, 15 * 60_000);
         say(`the wallet now: ${coinsText(c)}`);
       } else if (verb === 'load-pools') {

@@ -18,6 +18,9 @@
 #                                     are all here), and end it: for 3 of 5 that is 37 proofs, about half an hour
 #   bash tnet.sh ask [tag]            a request to the serving committee, every seat's answer, and the value
 #   bash tnet.sh do <action> ...      any of the actions (see network/threshold/ops/ops.mjs)
+#   bash tnet.sh bg <command> ...     first, epoch, ask, do or coins in the background: it goes on if the window closes or the
+#                                     connection drops. Its output goes to $DATA/run.log
+#   bash tnet.sh log [lines]          whether a run is going, and the end of run.log
 #   bash tnet.sh midnight             read-only: who produces Midnight's blocks on Preprod (for the real pool list)
 #   bash tnet.sh proof-restart        install this checkout's proof server unit (its memory settings) and restart it
 # Settings: see the top of network/threshold/ops/deploy.mjs. Proof times, and each transaction's size and
@@ -84,13 +87,26 @@ case "${1:-}" in
     patch=$(node deploy/scripts/patch-dust-two-spends.mjs --check 2>&1) || { echo "$patch" >&2; echo "the dust wallet installed here isn't the one the several-DUST-spends option was written for: tell Claude what the line above says" >&2; exit 1; }
     echo "$patch" | grep -Eq 'already there|added to' || { echo "$patch" >&2; echo "the several-DUST-spends option isn't installed (no dust wallet found): run npm ci in $REPO" >&2; exit 1; }
     case "$1" in
-      first) set -- do load-pools register:house-1 register:house-2 register:house-3 register:house-4 register:op-1 link:op-1:pool-1 register:op-5 link:op-5:pool-5 leave:op-5 ;;
-      epoch) set -- do open seat deal finish ;;
+      first) set -- do load-pools register:house-1 register:house-2 register:house-3 register:house-4 register:op-1 link:op-1:pool-1 register:op-5 link:op-5:pool-5 leave:op-5 "${@:2}" ;;
+      epoch) set -- do open seat deal finish "${@:2}" ;;
       ask) set -- do "request:${2:-test}" answer finalise ;;
       coins) set -- do "coins:${2:-3}" ;;
     esac
     # NIGHT that comes back as change is registered for DUST when the wallet opens, so its coins keep generating.
     NIGHTCAST_REGISTER_NEW_NIGHT=1 NIGHTCAST_NODE_URL=blockfrost NIGHTCAST_NODE_WS=blockfrost node network/threshold/ops/ops.mjs do --wallet "$OPW" --dir "$DATA" --log "$DATA/proofs.jsonl" --proof-server-port "$PORT" --proof-container nightcast-net-proof "${@:2}"
     ;;
-  *) sed -n 2,24p "$0"; exit 2 ;;
+  bg)
+    case "${2:-}" in first|do|epoch|ask|coins) ;; *) echo "bg takes one of: first, epoch, ask, do, coins" >&2; exit 2 ;; esac
+    if pgrep -f 'node network/threshold/ops/[o]ps.mjs' >/dev/null; then echo "a run is already going: bash network/threshold/vm/tnet.sh log" >&2; exit 1; fi
+    echo "==== $(date -u '+%Y-%m-%d %H:%M:%S') UTC: tnet.sh ${*:2}" >> "$DATA/run.log"
+    nohup bash "$REPO/network/threshold/vm/tnet.sh" "${@:2}" >> "$DATA/run.log" 2>&1 < /dev/null &
+    sleep 5
+    say "Started in the background: it goes on if this window closes. Look at it with: bash network/threshold/vm/tnet.sh log"
+    tail -n 6 "$DATA/run.log"
+    ;;
+  log)
+    if pgrep -f 'node network/threshold/ops/[o]ps.mjs' >/dev/null; then say "A run is going"; else say "Nothing is running"; fi
+    if [ -f "$DATA/run.log" ]; then tail -n "${2:-40}" "$DATA/run.log"; else echo "no background run has been started yet"; fi
+    ;;
+  *) sed -n 2,27p "$0"; exit 2 ;;
 esac
