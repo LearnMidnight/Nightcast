@@ -1,4 +1,4 @@
-// The threshold network, stage 12, in memory (compact-runtime): the registry and eight epochs in a
+// The threshold network, stage 13, in memory (compact-runtime): the registry and eight epochs in a
 // row on one contract. The committee's size follows the number of independents and of house
 // operators (1 of 1, 3 of 4, 3 of 5, 4 of 6, 4 of 7, or none: every combination is checked), seats
 // go round the ring of independents and then to the house, a ceremony that fails costs
@@ -292,6 +292,14 @@ books('after registering');
   await everySubset(s4, q4, sharesOf(s4, q4), 'short 3 of 4');
   books('after a 3 of 4 committee');
   now -= 1801;
+  // a ceremony in which nobody at all finishes dealing
+  restore(bases[1]);
+  const s5 = await call('openEpoch', [dl()]);
+  await fill(s5);
+  now += 1801;
+  ok((await finish(s5)) === false && active(extra[0]) && bond(extra[0]) === 10n && ledger().independents === 1n && ledger().houseActive === 0n, "when no dealer at all finishes, the ceremony fails and every seat is fined, but the independent is not stood down: nobody could deal, so no seat is to blame (the house's operators are, as always, and register again)");
+  books('after a ceremony nobody dealt in');
+  now -= 1801;
   restore(bases[6]);
   for (const x of H) await leave(x);
   const s6 = await call('openEpoch', [dl()]);
@@ -357,6 +365,7 @@ const A = independent('a'), B = independent('b');
   await fails(link(B, POOLS[2], signed(POOLS[2], linkMessage(B, POOLS[2])), 7n), /isn't a place in the ring/, 'nor after a place nobody holds');
   await fails(revoke(A, A.pool, signed(A.pool, linkMessage(A, A.pool))), /didn't sign/, "a pool's signature to link isn't one to revoke");
   await fails(revoke(B, A.pool), /doesn't back this operator/, 'a pool revokes only the operator it backs');
+  await fails(revoke(A, A.pool, signed(A.pool, linkMessage(A, A.pool, true, BigInt(now) - 1n)), BigInt(now) - 1n), /signature has expired/, "a pool's signature to revoke expires too");
   await revoke(A);
   ok(!active(A) && !linked(A) && ledger().independents === 0n, "the pool's key revokes its operator: it is stood down, is no longer linked and no longer counts");
   await fails(revoke(A), /doesn't back this operator/, 'once');
@@ -429,10 +438,22 @@ books('after epoch 2');
   await call('register', [{ bytes: Y.payout }, 12n, 0n], { op: Y.op });
   now += 2 * Number(EPOCH) + 1;
   await fails(link(Y, B.pool), /still in the serving committee/, "after its sit-out the pool still can't back another operator while that seat is serving");
-  now = Number(ledger().committees.lookup(e2).since) + 4 * Number(EPOCH) + 4 * Number(ANSWER) + 1;
+  now = Number(ledger().committees.lookup(e2).since) + 4 * Number(EPOCH) + 4 * Number(ANSWER) - 1;
+  await fails(link(Y, B.pool), /still in the serving committee/, 'nor when that committee has served four epoch lengths, until its last requests could be settled too');
+  now += 2;
   await link(Y, B.pool);
   ok(linked(Y) && ledger().independents === 2n, 'but a committee that has overstayed holds no pool: a pool is never stuck behind a committee nobody replaces');
   books('after a pool moved on from an overstayed committee');
+  now = t0;
+  restore(before);
+  // the same when the operator left by itself and the pool still backs it
+  await leave(B);
+  await call('register', [{ bytes: Y.payout }, 12n, 0n], { op: Y.op });
+  now += 2 * Number(EPOCH) + 1;
+  await fails(link(Y, B.pool), /still in the serving committee/, "a pool whose operator left can't back another while that operator's seat is serving");
+  now = Number(ledger().committees.lookup(e2).since) + 4 * Number(EPOCH) + 4 * Number(ANSWER) + 1;
+  await link(Y, B.pool);
+  ok(linked(Y) && !linked(B) && ledger().independents === 2n, 'until that committee has overstayed');
   now = t0;
   restore(before);
 }
@@ -573,6 +594,11 @@ books('after the failed ceremony');
   const stoodIn = await open();
   const lone = ledger().committees.lookup(stoodIn);
   ok(lone.n === 1n && lone.t === 1n && lone.indepSeats === 0n, 'when it is two short (two independents and one house operator; 3 of 3 would let any one seat stop everything), a single house seat stands in');
+  await fill(stoodIn);
+  await deal(stoodIn, [1]);
+  await finish(stoodIn);
+  await name(stoodIn, 1, NEXT_Y);
+  ok(ledger().current === stoodIn && ledger().backedEpoch === 2n && hexOf(ledger().backed) === hexOf(NEXT_X), "and while it stands in, its one seat doesn't name a successor on the pools' behalf");
   restore(before);
   await leave(H[0]);
   await leave(H[3]);
@@ -721,19 +747,39 @@ ok(names(e6) === 'c h0 h1 h2 h3', 'the house fills the seats they left');
   // epoch 5's seats while epoch 6 is dealing: b and c (positions 2 and 3) stop answering (on a copy of the state)
   const before = snapshot(), t0 = now;
   await deal(e6, [1, 2, 3, 4, 5]);
-  for (let k = 0; k < 4; k++) {
+  let lastDeadline = 0n;
+  const round = async (k) => {
     const rid = await ask(`handing over ${k}`);
+    lastDeadline = ledger().requests.lookup(rid).deadline;
     for (const i of [1, 4, 5]) await call('answer', [rid, BigInt(i)], { sk: sk5[i - 1] });
     await fin(rid, [1, 4, 5]);
     now += 601;
     await settle(rid);
+  };
+  for (let k = 0; k < 3; k++) await round(k);
+  const leftA = ledger().operators.lookup(A.id).leftTime, leftB = ledger().operators.lookup(B.id).leftTime;
+  {
+    // three missed answering times are within the allowance
+    const three = snapshot(), t3 = now;
+    await finish(e6);
+    await open();
+    ok(missedAt(e5, 3) === MISSES && active(C) && ledger().operators.lookup(B.id).leftTime === leftB, 'a seat that missed in exactly as many answering times as are allowed is not stood down, and nobody sits out longer');
+    now = t3;
+    restore(three);
   }
+  await round(3);
   ok(missedAt(e5, 3) === 4n && missedAt(e5, 2) === 8n && active(C), "c's seat in epoch 5 misses in four answering times after epoch 6 was opened, when epoch 5's seats had already been reviewed");
   ok((await finish(e6)) === true && ledger().previous === 5n, 'epoch 6 takes over');
-  const leftA = ledger().operators.lookup(A.id).leftTime;
   const opened = await open();
   ok(!active(C) && ledger().independents === 0n && ledger().committees.lookup(opened).n === 1n, "a committee is reviewed once more when the epoch after its successor opens: going quiet while handing over is counted, and c is stood down");
-  ok(ledger().operators.lookup(B.id).leftTime === BigInt(now) && ledger().operators.lookup(A.id).leftTime === leftA && active(H[2]) && active(H[3]), 'b, already stood down, went on missing: it sits out from now instead (a, which answered, does not); the seats that answered are untouched');
+  ok(ledger().operators.lookup(B.id).leftTime === lastDeadline && lastDeadline > leftB && lastDeadline < BigInt(now) && ledger().operators.lookup(A.id).leftTime === leftA && active(H[2]) && active(H[3]), 'b, already stood down, went on missing: it sits out from its last miss instead, whenever the review came (a, which answered, does not); the seats that answered are untouched');
+  await fill(opened);
+  now = Number(leftB) + 2 * Number(EPOCH) + 1;
+  await register(A, 0n);
+  await fails(register(B, 0n), /sits out/, "so a can register again two epoch lengths after it was stood down, and b can't yet");
+  now = Number(lastDeadline) + 2 * Number(EPOCH) + 1;
+  await register(B, 0n);
+  ok(active(B) && ledger().independents === 2n, 'b can two epoch lengths after its last miss');
   books('after the second review');
   now = t0;
   restore(before);

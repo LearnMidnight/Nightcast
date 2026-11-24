@@ -1,4 +1,4 @@
-// Nightcast threshold network, stage 12 (not yet deployed; after six reviews, 23 and 24 Nov 2026).
+// Nightcast threshold network, stage 13 (not yet deployed; after seven reviews, 23 and 24 Nov 2026).
 //
 // A committee of n operators (positions 1..n) shares one key that nobody holds. Any t of them
 // give the same random value for a request; fewer than t can't work it out. The design, the
@@ -43,8 +43,9 @@
 //               its own time; dealing's clock starts when the last seat is taken. A seat that
 //               didn't finish dealing loses part of its bond (only dealing can cost a bond),
 //               and a house operator that didn't is stood down until it registers again. If
-//               the ceremony FAILED, every seat that didn't finish is stood down, so the same
-//               seats can't fail the next one too.
+//               the ceremony FAILED though at least one dealer finished, every seat that didn't
+//               is stood down, so the same seats can't fail the next one too. (If nobody
+//               finished, nobody could: that is the network's trouble, not a seat's.)
 //   requests    request (the id comes from the contract's counter, the input point H is fixed
 //               then; the requester pays the fee), answer, finalise (any t answers, one value; a
 //               bounty to whoever sends it), settle, claim
@@ -104,7 +105,9 @@ export struct Operator {
   // One of the house's operators (named at deploy): it fills only the seats independents can't.
   house: Boolean;
   active: Boolean;
-  // When it left or was stood down (seconds; 0 while active).
+  // When it left or was stood down (seconds; 0 while active). Its sit-out runs from here: if a
+  // seat it still holds goes over its allowance of misses afterwards, this moves on to the
+  // last of those misses.
   leftTime: Uint<64>;
 }
 
@@ -258,6 +261,8 @@ export ledger dust: Uint<128>;
 // stood down at (it is stood down again only for that many more).
 export ledger missed: Map<Field, Uint<16>>;
 export ledger excused: Map<Field, Uint<16>>;
+// The latest deadline each seat has been counted a miss at.
+export ledger lastMiss: Map<Field, Uint<64>>;
 export sealed ledger slack: Uint<64>;
 // How long seating has from the moment an epoch is opened, and dealing from the moment the
 // last seat is taken (the same length); and how long a committee has to
@@ -266,8 +271,8 @@ export sealed ledger ceremonySecs: Uint<64>;
 export sealed ledger answerSecs: Uint<64>;
 // The most requests that can be waiting to be settled at once.
 export sealed ledger maxPending: Uint<32>;
-// NIGHT atoms per bond slot, the smallest bond, and the slots a seat loses for not finishing a
-// failed ceremony.
+// NIGHT atoms per bond slot, the smallest bond, and the slots a seat loses for not finishing
+// dealing by the ceremony's deadline (whether or not the ceremony then succeeds).
 export sealed ledger collateralPerSlot: Uint<128>;
 export sealed ledger minBondSlots: Uint<16>;
 export sealed ledger ceremonyPenalty: Uint<16>;
@@ -733,8 +738,9 @@ export circuit withdraw(slots: Uint<16>): [] {
 // bond is now below the minimum, is stood down (an independent leaves the ring, and it and its
 // pool sit out before it can register again; a house operator can register again at once). One
 // that has already left or been stood down, and whose seat has gone over the allowance since,
-// sits out from now instead: leaving early doesn't shorten what missing costs. A committee has
-// one allowance for the whole time it serves, however long that is.
+// sits out from the last of those misses instead: leaving early doesn't shorten what missing
+// costs, and it makes no difference when the misses were settled or the review made. A
+// committee has one allowance for the whole time it serves, however long that is.
 circuit review(e: Uint<64>, at: Uint<64>): [] {
   for (const k of 0..7) {
     const sk = seatKey(e, (k + 1) as Uint<8>);
@@ -760,7 +766,10 @@ circuit review(e: Uint<64>, at: Uint<64>): [] {
         }
       } else {
         if (over) {
-          operators.insert(id, Operator { ...o, leftTime: at });
+          const last = lastMiss.member(sk) ? lastMiss.lookup(sk) : o.leftTime;
+          if (last > o.leftTime) {
+            operators.insert(id, Operator { ...o, leftTime: last });
+          }
         }
       }
     }
@@ -950,10 +959,12 @@ export circuit dealShare(e: Uint<64>, d: Uint<8>, i: Uint<8>): [] {
 }
 
 // A seat of epoch e that didn't finish dealing forfeits the ceremony penalty, and a house
-// operator that didn't is stood down (it can register again at once). If the ceremony failed,
-// an independent that didn't finish is stood down too (it and its pool sit out): the next
-// committee is sized without the seats that failed this one.
-circuit fineUnfinished(e: Uint<64>, at: Uint<64>, failed: Boolean): [] {
+// operator that didn't is stood down (it can register again at once). With `evict` (the ceremony
+// failed, though at least one dealer finished), an independent that didn't finish is stood
+// down too (it and its pool sit out): the next committee is sized without the seats that
+// failed this one. Nobody can keep another seat from dealing, so when some finished the rest
+// could have; when none did, the fault isn't a seat's, and only the fine applies.
+circuit fineUnfinished(e: Uint<64>, at: Uint<64>, evict: Boolean): [] {
   for (const k of 0..7) {
     const sk = seatKey(e, (k + 1) as Uint<8>);
     if (members.member(sk) && !finished.member(sk)) {
@@ -963,7 +974,7 @@ circuit fineUnfinished(e: Uint<64>, at: Uint<64>, failed: Boolean): [] {
         forfeited = (forfeited + ceremonyPenalty) as Uint<64>;
       }
       const o = operators.lookup(id);
-      if (o.active && (o.house || failed)) {
+      if (o.active && (o.house || evict)) {
         operators.insert(id, Operator { ...o, active: false, leftTime: at });
         if (o.house) {
           houseActive = (houseActive - 1) as Uint<8>;
@@ -982,8 +993,8 @@ circuit fineUnfinished(e: Uint<64>, at: Uint<64>, failed: Boolean): [] {
 // holds shares from the finished dealers, whether or not it dealt). Past the deadline with
 // fewer, or with seats still empty, it has failed, and the epoch before carries on. Whenever
 // dealing ran to its deadline, the seats that didn't finish forfeit the ceremony penalty, and
-// if it failed they are stood down (a committee that was never fully seated costs nobody
-// anything).
+// if it failed with at least one dealer finished they are stood down (a committee that was
+// never fully seated costs nobody anything).
 export circuit finish(e: Uint<64>, now: Uint<64>): Boolean {
   const ee = disclose(e);
   const at = timeNow(disclose(now));
@@ -999,7 +1010,7 @@ export circuit finish(e: Uint<64>, now: Uint<64>): Boolean {
   assert(blockTimeGte(c.dealBy), "the ceremony isn't finished and its deadline hasn't passed");
   const enough = c.phase == Phase.dealing && c.dealt >= c.t;
   if (c.phase == Phase.dealing) {
-    fineUnfinished(ee, at, !enough);
+    fineUnfinished(ee, at, !enough && c.dealt >= 1);
   }
   if (enough) {
     committees.insert(ee, Committee { ...c, phase: Phase.serving, since: at });
@@ -1139,8 +1150,9 @@ export circuit finalise(id: Bytes<32>, s: Vector<4, Uint<8>>, bountyTo: UserAddr
 
 // Position i of a request in answering time `bucket`: if it didn't answer in time, a miss is
 // counted against that seat, once for that answering time however many requests it missed in
-// it and in whatever order they are settled. Returns the operator seated there.
-circuit tally(e: Uint<64>, i: Uint<8>, answered: Boolean, bucket: Uint<64>): Bytes<32> {
+// it and in whatever order they are settled (and the latest deadline it missed is kept).
+// Returns the operator seated there.
+circuit tally(e: Uint<64>, i: Uint<8>, answered: Boolean, bucket: Uint<64>, deadline: Uint<64>): Bytes<32> {
   const sk = seatKey(e, i);
   if (!answered) {
     const k = missKey(e, i, bucket);
@@ -1148,6 +1160,10 @@ circuit tally(e: Uint<64>, i: Uint<8>, answered: Boolean, bucket: Uint<64>): Byt
       missedIn.insert(k, true);
       const m = missed.member(sk) ? missed.lookup(sk) : 0;
       missed.insert(sk, m < 65535 ? (m + 1) as Uint<16> : m);
+      const last = lastMiss.member(sk) ? lastMiss.lookup(sk) : 0;
+      if (deadline > last) {
+        lastMiss.insert(sk, deadline);
+      }
     }
   }
   return members.lookup(sk);
@@ -1188,7 +1204,7 @@ export circuit settle(id: Bytes<32>, tipTo: UserAddress): [] {
       const i = (k + 1) as Uint<8>;
       if (i <= c.n) {
         const answered = timelyShares.member(shareKey(r.number, i));
-        const op = tally(r.epoch, i, answered, r.bucket);
+        const op = tally(r.epoch, i, answered, r.bucket, r.deadline);
         if (answered) {
           const had = earned.member(op) ? earned.lookup(op) : 0;
           earned.insert(op, (had + each) as Uint<128>);
@@ -1201,7 +1217,7 @@ export circuit settle(id: Bytes<32>, tipTo: UserAddress): [] {
       const i = (k + 1) as Uint<8>;
       if (i <= c.n) {
         const answered = timelyShares.member(shareKey(r.number, i));
-        const op = tally(r.epoch, i, answered, r.bucket);
+        const op = tally(r.epoch, i, answered, r.bucket, r.deadline);
         if (!answered && !bonds.lookup(op).lessThan(missPenalty)) {
           bonds.lookup(op).decrement(missPenalty);
           forfeited = (forfeited + missPenalty) as Uint<64>;
@@ -1234,6 +1250,8 @@ export circuit claim(): [] {
 // (once per epoch). When two-thirds of the seats have named the same address, it is the
 // epoch's; if the epoch served before this one named it too, it becomes the recommended
 // successor. This records an opinion and nothing more: no bond, fee, request or seat moves.
+// A committee of one house seat counts only while there are no independents at all: when it
+// is standing in because the house is short, it doesn't speak for the pools.
 export circuit recommend(i: Uint<8>, next: ContractAddress): [] {
   const ii = disclose(i);
   const to = disclose(next).bytes;
@@ -1248,7 +1266,7 @@ export circuit recommend(i: Uint<8>, next: ContractAddress): [] {
   const k = voteKey(e, to);
   const n = ((votes.member(k) ? votes.lookup(k) : 0) + 1) as Uint<8>;
   votes.insert(k, n);
-  if (n * 3 >= c.n * 2 && backedEpoch != e) {
+  if (n * 3 >= c.n * 2 && backedEpoch != e && (c.n > 1 || independents == 0)) {
     if (previous > 0 && backedEpoch == previous && backed == to) {
       successor = to;
       successorEpoch = e;
