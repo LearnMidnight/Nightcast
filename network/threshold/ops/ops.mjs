@@ -135,7 +135,7 @@ if (mode === 'status') {
         if (hex(list.root) !== hex(l0.poolsRoot)) throw new Error(`${join(dir, 'pool-list.json')} is not the list this contract was deployed with`);
         for (;;) {
           const next = hex((await read()).poolsNext);
-          if (isZero(next)) { say('the pool list is fully loaded'); break; }
+          if (/^0+$/.test(next)) { say('the pool list is fully loaded'); break; } // `next` is hex here
           const k = list.batches.findIndex((x) => hex(T.pureCircuits.poolBatchOf(x.ids, x.next)) === next);
           if (k < 0) throw new Error('the next batch the contract expects is not in this list');
           await call(`loadPools, batch ${k + 1} of ${list.batches.length}`, 'loadPools', async () => (await anyone()).callTx.loadPools(list.batches[k].ids, list.batches[k].next));
