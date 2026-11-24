@@ -194,6 +194,7 @@ if (mode === 'status') {
   // How many DUST coins pay each fee (the dust wallet reads this when it balances a transaction).
   const wantSpends = Math.max(1, Math.min(4, Math.floor(Number(values['dust-spends'])) || 1));
   if (wantSpends > 1) process.env.NIGHTCAST_DUST_MIN_SPENDS = String(wantSpends);
+  try {
   await withChain({ network: values.network, proofServerPort: Number(values['proof-server-port']), walletFile: values.wallet, address }, async ({ session, wallet, providers, read, handle, me, meBytes }) => {
     // Look at each transaction as it is sent.
     let lastTx;
@@ -405,7 +406,11 @@ if (mode === 'status') {
         await call(`leave ${a}`, 'leave', async () => (await h(k)).callTx.leave(stamp(lead)));
         await shown((x) => !x.operators.lookup(k.id).active, `${a} left`);
       } else if (verb === 'open') {
-        const before = (await read()).opened;
+        const lb = await read();
+        const before = lb.opened;
+        // A run that stopped goes on with the ceremony it left: only one can be running.
+        const running = before !== lb.current ? lb.committees.lookup(before).phase : undefined;
+        if (running === T.Phase.seating || running === T.Phase.dealing) { say(`epoch ${before} is already open (${phaseName(running)}): going on with it`); continue; }
         const r = await call('openEpoch', 'openEpoch', async () => (await anyone()).callTx.openEpoch(stamp(lead)));
         if (r.private?.result === 0n) { say('no committee of an allowed size can be made: nothing was opened'); continue; }
         await shown((x) => x.opened > before, 'the new epoch');
@@ -525,6 +530,11 @@ if (mode === 'status') {
     }
     status(await read());
   });
+  } catch (e) {
+    // The failing call has said why already: one line here, not a stack trace.
+    say(`stopped: ${errorText(e)}`);
+    process.exitCode = 1;
+  }
 } else {
   process.stderr.write('usage: node network/threshold/ops/ops.mjs status | do --wallet <file> --dir <keys dir> [--log <file>] <action> ...\n');
   process.exitCode = 2;

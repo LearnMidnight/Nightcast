@@ -77,6 +77,9 @@ case "${1:-}" in
     # One process per wallet: the old test's shared operators service uses the same one.
     if systemctl is-active -q nightcast-net-operators; then echo "the old test's operators service is running and uses this wallet: stop it first (bash network/vm/net.sh stop)" >&2; exit 1; fi
     curl -sf "http://127.0.0.1:$PORT/health" >/dev/null || { echo "the proof server on $PORT isn't answering: systemctl start nightcast-net-proof, wait a minute, and try again" >&2; exit 1; }
+    # And one of these commands at a time: the lock goes when this one ends, however it ends.
+    exec 9>"$DATA/.operators-wallet.lock"
+    flock -n 9 || { echo "another tnet.sh command is using the operators' wallet: wait for it to finish (pgrep -af ops.mjs shows it)" >&2; exit 1; }
     # Fees are paid with several DUST coins (ops.mjs --dust-spends): that needs the option the checkout adds to the dust wallet.
     patch=$(node deploy/scripts/patch-dust-two-spends.mjs --check 2>&1) || { echo "$patch" >&2; echo "the dust wallet installed here isn't the one the several-DUST-spends option was written for: tell Claude what the line above says" >&2; exit 1; }
     echo "$patch" | grep -Eq 'already there|added to' || { echo "$patch" >&2; echo "the several-DUST-spends option isn't installed (no dust wallet found): run npm ci in $REPO" >&2; exit 1; }
