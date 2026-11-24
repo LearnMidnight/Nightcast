@@ -1,4 +1,4 @@
-// Nightcast threshold network, stage 11 (not yet deployed; after five reviews, 23 and 24 Nov 2026).
+// Nightcast threshold network, stage 12 (not yet deployed; after six reviews, 23 and 24 Nov 2026).
 //
 // A committee of n operators (positions 1..n) shares one key that nobody holds. Any t of them
 // give the same random value for a request; fewer than t can't work it out. The design, the
@@ -22,15 +22,19 @@
 //               or is stood down the pool sits out two epoch lengths before it can back
 //               another (so does the operator before it can register again).
 //   epochs      openEpoch sizes the next committee from the number of independents: none, 1 of
-//               1 (a house seat); 1 to 3, a threshold of 3 (3 of 5 when the house can fill it);
-//               4 or more, a threshold of 4 (4 of 7 likewise). `seat` fills it: independents
+//               1 (a house seat); 1 to 3, a threshold of 3 (3 of 5, or 3 of 4 if the house is one
+//               short); 4 or more, a threshold of 4 (4 of 7, or 4 of 6). `seat` fills it: independents
 //               round the ring from where the last committee stopped, then the house, taken in
 //               turn. So everyone serves in turn, with no randomness and nothing the caller
 //               chooses, and an operator's place is its pool's place in the list (fixed at
 //               deploy, by a public rule), not the moment it chose to join: pools can't
-//               arrange to sit together. If the house hasn't the operators to fill the size,
-//               the committee is smaller but its threshold is not: the number of pools it
-//               takes to work out a value never drops because the house is away.
+//               arrange to sit together. The rule behind the sizes: FEWER THAN HALF of a
+//               committee's seats can neither work out a value nor stop one (so n is 2t - 1,
+//               or 2t - 2 when the house is one seat short), and the number of pools it takes
+//               to work out a value never drops because the house is away. When no such
+//               committee can be made, none is opened and the serving one carries on (with one
+//               or two independents the house holds the threshold anyway, so there a single
+//               house seat stands in).
 //               Nobody can leave or join the ring while a committee is being seated, so a
 //               committee that was sized can always be filled, and by the operators it was
 //               sized for.
@@ -38,7 +42,9 @@
 //               complaints); the group key is the sum of the dealers that finished. Seating has
 //               its own time; dealing's clock starts when the last seat is taken. A seat that
 //               didn't finish dealing loses part of its bond (only dealing can cost a bond),
-//               and a house operator that didn't is stood down until it registers again.
+//               and a house operator that didn't is stood down until it registers again. If
+//               the ceremony FAILED, every seat that didn't finish is stood down, so the same
+//               seats can't fail the next one too.
 //   requests    request (the id comes from the contract's counter, the input point H is fixed
 //               then; the requester pays the fee), answer, finalise (any t answers, one value; a
 //               bounty to whoever sends it), settle, claim
@@ -53,7 +59,9 @@
 //               requester, whoever settles it; after that, whoever settles it is tipped out of
 //               the fee, so void requests get settled.
 //               An operator that misses in too many answering times, or whose bond fell below
-//               the minimum, is stood down when the next epoch opens (a miss is counted once
+//               the minimum, is stood down when an epoch opens (the serving committee's seats
+//               are gone through, and once more the committee's before it, for what it missed
+//               while handing over; a miss is counted once
 //               per answering time, however many requests it held, and in whatever order they
 //               are settled); anyone can stand down an operator whose bond is below the
 //               minimum (`standDown`). Only so many requests can be open at once.
@@ -74,7 +82,7 @@
 //   the value, from any t      Γ*   = Σ c_i·Γ_i,  c_i = 720·Π_{j≠i} j/(j-i)  →  720·sk·H
 //                              output = SHA-256("nightcast:threshold:v1" || Γ*)
 // 720 = 6! clears every denominator for positions 1..7, whatever the committee's size, so one
-// rule serves 1 of 1, 3 of 5 and 4 of 7. A negative c_i is applied as (r - |c_i|).
+// rule serves every size from 1 of 1 to 4 of 7. A negative c_i is applied as (r - |c_i|).
 //
 // Compact 0.36.1. Notes for whoever changes this: nothing kept in the ledger is made with
 // transientHash (it isn't guaranteed to stay the same across upgrades); persistentHash is used
@@ -161,6 +169,7 @@ struct LinkPreimage {
   deployment: ContractAddress;
   operator: Bytes<32>;
   number: Field;
+  until: Field;
 }
 
 struct OutputPreimage {
@@ -374,9 +383,10 @@ export pure circuit poolBatchOf(batch: Vector<8, Bytes<32>>, next: Bytes<32>): B
 
 // What a pool's key signs (the 32 bytes themselves, plain Ed25519) to back an operator in this
 // deployment, or (with `revoke`) to stop backing it: `number` is how many times the pool has
-// signed before.
-export pure circuit linkMessageOf(deployment: ContractAddress, operator: Bytes<32>, number: Uint<64>, revoke: Boolean): Bytes<32> {
-  return persistentHash<LinkPreimage>(LinkPreimage { domain: revoke ? pad(32, "nightcast:pool-unlink:v1") : pad(32, "nightcast:pool-link:v1"), deployment: deployment, operator: operator, number: number as Field });
+// signed before, and `until` is the time (seconds) the signature stops being good, which the
+// pool chooses: one it handed out and wasn't used doesn't stay good for ever.
+export pure circuit linkMessageOf(deployment: ContractAddress, operator: Bytes<32>, number: Uint<64>, revoke: Boolean, until: Uint<64>): Bytes<32> {
+  return persistentHash<LinkPreimage>(LinkPreimage { domain: revoke ? pad(32, "nightcast:pool-unlink:v1") : pad(32, "nightcast:pool-link:v1"), deployment: deployment, operator: operator, number: number as Field, until: until as Field });
 }
 
 export pure circuit voteKey(e: Uint<64>, next: Bytes<32>): Bytes<32> {
@@ -568,23 +578,25 @@ export circuit loadPools(batch: Vector<8, Bytes<32>>, next: Bytes<32>): [] {
 }
 
 // A stake pool key's signature over linkMessageOf(this contract, the operator, the pool's count,
-// revoke) is brought, with the time now.
+// revoke, until) is brought, with the time now (before `until`).
 //  - To link: the operator brings it itself (it proves its secret), so no pool can claim an
 //    operator that didn't ask for it. The key must be on the contract's list (and that part of it loaded). The operator
 //    then counts as independent and takes its pool's place in the ring (`prior`: the place
 //    before it, 0 if it is first; ignored when revoking). A pool backs one operator at a time: it
 //    can move to another only once the one it backed has left, been stood down or been revoked,
-//    is no longer in the serving committee, and two epoch lengths have passed since. What an
-//    operator does after its pool revoked it doesn't hold the pool.
+//    is no longer in the serving committee (or that committee has overstayed, as for a bond:
+//    a pool is never stuck behind a committee nobody replaces), and two epoch lengths have
+//    passed since. What an operator does after its pool revoked it doesn't hold the pool.
 //  - To revoke: anyone brings it (the pool needs nothing from the operator). The pool stops
 //    backing its operator, which is stood down if it was active (a
 //    seat it holds keeps its duties) and is no longer linked. Not while a committee is being
 //    seated. So a pool is never held by an operator key that has gone astray.
 // Either way the pool's count goes up, so a signature can't be used twice.
-export circuit linkPool(operator: Bytes<32>, sig: Ed25519Signature, pool: Curve25519Point, revoke: Boolean, now: Uint<64>, prior: Uint<32>): [] {
+export circuit linkPool(operator: Bytes<32>, sig: Ed25519Signature, pool: Curve25519Point, revoke: Boolean, now: Uint<64>, prior: Uint<32>, until: Uint<64>): [] {
   const id = disclose(operator);
   const undo = disclose(revoke);
   const at = timeNow(disclose(now));
+  const good = disclose(until);
   assert(operators.member(id), "not a registered operator");
   const o = operators.lookup(id);
   const key = disclose(pool);
@@ -606,16 +618,17 @@ export circuit linkPool(operator: Bytes<32>, sig: Ed25519Signature, pool: Curve2
         const was = operators.lookup(old);
         assert(!was.active, "that pool's operator is still active");
         assert(blockTimeGte((was.leftTime + 2 * epochSecs) as Uint<64>), "a pool sits out two epoch lengths after its operator left");
-        assert(current == 0 || !seatedIn(current, old), "that pool's last operator is still in the serving committee");
+        assert(current == 0 || !seatedIn(current, old) || blockTimeGte((committees.lookup(current).since + 4 * epochSecs + 4 * answerSecs) as Uint<64>), "that pool's last operator is still in the serving committee");
       } else {
         // the pool revoked `old`, which is no longer its concern whatever it has done since:
         // only a seat it already held then still holds the pool
         assert(!poolFreed.member(pid) || blockTimeGte((poolFreed.lookup(pid) + 2 * epochSecs) as Uint<64>), "a pool sits out two epoch lengths after its operator left");
-        assert(current == 0 || !poolSeat.member(pid) || poolSeat.lookup(pid) < current || !seatedIn(current, old), "that pool's last operator is still in the serving committee");
+        assert(current == 0 || !poolSeat.member(pid) || poolSeat.lookup(pid) < current || !seatedIn(current, old) || blockTimeGte((committees.lookup(current).since + 4 * epochSecs + 4 * answerSecs) as Uint<64>), "that pool's last operator is still in the serving committee");
       }
     }
   }
-  assert(ed25519Verify<32>(linkMessageOf(kernel.self(), id, n, undo), disclose(sig), key), "the pool's key didn't sign for this operator");
+  assert(blockTimeLt(good), "that signature has expired");
+  assert(ed25519Verify<32>(linkMessageOf(kernel.self(), id, n, undo, good), disclose(sig), key), "the pool's key didn't sign for this operator");
   poolLinks.insert(pid, (n + 1) as Uint<64>);
   if (undo) {
     poolOf.remove(id);
@@ -715,25 +728,27 @@ export circuit withdraw(slots: Uint<16>): [] {
 
 // ---------------------------------------------------------------- the ceremony
 
-// Epoch e's committee has had its time: go through its seats. An operator whose seat has missed
-// in too many answering times (more than the allowance since it was last stood down for that
-// seat), or whose bond is now below the minimum, is stood down (an independent leaves the
-// ring, and it and its pool sit out before it can register again; a house operator can
-// register again at once).
+// Go through the seats of epoch e's committee. An operator whose seat has missed in too many
+// answering times (more than the allowance since that seat was last counted over it), or whose
+// bond is now below the minimum, is stood down (an independent leaves the ring, and it and its
+// pool sit out before it can register again; a house operator can register again at once). One
+// that has already left or been stood down, and whose seat has gone over the allowance since,
+// sits out from now instead: leaving early doesn't shorten what missing costs. A committee has
+// one allowance for the whole time it serves, however long that is.
 circuit review(e: Uint<64>, at: Uint<64>): [] {
   for (const k of 0..7) {
     const sk = seatKey(e, (k + 1) as Uint<8>);
     if (members.member(sk)) {
       const id = members.lookup(sk);
       const o = operators.lookup(id);
+      const m = missed.member(sk) ? missed.lookup(sk) : 0;
+      const had = excused.member(sk) ? excused.lookup(sk) : 0;
+      const over = m > had + allowedMisses;
+      if (over) {
+        excused.insert(sk, m);
+      }
       if (o.active) {
-        const m = missed.member(sk) ? missed.lookup(sk) : 0;
-        const had = excused.member(sk) ? excused.lookup(sk) : 0;
-        const over = m > had + allowedMisses;
         if (over || bonds.lookup(id).lessThan(minBondSlots)) {
-          if (over) {
-            excused.insert(sk, m);
-          }
           operators.insert(id, Operator { ...o, active: false, leftTime: at });
           if (o.house) {
             houseActive = (houseActive - 1) as Uint<8>;
@@ -743,6 +758,10 @@ circuit review(e: Uint<64>, at: Uint<64>): [] {
             }
           }
         }
+      } else {
+        if (over) {
+          operators.insert(id, Operator { ...o, leftTime: at });
+        }
       }
     }
   }
@@ -750,19 +769,22 @@ circuit review(e: Uint<64>, at: Uint<64>): [] {
 
 // Anyone opens the next epoch's committee, giving the time now; its seats must be filled within
 // one ceremony length from now. Only when the newest epoch opened has failed, or is being served and
-// has served its epoch length. The seats of the failed one and of the one serving are reviewed
-// (stood down if they missed too much), and the size follows the number of independents:
-//   none          1 of 1, a house seat;
-//   1 to 3        a threshold of 3: the independents and enough of the house to make 5 (so
-//                 from 3 independents the house is below the threshold);
-//   4 or more     a threshold of 4: up to 7 independents and enough of the house to make 7
-//                 (from 7 independents the house has no seat).
-// If the house hasn't that many operators active, the committee is smaller (3 of 4, 4 of 5 ...)
-// but its threshold is the same: the number of pools it takes to work out a value never drops
-// because the house is away. With one or two independents and too few house operators to
-// make 3 seats, it is 1 of 1, a house seat (the house holds the threshold at those sizes
-// anyway). Returns the epoch opened, or 0 if nothing could be (no house operator active and
-// fewer than three independents): the review's stand-downs stand either way.
+// has served its epoch length. The seats of the failed one, of the one serving and of the one
+// served before it (for what it missed while handing over) are reviewed, and the size follows
+// the number of independents i and of active house operators:
+//   i = 0         1 of 1, a house seat;
+//   i = 1 to 3    a threshold of 3: the independents and enough of the house to make 5 (so
+//                 from 3 independents the house is below the threshold), or 4 if the house is
+//                 one short;
+//   i >= 4        a threshold of 4: up to 7 independents and enough of the house to make 7
+//                 (from 7 independents the house has no seat), or 6 if it is one short.
+// So a committee is n = 2t - 1 or 2t - 2 seats: fewer than half of them can neither work out a
+// value nor, by keeping quiet, stop one; and the number of pools it takes to work out a value
+// never drops because the house is away. If the house is too short for that: with one or two
+// independents it is 1 of 1, a house seat (the house holds the threshold at those sizes
+// anyway); otherwise nothing is opened, and the serving committee carries on until the house
+// is back or more pools have joined. Returns the epoch opened, or 0 if none was: the review's
+// stand-downs stand either way.
 export circuit openEpoch(now: Uint<64>): Uint<64> {
   const at = timeNow(disclose(now));
   if (opened != current) {
@@ -776,6 +798,9 @@ export circuit openEpoch(now: Uint<64>): Uint<64> {
   if (current > 0) {
     review(current, at);
   }
+  if (previous > 0) {
+    review(previous, at);
+  }
   const i = independents;
   const h = houseActive;
   const mine7 = (i >= 7 ? 7 : i) as Uint<8>;
@@ -784,9 +809,10 @@ export circuit openEpoch(now: Uint<64>): Uint<64> {
   const room5 = (5 - mine3) as Uint<8>;
   const house7 = (h >= room7 ? room7 : h) as Uint<8>;
   const house5 = (h >= room5 ? room5 : h) as Uint<8>;
-  const many = i >= 4;
-  const few = i >= 1 && i <= 3 && mine3 + house5 >= 3;
-  if (!many && !few && h == 0) {
+  const many = i >= 4 && mine7 + house7 >= 6;
+  const few = i >= 1 && i <= 3 && mine3 + house5 >= 4;
+  const one = i <= 2 && h >= 1;
+  if (!many && !few && !one) {
     return 0;
   }
   const n = (many ? mine7 + house7 : (few ? mine3 + house5 : 1)) as Uint<8>;
@@ -924,8 +950,10 @@ export circuit dealShare(e: Uint<64>, d: Uint<8>, i: Uint<8>): [] {
 }
 
 // A seat of epoch e that didn't finish dealing forfeits the ceremony penalty, and a house
-// operator that didn't is stood down (it can register again at once).
-circuit fineUnfinished(e: Uint<64>, at: Uint<64>): [] {
+// operator that didn't is stood down (it can register again at once). If the ceremony failed,
+// an independent that didn't finish is stood down too (it and its pool sit out): the next
+// committee is sized without the seats that failed this one.
+circuit fineUnfinished(e: Uint<64>, at: Uint<64>, failed: Boolean): [] {
   for (const k of 0..7) {
     const sk = seatKey(e, (k + 1) as Uint<8>);
     if (members.member(sk) && !finished.member(sk)) {
@@ -935,9 +963,15 @@ circuit fineUnfinished(e: Uint<64>, at: Uint<64>): [] {
         forfeited = (forfeited + ceremonyPenalty) as Uint<64>;
       }
       const o = operators.lookup(id);
-      if (o.house && o.active) {
+      if (o.active && (o.house || failed)) {
         operators.insert(id, Operator { ...o, active: false, leftTime: at });
-        houseActive = (houseActive - 1) as Uint<8>;
+        if (o.house) {
+          houseActive = (houseActive - 1) as Uint<8>;
+        } else {
+          if (poolOf.member(id)) {
+            ringLeave(placeOf(id));
+          }
+        }
       }
     }
   }
@@ -947,8 +981,9 @@ circuit fineUnfinished(e: Uint<64>, at: Uint<64>): [] {
 // its deadline has passed with at least t finished, the committee serves from now (every seat
 // holds shares from the finished dealers, whether or not it dealt). Past the deadline with
 // fewer, or with seats still empty, it has failed, and the epoch before carries on. Whenever
-// dealing ran to its deadline, the seats that didn't finish forfeit the ceremony penalty
-// (a committee that was never fully seated costs nobody anything).
+// dealing ran to its deadline, the seats that didn't finish forfeit the ceremony penalty, and
+// if it failed they are stood down (a committee that was never fully seated costs nobody
+// anything).
 export circuit finish(e: Uint<64>, now: Uint<64>): Boolean {
   const ee = disclose(e);
   const at = timeNow(disclose(now));
@@ -962,10 +997,11 @@ export circuit finish(e: Uint<64>, now: Uint<64>): Boolean {
     return true;
   }
   assert(blockTimeGte(c.dealBy), "the ceremony isn't finished and its deadline hasn't passed");
+  const enough = c.phase == Phase.dealing && c.dealt >= c.t;
   if (c.phase == Phase.dealing) {
-    fineUnfinished(ee, at);
+    fineUnfinished(ee, at, !enough);
   }
-  if (c.phase == Phase.dealing && c.dealt >= c.t) {
+  if (enough) {
     committees.insert(ee, Committee { ...c, phase: Phase.serving, since: at });
     previous = current;
     current = ee;

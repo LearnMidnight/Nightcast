@@ -1,6 +1,7 @@
-// The threshold network, stage 11, in memory (compact-runtime): the registry and eight epochs in a
-// row on one contract. The committee's size follows the number of independents (1 of 1, 3 of 5,
-// 4 of 7), seats go round the ring of independents and then to the house, a ceremony that fails costs
+// The threshold network, stage 12, in memory (compact-runtime): the registry and eight epochs in a
+// row on one contract. The committee's size follows the number of independents and of house
+// operators (1 of 1, 3 of 4, 3 of 5, 4 of 6, 4 of 7, or none: every combination is checked), seats
+// go round the ring of independents and then to the house, a ceremony that fails costs
 // the seats that didn't deal, and for each size EVERY set of t answers must give the off-chain
 // value. Cheating and out-of-turn calls must fail, a void request must keep its value, fees must
 // reach the seats that answered in time, and the NIGHT the contract holds must always equal the
@@ -82,7 +83,7 @@ const operator = (name) => { const op = rand(); made++; return { name, op, id: P
 const H = ['h0', 'h1', 'h2', 'h3'].map(operator);
 const contract = new P.Contract(witnesses);
 const address = rt.sampleContractAddress();
-const init = async (o = {}) => contract.initialState(rt.createConstructorContext({}, COIN), SLACK, EPOCH, o.ceremony ?? CEREMONY, ANSWER, SLOT, MINBOND, o.penalty ?? PENALTY, FEE, o.bounty ?? BOUNTY, o.miss ?? MISS, MISSES, MAXP, o.house ?? H.map((h) => h.id), ROOT);
+const init = async (o = {}) => contract.initialState(rt.createConstructorContext({}, COIN), SLACK, EPOCH, o.ceremony ?? CEREMONY, ANSWER, SLOT, MINBOND, o.penalty ?? PENALTY, FEE, o.bounty ?? BOUNTY, o.miss ?? MISS, o.misses ?? MISSES, MAXP, o.house ?? H.map((h) => h.id), ROOT);
 let state = (await init()).currentContractState;
 let balance = 0n;
 let paidOut = new Map();
@@ -112,12 +113,13 @@ const bond = (o) => ledger().bonds.lookup(o.id).read();
 /** This contract's address as a pure circuit takes it. */
 const SELF = () => ({ bytes: new Uint8Array(rt.encodeContractAddress ? rt.encodeContractAddress(address) : Buffer.from(address, 'hex')) });
 /** The message pool p signs to back operator o now, and the link itself. */
-const linkMessage = (o, p, revoke = false) => P.pureCircuits.linkMessageOf(SELF(), o.id, ledger().poolLinks.member(p.id) ? ledger().poolLinks.lookup(p.id) : 0n, revoke);
+const UNTIL = 1_900_000_000n; // a signature good until long after these checks end
+const linkMessage = (o, p, revoke = false, until = UNTIL) => P.pureCircuits.linkMessageOf(SELF(), o.id, ledger().poolLinks.member(p.id) ? ledger().poolLinks.lookup(p.id) : 0n, revoke, until);
 /** A pool's place in the list (0: not loaded), and the occupied place in the ring just before place i. */
 const placeIn = (p) => (ledger().listed.member(p.id) ? ledger().listed.lookup(p.id) : 0n);
 const prior = (i) => { let best = 0n; for (const [k] of ledger().ringOp) if (k < i && k > best) best = k; return best; };
-const link = (o, p = o.pool, sig = signed(p, linkMessage(o, p)), hint = prior(placeIn(p)), by = o) => call('linkPool', [o.id, sig, p.key, false, BigInt(now), hint], { op: by.op });
-const revoke = (o, p = o.pool, sig = signed(p, linkMessage(o, p, true))) => call('linkPool', [o.id, sig, p.key, true, BigInt(now), 0n]);
+const link = (o, p = o.pool, sig = signed(p, linkMessage(o, p)), hint = prior(placeIn(p)), by = o, until = UNTIL) => call('linkPool', [o.id, sig, p.key, false, BigInt(now), hint, until], { op: by.op });
+const revoke = (o, p = o.pool, sig = signed(p, linkMessage(o, p, true)), until = UNTIL) => call('linkPool', [o.id, sig, p.key, true, BigInt(now), 0n, until]);
 const loadPools = (b) => call('loadPools', [b.ids, b.next]);
 const linked = (o) => ledger().poolOf.member(o.id);
 /** Register; an operator with a stake pool that isn't linked yet is linked too. */
@@ -222,6 +224,7 @@ await fails(init({ miss: 0n }), /at least one slot/, "a contract can't be deploy
 await fails(init({ bounty: FEE }), /half the fee/, 'or with a bounty that leaves the seats nothing');
 await fails(init({ ceremony: 600n }), /thirty times the slack/, 'or with a ceremony too short to deal in');
 await fails(init({ house: [H[0].id, H[1].id, H[2].id, H[0].id] }), /four different operators/, 'or without four different house operators');
+await fails(init({ misses: 4n }), /an epoch can hold more/, 'or with more misses allowed than an epoch has answering times to miss in');
 
 // ---- the pool list: loaded after deploy, and only as committed
 await fails(loadPools(BATCHES[1]), /not the next batch/, "a batch that isn't the next one of the list the contract was deployed with is refused");
@@ -237,6 +240,69 @@ for (const h of H) await register(h, 20n);
 await fails(register(H[0]), /already registered/, 'an operator registers once');
 ok(ledger().houseActive === 4n && ledger().independents === 0n && ledger().ringNext.lookup(0n) === 0n, 'the four keys named at deploy register as the house, and the house has no place in the ring');
 books('after registering');
+{
+  // every size: 0 to 8 independents against 0 to 4 house operators (on copies of the state)
+  const before = snapshot();
+  const SIZES = [ // rows: independents 0..8; columns: house operators active 0..4; t/n, or - (no epoch)
+    ['-', '1/1', '1/1', '1/1', '1/1'],
+    ['-', '1/1', '1/1', '3/4', '3/5'],
+    ['-', '1/1', '3/4', '3/5', '3/5'],
+    ['-', '3/4', '3/5', '3/5', '3/5'],
+    ['-', '-', '4/6', '4/7', '4/7'],
+    ['-', '4/6', '4/7', '4/7', '4/7'],
+    ['4/6', '4/7', '4/7', '4/7', '4/7'],
+    ['4/7', '4/7', '4/7', '4/7', '4/7'],
+    ['4/7', '4/7', '4/7', '4/7', '4/7'],
+  ];
+  const extra = Array.from({ length: 8 }, (_, k) => { const o = operator(`s${k + 1}`); o.pool = POOLS[k]; everyone.set(hexOf(o.id), o); return o; });
+  const bases = [];
+  const wrong = [];
+  let halves = true;
+  for (let i = 0; i <= 8; i++) {
+    if (i > 0) {
+      restore(bases[i - 1]);
+      await register(extra[i - 1]); // joining the ring before any epoch has been opened
+    }
+    bases.push(snapshot());
+    for (let h = 4; h >= 0; h--) {
+      restore(bases[i]);
+      for (const x of H.slice(h)) await leave(x);
+      const e = await call('openEpoch', [dl()]);
+      let got = '-';
+      if (e !== 0n) {
+        const c = ledger().committees.lookup(e);
+        got = `${c.t}/${c.n}`;
+        if (c.indepSeats !== (c.t === 1n ? 0n : BigInt(Math.min(i, c.t === 3n ? 3 : 7)))) got += ' (seats)';
+        halves &&= c.n === 1n || (2n * c.t > c.n && 2n * (c.n - c.t + 1n) >= c.n);
+      } else if (ledger().opened !== 0n) got = '- (opened)';
+      if (got !== SIZES[i][h]) wrong.push(`${i} independents, ${h} house: ${got}, not ${SIZES[i][h]}`);
+    }
+  }
+  ok(wrong.length === 0, `the committee is the right size for every number of independents (0 to 8) and of house operators (0 to 4): 45 cases${wrong.length ? ': ' + wrong.join('; ') : ''}`);
+  ok(halves, "in every one of them, fewer than half the seats can neither work out a value nor stop one");
+  // two of the smaller sizes from end to end
+  restore(bases[1]);
+  await leave(H[3]);
+  const s4 = await call('openEpoch', [dl()]);
+  await fill(s4);
+  ok(names(s4) === 's1 h0 h1 h2', 'one independent and three house operators sit as 3 of 4');
+  const q4 = await deal(s4, [2, 3, 4]); // the independent doesn't deal
+  now += 1801;
+  ok((await finish(s4)) === true && active(extra[0]) && bond(extra[0]) === 10n && ledger().independents === 1n, "3 dealers of 4 are enough at the deadline; the independent that didn't deal is fined, and not stood down, since the ceremony didn't fail");
+  await everySubset(s4, q4, sharesOf(s4, q4), 'short 3 of 4');
+  books('after a 3 of 4 committee');
+  now -= 1801;
+  restore(bases[6]);
+  for (const x of H) await leave(x);
+  const s6 = await call('openEpoch', [dl()]);
+  await fill(s6);
+  ok(names(s6) === 's1 s2 s3 s4 s5 s6', 'six independents and no house sit as 4 of 6');
+  const q6 = await deal(s6, [1, 2, 3, 4, 5, 6]);
+  ok((await finish(s6)) === true, 'and it serves with no house operator at all');
+  await everySubset(s6, q6, sharesOf(s6, q6), 'short 4 of 6');
+  books('after a 4 of 6 committee');
+  restore(before);
+}
 
 // ---- epoch 1: nobody independent, so 1 of 1, a house seat (today's single oracle)
 await fails(call('openEpoch', [BigInt(now) + 1000n]), /isn't the time now/, 'whoever opens an epoch gives the time now, and no other');
@@ -277,6 +343,8 @@ const A = independent('a'), B = independent('b');
   await fails(loadPools(BATCHES[1]), /whole list is loaded/, 'and nothing can be added after it');
   await fails(link(A, A.pool, signed(POOLS[1], linkMessage(A, A.pool))), /didn't sign/, "a listed pool's key with another key's signature is refused");
   await fails(link(A, A.pool, signed(A.pool, linkMessage(B, A.pool))), /didn't sign/, 'and its signature for another operator');
+  await fails(link(A, A.pool, signed(A.pool, linkMessage(A, A.pool, false, BigInt(now) - 1n)), 0n, A, BigInt(now) - 1n), /signature has expired/, "a pool's signature is good only until the time the pool put in it");
+  await fails(link(A, A.pool, signed(A.pool, linkMessage(A, A.pool, false, BigInt(now) + 60n)), 0n, A, UNTIL), /didn't sign/, 'and that time is part of what it signed: nobody can stretch it');
   const first = signed(A.pool, linkMessage(A, A.pool));
   await fails(link(A, A.pool, first, 0n, B), /only the operator itself/, "nobody but the operator can bring its pool's link: a pool can't claim an operator that didn't ask");
   await link(A, A.pool, first);
@@ -304,7 +372,7 @@ const A = independent('a'), B = independent('b');
     await deal(e, [1, 2, 3, 4, 5]);
     ok((await finish(e)) === true && names(e).startsWith('a '), 'the revoked operator comes back behind another pool and sits in the serving committee');
   }
-  await fails(link(B, A.pool, signed(A.pool, P.pureCircuits.linkMessageOf(SELF(), B.id, 0n, false))), /didn't sign/, "a pool's next link signs its next number");
+  await fails(link(B, A.pool, signed(A.pool, P.pureCircuits.linkMessageOf(SELF(), B.id, 0n, false, UNTIL))), /didn't sign/, "a pool's next link signs its next number");
   await link(B, A.pool);
   ok(linked(B) && ledger().poolLinks.lookup(A.pool.id) === 3n && ledger().independents === 2n, "and its old pool can still back another operator, whatever the one it revoked is doing, even sitting in the serving committee: it can't hold the pool");
   books('after a pool revoked and moved');
@@ -331,9 +399,10 @@ ok(names(e2) === 'a b h1 h2 h3', 'the independents sit first, in ring order, the
 }
 const p2 = await deal(e2, [1, 2, 3, 4]); // position 5 (h3) never finishes dealing
 await fails(call('dealShare', [e2, 1n, 2n], { s: at(p2.get(1), 2) }), /already sent/, 'a parcel is sent once');
+const a5 = Array.from({ length: 4 }, (_, k) => (k < 3 ? rand() : 0n));
 {
   // h3 posts its commitments, then tries a wrong share, and stops there
-  const a = Array.from({ length: 4 }, (_, k) => (k < 3 ? rand() : 0n));
+  const a = a5;
   await call('dealCommit', [e2, 5n, a.map(G)], { op: seated(e2)[4].op, a });
   await fails(call('dealCommit', [e2, 5n, a.map(G)], { op: seated(e2)[4].op, a }), /has dealt/, 'a position posts its commitments once');
   await fails(call('dealShare', [e2, 5n, 2n], { s: mod(at(a, 2) + 1n) }), /not this dealer's share/, "a wrong share can't be posted");
@@ -341,6 +410,7 @@ await fails(call('dealShare', [e2, 1n, 2n], { s: at(p2.get(1), 2) }), /already s
 }
 await fails(finish(e2), /deadline hasn't passed/, "a ceremony with a dealer missing can't finish before its deadline");
 now += 1801;
+await fails(call('dealShare', [e2, 5n, 2n], { s: at(a5, 2) }), /time for dealing is over/, 'past the deadline nobody deals any more, even with the right share');
 ok((await finish(e2)) === true && ledger().current === 2n, 'past the deadline, 4 finished dealers of 5 are enough: epoch 2 serves');
 ok(bond(H[3]) === 18n && ledger().forfeited === 2n && bond(H[0]) === 20n, 'the seat that did not deal forfeits the ceremony penalty, though the ceremony succeeded');
 ok(!active(H[3]) && ledger().houseActive === 3n, 'and being a house operator, it is stood down');
@@ -350,6 +420,22 @@ const sk2 = sharesOf(e2, p2);
 for (let i = 1; i <= 5; i++) ok(eq(shareKeyOnChain(2n, i), G(sk2[i - 1])), `epoch 2, position ${i} (${seated(e2)[i - 1].name}): the share it opened from its parcels matches its share key on chain${i === 5 ? ' (it never dealt, and still holds a share)' : ''}`);
 const r2 = await everySubset(e2, p2, sk2, 'draw 2');
 books('after epoch 2');
+{
+  // a pool revokes an operator that sits in the serving committee (on a copy of the state)
+  const before = snapshot(), t0 = now;
+  await revoke(B);
+  ok(!active(B) && ledger().poolSeat.lookup(B.pool.id) === 2n && ledger().independents === 1n, 'a pool revokes its operator while it sits in the serving committee: the seat it holds is noted');
+  const Y = operator('y');
+  await call('register', [{ bytes: Y.payout }, 12n, 0n], { op: Y.op });
+  now += 2 * Number(EPOCH) + 1;
+  await fails(link(Y, B.pool), /still in the serving committee/, "after its sit-out the pool still can't back another operator while that seat is serving");
+  now = Number(ledger().committees.lookup(e2).since) + 4 * Number(EPOCH) + 4 * Number(ANSWER) + 1;
+  await link(Y, B.pool);
+  ok(linked(Y) && ledger().independents === 2n, 'but a committee that has overstayed holds no pool: a pool is never stuck behind a committee nobody replaces');
+  books('after a pool moved on from an overstayed committee');
+  now = t0;
+  restore(before);
+}
 
 // ---- cheating on a request (epoch 2's, restored to before it was finalised)
 restore(r2.before);
@@ -474,20 +560,35 @@ ok((await finish(e3)) === false && ledger().committees.lookup(e3).phase === P.Ph
 await fails(finish(e3), /ceremony is over/, 'a ceremony ends once');
 ok(bond(A) === 10n && bond(B) === 10n && bond(H[1]) === 17n && bond(H[2]) === 17n && bond(C) === 12n && bond(Dd) === 12n && bond(H[0]) === 20n && ledger().forfeited === 13n, 'the four seats that did not finish dealing each forfeit 2 slots of bond, as soon as the ceremony ends; the three that did lose nothing');
 ok(!active(H[1]) && !active(H[2]) && ledger().houseActive === 2n, 'and the two house operators among them are stood down');
+ok(!active(A) && !active(B) && active(C) && active(Dd) && ledger().independents === 2n && ledger().cursor === 0n, "and so are the two independents among them, because the ceremony failed: the seats that failed it can't fail the next one");
+books('after the failed ceremony');
 {
-  // with only two house operators active, 4 of 7 can't be filled (on a copy of the state)
+  // two independents left and two house operators: 3 of 5 can't be filled (on a copy of the state)
   const before = snapshot();
   const opened = await open();
   const c = ledger().committees.lookup(opened);
-  ok(c.n === 6n && c.t === 4n && c.indepSeats === 4n, "when the house can't fill 4 of 7, the committee is smaller but its threshold is not: 4 of 6, the four independents and the two house operators left. Three pools never get the threshold because the house is away");
+  ok(c.n === 4n && c.t === 3n && c.indepSeats === 2n, "when the house is one short of 3 of 5, the committee is 3 of 4: one seat smaller, the same threshold");
+  restore(before);
+  await leave(H[0]);
+  const stoodIn = await open();
+  const lone = ledger().committees.lookup(stoodIn);
+  ok(lone.n === 1n && lone.t === 1n && lone.indepSeats === 0n, 'when it is two short (two independents and one house operator; 3 of 3 would let any one seat stop everything), a single house seat stands in');
+  restore(before);
+  await leave(H[0]);
+  await leave(H[3]);
+  ok((await open()) === 0n && (await open()) === 0n && ledger().opened === 3n && ledger().current === 2n, 'and with no house operator at all, nothing opens, however often it is asked: epoch 2 carries on');
   restore(before);
 }
 await register(H[1], 0n);
 await register(H[2], 0n);
+await fails(register(A, 0n), /sits out/, 'an independent stood down for failing a ceremony sits out before it can register again');
+now += 2 * Number(EPOCH) + 1;
+await register(A, 0n);
+await register(B, 0n);
 const e4 = await open();
-books('after the failed ceremony');
+books('after a and b came back');
 await fill(e4);
-ok(names(e4) === 'c d a b h3 h0 h1', 'after a failed ceremony the turn simply goes on round the ring, and the house fills the rest');
+ok(names(e4) === 'a b c d h3 h0 h1', 'two epoch lengths later a and b are back at their places, the turn goes on round the ring, and the house fills the rest');
 const p4 = await deal(e4, [1, 2, 3, 4, 5, 6, 7]);
 ok((await finish(e4)) === true && ledger().current === 4n, 'epoch 4 (4 of 7) serves as soon as all 7 dealers have finished, before its deadline');
 const sk4 = sharesOf(e4, p4);
@@ -559,17 +660,17 @@ const e5 = await open();
 }
 ok(!ledger().ringOp.member(4n) && !ledger().ringOp.member(5n) && ledger().ringNext.lookup(3n) === 0n, 'd and e, who left, are no longer in the ring: there is nothing to pass over');
 await seat(e5);
-ok(ledger().committees.lookup(e5).seated === 1n && ledger().cursor === 3n, "the turn goes on to c");
+ok(ledger().committees.lookup(e5).seated === 1n && ledger().cursor === 1n, "the turn goes on past d's empty place, round to a");
 await fill(e5);
-ok(names(e5) === 'c a b h2 h3', 'd, who left while serving, is not seated again; the rest keep their order');
+ok(names(e5) === 'a b c h2 h3', 'd, who left while serving, is not seated again; the rest keep their order');
 const p5 = await deal(e5, [1, 2, 3, 4, 5]);
 ok((await finish(e5)) === true, 'epoch 5 serves');
 const sk5 = sharesOf(e5, p5);
 await everySubset(e5, p5, sk5, 'draw 5');
 await fails(call('withdraw', [12n], { op: Dd.op }), /requests can be settled/, "d's committee has been replaced, but its bond waits until that committee's last requests could be settled");
 {
-  // requests that c and a (positions 1 and 2) don't answer in time, over four answering times
-  const had = earnedBy(B), hadC = earnedBy(C), lost = ledger().forfeited;
+  // requests that a and b (positions 1 and 2) don't answer in time, over four answering times
+  const had = earnedBy(C), hadA = earnedBy(A), lost = ledger().forfeited;
   const round = async (tags) => {
     const rids = [];
     for (const tag of tags) {
@@ -584,13 +685,13 @@ await fails(call('withdraw', [12n], { op: Dd.op }), /requests can be settled/, "
   for (const rid of await round(['draw 5v', 'draw 5w'])) await settle(rid);
   ok(missedAt(e5, 1) === 1n && missedAt(e5, 2) === 1n, 'two requests missed in the same answering time count as one miss: a burst of requests can\'t stand a seat down');
   const [x] = await round(['draw 5x']), [y] = await round(['draw 5y']), [last] = await round(['draw 5z']);
-  await call('answer', [last, 1n], { sk: sk5[0] }); // c, too late
+  await call('answer', [last, 1n], { sk: sk5[0] }); // a, too late
   for (const rid of [last, y, x]) await settle(rid); // settled latest first: the order makes no difference
-  ok(earnedBy(B) === had + 5n * ((FEE - BOUNTY) / 3n) && ledger().forfeited === lost && ledger().dust === 0n, 'each fee is shared by the three seats that answered in time; a paid request takes no bond');
-  ok(earnedBy(C) === hadC, 'an answer after the deadline earns nothing');
+  ok(earnedBy(C) === had + 5n * ((FEE - BOUNTY) / 3n) && ledger().forfeited === lost && ledger().dust === 0n, 'each fee is shared by the three seats that answered in time; a paid request takes no bond');
+  ok(earnedBy(A) === hadA, 'an answer after the deadline earns nothing');
   ok(missedAt(e5, 1) === 4n && missedAt(e5, 2) === 4n && missedAt(e5, 3) === 0n, 'a miss is counted against a seat, once per answering time and in whatever order the requests are settled');
-  await call('claim', [], { op: B.op });
-  ok(paid(B.payout) === had + 5n * ((FEE - BOUNTY) / 3n), 'b claims its fees');
+  await call('claim', [], { op: C.op });
+  ok(paid(C.payout) === had + 5n * ((FEE - BOUNTY) / 3n), 'c claims its fees');
 }
 books('after the fees of epoch 5');
 for (const i of [1, 2, 3, 4]) await name(e5, i, NEXT_Y);
@@ -609,19 +710,40 @@ await fails(call('withdraw', [1n], { op: Dd.op }), /not that much bond/, 'and no
   restore(before);
 }
 const e6 = await open();
-ok(!ledger().operators.lookup(C.id).active && !ledger().operators.lookup(A.id).active && ledger().independents === 1n && ledger().houseActive === 4n, 'c and a missed more requests than a term allows: they are stood down when the next epoch opens');
-await fails(register(C, 0n), /sits out/, 'a stood-down operator sits out before it can register again');
+ok(!active(A) && !active(B) && active(C) && ledger().independents === 1n && ledger().houseActive === 4n, 'a and b missed more requests than a term allows: they are stood down when the next epoch opens');
+await fails(register(A, 0n), /sits out/, 'a stood-down operator sits out before it can register again');
 const X = operator('x');
 await call('register', [{ bytes: X.payout }, 12n, 0n], { op: X.op });
-await fails(link(X, C.pool), /pool sits out/, "and its pool can't simply back a fresh key: the pool sits out too");
+await fails(link(X, A.pool), /pool sits out/, "and its pool can't simply back a fresh key: the pool sits out too");
 await fill(e6);
-ok(names(e6) === 'b h0 h1 h2 h3', 'the house fills the seats they left');
+ok(names(e6) === 'c h0 h1 h2 h3', 'the house fills the seats they left');
+{
+  // epoch 5's seats while epoch 6 is dealing: b and c (positions 2 and 3) stop answering (on a copy of the state)
+  const before = snapshot(), t0 = now;
+  await deal(e6, [1, 2, 3, 4, 5]);
+  for (let k = 0; k < 4; k++) {
+    const rid = await ask(`handing over ${k}`);
+    for (const i of [1, 4, 5]) await call('answer', [rid, BigInt(i)], { sk: sk5[i - 1] });
+    await fin(rid, [1, 4, 5]);
+    now += 601;
+    await settle(rid);
+  }
+  ok(missedAt(e5, 3) === 4n && missedAt(e5, 2) === 8n && active(C), "c's seat in epoch 5 misses in four answering times after epoch 6 was opened, when epoch 5's seats had already been reviewed");
+  ok((await finish(e6)) === true && ledger().previous === 5n, 'epoch 6 takes over');
+  const leftA = ledger().operators.lookup(A.id).leftTime;
+  const opened = await open();
+  ok(!active(C) && ledger().independents === 0n && ledger().committees.lookup(opened).n === 1n, "a committee is reviewed once more when the epoch after its successor opens: going quiet while handing over is counted, and c is stood down");
+  ok(ledger().operators.lookup(B.id).leftTime === BigInt(now) && ledger().operators.lookup(A.id).leftTime === leftA && active(H[2]) && active(H[3]), 'b, already stood down, went on missing: it sits out from now instead (a, which answered, does not); the seats that answered are untouched');
+  books('after the second review');
+  now = t0;
+  restore(before);
+}
 const p6 = await deal(e6, [1, 2, 3, 4, 5]);
 ok((await finish(e6)) === true && ledger().current === 6n, 'epoch 6 serves');
 for (const i of [1, 2, 3, 4]) await name(e6, i, NEXT_Y);
 ok(hexOf(ledger().successor) === hexOf(NEXT_Y) && ledger().successorEpoch === 6n, 'epoch 6 names Y too: now Y is the recommended successor');
 await register(Dd);
-ok(ledger().operators.lookup(Dd.id).active && ledger().independents === 2n && ledger().ringNext.lookup(2n) === 4n, 'd, who left more than two epoch lengths ago, can rejoin with a fresh bond, at its pool\'s place in the ring');
+ok(ledger().operators.lookup(Dd.id).active && ledger().independents === 2n && ledger().ringNext.lookup(3n) === 4n, 'd, who left more than two epoch lengths ago, can rejoin with a fresh bond, at its pool\'s place in the ring');
 {
   // only so many requests can be open at once; one finalised in time frees its place
   const sk6 = sharesOf(e6, p6);
@@ -644,20 +766,20 @@ await fails(link(more[2], more[2].pool, signed(more[2].pool, linkMessage(more[2]
 await link(more[2]);
 for (const o of more) if (o !== more[2]) await register(o);
 const ringOrder = () => { const out = []; for (let k = ledger().ringNext.lookup(0n); k !== 0n; k = ledger().ringNext.lookup(k)) out.push(Number(k)); return out.join(' '); };
-ok(ringOrder() === '2 4 6 7 8 9 10 11 12' && ledger().independents === 9n, 'nine independents stand in the ring in the order of their pools in the list, whatever order they joined in');
+ok(ringOrder() === '3 4 6 7 8 9 10 11 12' && ledger().independents === 9n, 'nine independents stand in the ring in the order of their pools in the list, whatever order they joined in');
 const e7 = await open();
 {
   const c = ledger().committees.lookup(e7);
   ok(c.n === 7n && c.t === 4n && c.indepSeats === 7n, 'from seven independents the committee is 4 of 7 with no seat for the house');
 }
 await fill(e7);
-ok(names(e7) === 'd p6 p7 f p9 p10 p11' && ledger().cursor === 11n, 'the turn goes on from b, who sat last: the next seven round the ring, and two wait');
+ok(names(e7) === 'd p6 p7 f p9 p10 p11' && ledger().cursor === 11n, 'the turn goes on from c, who sat last: the next seven round the ring, and two wait');
 await deal(e7, [1, 2, 3, 4, 5, 6, 7]);
 ok((await finish(e7)) === true && ledger().current === 7n, 'epoch 7 serves');
 await leave(more[4]);
-ok(ledger().cursor === 10n && !ledger().ringOp.member(11n) && ringOrder() === '2 4 6 7 8 9 10 12', 'when the operator that sat last leaves the ring, the turn stays where it was');
+ok(ledger().cursor === 10n && !ledger().ringOp.member(11n) && ringOrder() === '3 4 6 7 8 9 10 12', 'when the operator that sat last leaves the ring, the turn stays where it was');
 const e8 = await open();
 await fill(e8);
-ok(names(e8) === 'p12 b d p6 p7 f p9' && ledger().cursor === 9n, 'the next committee starts with the two that waited, then goes round past the start of the list: everyone sits in turn, and nobody twice in one committee');
+ok(names(e8) === 'p12 c d p6 p7 f p9' && ledger().cursor === 9n, 'the next committee starts with the two that waited, then goes round past the start of the list: everyone sits in turn, and nobody twice in one committee');
 books('at the end');
 console.log(`${checks} checks passed`);
