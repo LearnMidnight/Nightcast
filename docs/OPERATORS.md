@@ -1,4 +1,6 @@
-# The Nightcast operator network (draft, November 2026)
+# The Nightcast operator network: the three-operator prototype (November 2026)
+
+> **Superseded.** This describes the first prototype, `network/src/network.compact`: each request named three operators and needed all three answers. It ran on Preprod from 21 to 23 Nov 2026 (with one wallet per operator, 20 of 20 requests answered). Its lessons shaped the threshold network, which replaces it: any *t* of a committee answer, the contract seats the committee, and fewer than half can neither know a value early nor stop one. See **[THRESHOLD.md](THRESHOLD.md)**.
 
 *By Jack Baker, founder of Lunardraw and Nightcast.*
 

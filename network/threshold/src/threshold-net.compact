@@ -1,8 +1,8 @@
-// Nightcast threshold network, stage 13 (not yet deployed; after seven reviews, 23 and 24 Nov 2026).
+// Nightcast threshold network, stage 13 (after eight reviews, 23 and 24 Nov 2026; on Preprod for measurement since 24 Nov 2026).
 //
 // A committee of n operators (positions 1..n) shares one key that nobody holds. Any t of them
 // give the same random value for a request; fewer than t can't work it out. The design, the
-// decisions and the reviews are in the design doc ("Nightcast threshold network: design").
+// decisions and the reviews are in docs/THRESHOLD.md.
 //
 //   registry    register (a key, a payout address, a bond), topUp, leave, withdraw. Independent
 //               operators stand in a ring, in the order of their pools in the contract's pool

@@ -3,7 +3,7 @@ import { generateOperatorSecret, generateOracleSecretKey, NightcastSimulator, or
 import { checkRequest } from '../check.js';
 import { compareFingerprints, onChainFingerprints } from '../fingerprints.js';
 import { isLocked } from '../lock.js';
-import { blockfrostProjectId, createLogger, publicEndpoints, redact } from '../network.js';
+import { blockfrostProjectId, createLogger, nodeEndpoints, publicEndpoints, redact } from '../network.js';
 import type { DeploymentRecord } from '../record.js';
 import { type ContractStateView, verifyDeployment } from '../verify.js';
 
@@ -118,19 +118,33 @@ describe('verifyDeployment', () => {
 describe('Blockfrost endpoints', () => {
   const logger = createLogger('silent');
 
-  it('adds the project id to every Preprod indexer endpoint, and uses Midnight\'s public node', () => {
-    const c = publicEndpoints('preprod', logger, 'preprodABC123');
-    for (const url of [c.indexer, c.indexerWS]) {
-      expect(url).toContain('blockfrost.io');
-      expect(new URL(url).searchParams.get('project_id')).toBe('preprodABC123');
+  it('adds the project id to every Preprod endpoint: indexer and node are both Blockfrost\'s', () => {
+    const saved = { url: process.env.NIGHTCAST_NODE_URL, ws: process.env.NIGHTCAST_NODE_WS };
+    delete process.env.NIGHTCAST_NODE_URL;
+    delete process.env.NIGHTCAST_NODE_WS;
+    try {
+      const c = publicEndpoints('preprod', logger, 'preprodABC123');
+      for (const url of [c.indexer, c.indexerWS, c.node, c.nodeWS]) {
+        expect(new URL(url).hostname).toMatch(/blockfrost\.io$/);
+        expect(new URL(url).searchParams.get('project_id')).toBe('preprodABC123');
+      }
+      // Midnight's own Preprod RPC answers 410 since 23 Nov 2026
+      expect(c.node).not.toContain('rpc.preprod.midnight.network');
+      expect(new URL(c.indexerWS).pathname).toBe('/api/v0/ws');
+      expect(c.networkId).toBe('preprod');
+    } finally {
+      if (saved.url !== undefined) process.env.NIGHTCAST_NODE_URL = saved.url;
+      if (saved.ws !== undefined) process.env.NIGHTCAST_NODE_WS = saved.ws;
     }
-    // wallet SDK 2 follows the runtime version over the node WebSocket, which Blockfrost's RPC drops
-    for (const url of [c.node, c.nodeWS]) {
-      expect(new URL(url).hostname).toBe('rpc.preprod.midnight.network');
-      expect(new URL(url).searchParams.get('project_id')).toBeNull();
-    }
-    expect(new URL(c.indexerWS).pathname).toBe('/api/v0/ws');
-    expect(c.networkId).toBe('preprod');
+  });
+
+  it('uses another node when NIGHTCAST_NODE_URL / NIGHTCAST_NODE_WS name one, and Blockfrost\'s for "blockfrost"', () => {
+    const bf = { indexer: 'https://i.blockfrost.io', indexerWS: 'wss://i.blockfrost.io', node: 'https://rpc.blockfrost.io', nodeWS: 'wss://rpc.blockfrost.io' };
+    const own = nodeEndpoints(bf, 'p', { NIGHTCAST_NODE_URL: 'http://127.0.0.1:9944', NIGHTCAST_NODE_WS: 'ws://127.0.0.1:9944' });
+    expect(own).toEqual({ node: 'http://127.0.0.1:9944', nodeWS: 'ws://127.0.0.1:9944' });
+    const named = nodeEndpoints(bf, 'p', { NIGHTCAST_NODE_URL: 'blockfrost', NIGHTCAST_NODE_WS: 'blockfrost' });
+    expect(named).toEqual(nodeEndpoints(bf, 'p', {}));
+    expect(new URL(named.nodeWS).searchParams.get('project_id')).toBe('p');
   });
 
   it('explains how to get a project id when there is none', () => {
