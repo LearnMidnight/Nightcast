@@ -22,6 +22,17 @@
  * DUST coin still pays with one: give it a second NIGHT UTXO registered for
  * DUST (see `NIGHTCAST_REGISTER_NEW_NIGHT` in network.ts).
  *
+ * A second, separate option: with `NIGHTCAST_DUST_LARGEST_FIRST=1` the fee is
+ * gathered from the largest coins first instead of the smallest. The wallet's
+ * own order takes the smallest coin with DUST, then the next, until the fee is
+ * covered, so a wallet holding many small coins pays with many of them, each
+ * adding about 3 KB and to the fee. On 26 Nov 2026 five 0.08 tNIGHT payments
+ * (threshold network claims), each registered for DUST, made the next calls
+ * pay with 7 or 8 spends and twice the fee. The order used is the wallet's own
+ * `largestFirst`, which it otherwise tries only once the smallest-first pass
+ * runs out. Dust wallets before 5.1 don't have it, and get only the first
+ * option.
+ *
  * Idempotent; runs on `npm install` next to patch-dust-fee-loop.mjs.
  *   node deploy/scripts/patch-dust-two-spends.mjs [--quiet] [--check] [--root <dir>]
  * --check exits 1 if a 5.x dust wallet is found whose code isn't the code this
@@ -32,6 +43,10 @@ import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 export const MARKER = '/* nightcast: two dust spends */';
+export const LARGEST_MARKER = '/* nightcast: largest dust first */';
+/** Where the fee's coins are chosen (dust-wallet 5.1.0, dist/v2/Transacting.js). */
+export const SELECTION_CALL = 'selectWithLargestFirstRetry(select, this.getCoinSelection())';
+export const NEW_SELECTION_CALL = `selectWithLargestFirstRetry(select, ${LARGEST_MARKER} (typeof process !== 'undefined' && process.env?.NIGHTCAST_DUST_LARGEST_FIRST === '1' ? largestFirst : this.getCoinSelection()))`;
 
 /** Where the fee, once covered, is spread over the chosen coins (dust-wallet 5.0.0, dist/v2/Transacting.js). */
 export const BASE_CASE = `        if (deficit <= 0n) {
@@ -69,11 +84,20 @@ export const NEW_BASE_CASE = `        if (deficit <= 0n) {
             return { fee, recipeInputs: __nightcastSpread(inputs, fee - existingDust) };
         }`;
 
-/** Patch one Transacting.js source: the new source, 'already', or 'unknown'. */
+/**
+ * Patch one Transacting.js source: the new source, 'already', or 'unknown'. The two options are added separately, so a
+ * wallet patched before the second existed gets it on the next run; the second only where the wallet has `largestFirst`.
+ */
 export const patchSource = (src) => {
-  if (src.includes(MARKER)) return 'already';
-  if (src.split(BASE_CASE).length !== 2 || src.split(SPREAD_END).length !== 2) return 'unknown';
-  return src.replace(SPREAD_END, `${SPREAD_END}${HELPERS}`).replace(BASE_CASE, NEW_BASE_CASE);
+  let out = src;
+  if (!out.includes(MARKER)) {
+    if (out.split(BASE_CASE).length !== 2 || out.split(SPREAD_END).length !== 2) return 'unknown';
+    out = out.replace(SPREAD_END, `${SPREAD_END}${HELPERS}`).replace(BASE_CASE, NEW_BASE_CASE);
+  }
+  if (!out.includes(LARGEST_MARKER) && out.split(SELECTION_CALL).length === 2 && out.includes('const largestFirst = ')) {
+    out = out.replace(SELECTION_CALL, NEW_SELECTION_CALL);
+  }
+  return out === src ? 'already' : out;
 };
 
 const main = () => {
@@ -129,7 +153,7 @@ const main = () => {
     if (already) parts.push(`${already} already there`);
     if (unknown) parts.push(`${unknown} with different code left alone`);
     if (!parts.length) parts.push('no dust wallet 5.x found');
-    process.stderr.write(`Two-DUST-spend option (NIGHTCAST_DUST_MIN_SPENDS): ${parts.join(', ')}\n`);
+    process.stderr.write(`Two-DUST-spend option (NIGHTCAST_DUST_MIN_SPENDS) and largest-first option (NIGHTCAST_DUST_LARGEST_FIRST): ${parts.join(', ')}\n`);
   }
   if (check && unknown > 0) process.exit(1);
 };
