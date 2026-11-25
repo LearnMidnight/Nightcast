@@ -93,8 +93,10 @@ case "${1:-}" in
       ask) set -- do "request:${2:-test}" answer finalise ;;
       coins) set -- do "coins:${2:-3}" ;;
     esac
-    # NIGHT that comes back as change is registered for DUST when the wallet opens, so its coins keep generating.
-    NIGHTCAST_REGISTER_NEW_NIGHT=1 NIGHTCAST_NODE_URL=blockfrost NIGHTCAST_NODE_WS=blockfrost node network/threshold/ops/ops.mjs do --wallet "$OPW" --dir "$DATA" --log "$DATA/proofs.jsonl" --proof-server-port "$PORT" --proof-container nightcast-net-proof "${@:2}"
+    # NIGHT that comes back as change is registered for DUST when the wallet opens, so its coins keep generating. Fees
+    # are gathered from the largest DUST coins first: operators are paid in small amounts, and each payment registered
+    # for DUST is one more small coin, which the wallet's own order would spend first (26 Nov 2026: 8 spends a fee).
+    NIGHTCAST_DUST_LARGEST_FIRST=1 NIGHTCAST_REGISTER_NEW_NIGHT=1 NIGHTCAST_NODE_URL=blockfrost NIGHTCAST_NODE_WS=blockfrost node network/threshold/ops/ops.mjs do --wallet "$OPW" --dir "$DATA" --log "$DATA/proofs.jsonl" --proof-server-port "$PORT" --proof-container nightcast-net-proof "${@:2}"
     ;;
   bg)
     case "${2:-}" in first|do|epoch|ask|coins) ;; *) echo "bg takes one of: first, epoch, ask, do, coins" >&2; exit 2 ;; esac

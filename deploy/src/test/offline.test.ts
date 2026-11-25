@@ -352,6 +352,51 @@ describe('two-DUST-spend option (ledger 9 OutsideTimeToDismiss workaround)', () 
     // an empty second coin can't pay a speck: the fee is spread the wallet's own way (nothing from it)
     expect(spread([{ id: 'a', value: 500n }, { id: 'b', value: 0n }], 100n)).toEqual([{ id: 'a', value: 100n }, { id: 'b', value: 0n }]);
   });
+
+  it('adds the largest-first option where the wallet has largestFirst, also to a wallet patched before it existed', async () => {
+    const { pathToFileURL, fileURLToPath } = await import('node:url');
+    const script = fileURLToPath(new URL('../../scripts/patch-dust-two-spends.mjs', import.meta.url));
+    const m = (await import(pathToFileURL(script).href)) as {
+      patchSource: (src: string) => string; MARKER: string; LARGEST_MARKER: string; SELECTION_CALL: string; NEW_SELECTION_CALL: string;
+      BASE_CASE: string; SPREAD_END: string; HELPERS: string; NEW_BASE_CASE: string;
+    };
+    // the places the patch edits, as dust-wallet 5.1.0 has them
+    const wallet = [
+      'const largestFirst = (coins) => coins.filter((coin) => coin.value > 0n).toSorted((a, b) => (b.value > a.value ? 1 : b.value < a.value ? -1 : 0)).at(0);',
+      'const distributeFeeAcrossInputs = (inputs, fee) => inputs.reduce(({ result, remaining }, input) => {',
+      '    return { result: [...result, { ...input, value: 0n }], remaining };',
+      '}, { result: [], remaining: fee }).result;',
+      'const go = () => {',
+      m.BASE_CASE,
+      '};',
+      `const pick = () => ${m.SELECTION_CALL};`,
+      '',
+    ].join('\n');
+    const both = m.patchSource(wallet);
+    expect(both).toContain(m.MARKER);
+    expect(both).toContain(m.LARGEST_MARKER);
+    expect(m.patchSource(both)).toBe('already');
+    // patched by the version before: only the second part is added
+    const before = wallet.replace(m.SPREAD_END, `${m.SPREAD_END}${m.HELPERS}`).replace(m.BASE_CASE, m.NEW_BASE_CASE);
+    const upgraded = m.patchSource(before);
+    expect(upgraded).toContain(m.LARGEST_MARKER);
+    expect(upgraded.split(m.MARKER).length).toBe(before.split(m.MARKER).length);
+    // a wallet without largestFirst (5.0) gets the first option only
+    expect(m.patchSource(wallet.replace(/^const largestFirst.*$/m, ''))).not.toContain(m.LARGEST_MARKER);
+
+    // the switch: the wallet's own order unless NIGHTCAST_DUST_LARGEST_FIRST=1
+    const choose = (env: Record<string, string>) =>
+      new Function('process', 'largestFirst', 'selectWithLargestFirstRetry', 'select', `return ${m.NEW_SELECTION_CALL};`).call(
+        { getCoinSelection: () => 'configured' },
+        { env },
+        'largest',
+        (_select: unknown, chosen: unknown) => chosen,
+        undefined,
+      );
+    expect(choose({})).toBe('configured');
+    expect(choose({ NIGHTCAST_DUST_LARGEST_FIRST: '0' })).toBe('configured');
+    expect(choose({ NIGHTCAST_DUST_LARGEST_FIRST: '1' })).toBe('largest');
+  });
 });
 
 describe('dust fee-loop patch for other projects', () => {
