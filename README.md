@@ -20,7 +20,7 @@ Founded by **Jack Baker**, who also founded [Lunardraw](https://lunardraw.io), w
 | Can anyone stop a value? | The oracle can, until the deadline (it then loses collateral) | Only half a committee or more |
 | Operators | One key | Cardano stake pool operators, each linked by its pool's signature, plus house seats that fill gaps |
 | Admin key | None: deployed locked | None: deployed locked |
-| On Preprod | Since 24 Oct 2026; v1 since 9 Nov. Answers LunaSpin every day; Lunardraw's draws embed its VRF. | Since 24 Nov 2026, for measurement. **First random value: 25 Nov 2026.** |
+| On Preprod | Since 24 Oct 2026; v1 since 9 Nov. Answers LunaSpin every day; Lunardraw's draws embed its VRF. | Since 24 Nov 2026, for measurement. **First random value, and the operators paid: 25 Nov 2026.** |
 | Read more | [docs/SPEC.md](docs/SPEC.md) | [docs/THRESHOLD.md](docs/THRESHOLD.md) |
 
 ## The threshold network
@@ -51,7 +51,7 @@ flowchart LR
 b353bce170e69d9cb1ecfe1247748508485a3f22adcf751057d831c1fb42e5b5
 ```
 
-The test also works the value out off chain from the dealers' polynomials (which only a test holds together), and the two match. Contract `46d0489c7df03401e7b737f8e8bfa4e9535c55a8994dcf26f217da4e999b1ead`; this deployment uses short epochs and test pool keys, and will be replaced.
+The test also works the value out off chain from the dealers' polynomials (which only a test holds together), and the two match. After the request's deadline the contract settled it and paid the five members that answered in time: 0.08 tNIGHT each from the 0.5 tNIGHT fee (0.1 went to whoever finalised), collected by each with its own `claim`. No bond was touched. Contract `46d0489c7df03401e7b737f8e8bfa4e9535c55a8994dcf26f217da4e999b1ead`; this deployment uses short epochs and test pool keys, and will be replaced.
 
 The design, committee sizes, money, the pool list, the threat model and the measured proof times and fees are in **[docs/THRESHOLD.md](docs/THRESHOLD.md)**. The contract is [`network/threshold/src/threshold-net.compact`](network/threshold/src/threshold-net.compact), with 224 in-memory checks in [`net-check.mjs`](network/threshold/check/net-check.mjs).
 
