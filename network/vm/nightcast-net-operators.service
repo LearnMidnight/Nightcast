@@ -1,0 +1,15 @@
+# The Nightcast network test's operators: every key in /root/nightcast-net/operators, fees paid from one wallet.
+# Started by `net.sh start`; not enabled at boot (it's a test).
+[Unit]
+Description=Nightcast network test: operators
+After=nightcast-net-proof.service network-online.target
+Wants=nightcast-net-proof.service
+
+[Service]
+WorkingDirectory=/root/Nightcast-net
+Environment=HOME=/root
+Environment=NIGHTCAST_REGISTER_NEW_NIGHT=1
+ExecStart=/usr/bin/env node network/ops/operators.mjs run --dir /root/nightcast-net/operators --wallet /root/nightcast-net/operators-wallet.secret --proof-server-port 6304 --poll 15
+Restart=always
+RestartSec=30
+TimeoutStopSec=60

@@ -1,0 +1,9 @@
+{
+  "name": "nightcast-network",
+  "private": true,
+  "type": "module",
+  "description": "The Nightcast operator network (a group of three operators answers each request): the contract, its in-memory checks and the Preprod test scripts. See docs/OPERATORS.md. Run `npm ci` at the top of the repository first: the contract's runtime is linked to the copy Midnight.js's compact-js uses, so both share one on-chain runtime.",
+  "dependencies": {
+    "@midnight-ntwrk/compact-runtime": "file:../node_modules/@midnight-ntwrk/compact-js/node_modules/@midnight-ntwrk/compact-runtime"
+  }
+}

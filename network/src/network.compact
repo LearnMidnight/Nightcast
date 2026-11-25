@@ -1,0 +1,410 @@
+// Nightcast network: verifiable randomness from a group of independent
+// oracles (experimental; see docs/OPERATORS.md).
+//
+// Anyone can join as an operator: they register a Jubjub key (proving they
+// hold its secret) and a payout address, and put up a bond. Each request is
+// answered by a group of three registered operators. Each operator answers
+// with its own VRF share,
+//
+//     share_i = SHA-256("nightcast:output:v0" || H * sk_i)
+//
+// (exactly Nightcast v1's output for that operator's key), proved inside the
+// `answer` circuit as in v1, and the request's random value is
+//
+//     output = SHA-256("nightcast:network:v1" || id || share_1 || share_2 || share_3)
+//
+// in the order the request named the operators. So as long as one of the
+// three is honest and keeps its key secret, nobody can know the output before
+// that operator answers, and nobody can choose it: every share is fixed by
+// its key and the request.
+//
+// Who picks the group: the requester names the three operators. The
+// contract checks they are registered, active, different and have a free
+// bond slot. It can't pick them itself in a way a requester couldn't steer
+// (a requester can always try seeds until a rule picks the group it wants),
+// so the group is part of the public request, and consumers show it.
+//
+// Money. A request pays `operatorFee` to each of its three operators and
+// takes one slot (`collateralPerRequest`) of each one's bond. An operator that
+// answers in time is paid its fee and gets its slot back at once. If the
+// deadline passes without all three shares, the request is void: anyone can
+// `expire` it, and the fee and collateral of every operator that didn't
+// answer go to the request's refund address. Operators that did answer keep
+// what they were paid. All amounts are sealed at deployment and may be 0.
+//
+// Bonds are per operator, counted in slots, held in a Counter so requests and
+// answers don't invalidate each other's proofs. An operator can withdraw free
+// slots at any time and can leave (stop being picked); slots held by pending
+// requests aren't free. A wait before withdrawing couldn't be enforced (an
+// operator could tie its bond up in requests it then lets expire), so, as in
+// v1, the guarantee is each request's own collateral.
+//
+// Known limit: the last of the three to answer can see the other two shares
+// and so knows the output before answering. It can't change it; it can only
+// refuse, which voids the request and costs it the fee and its collateral.
+
+pragma language_version >= 0.28;
+
+import CompactStandardLibrary;
+
+// ---------------------------------------------------------------- types
+
+export enum Status { pending, fulfilled, expired }
+
+export struct Operator {
+  key: JubjubPoint;
+  // Where this operator's fees and withdrawn bond go.
+  payout: UserAddress;
+  // Requests can name only active operators; leaving clears it.
+  active: Boolean;
+}
+
+export struct Request {
+  status: Status;
+  // Commitment of whoever made the request (see requesterCommitmentOf).
+  requester: Bytes<32>;
+  // Requester-chosen label.
+  tag: Bytes<32>;
+  // H = hashToCurve(alpha), fixed when the request was made.
+  point: JubjubPoint;
+  // Seconds since the epoch; shares must land before this, expire after.
+  deadline: Uint<64>;
+  // The three operators (key ids), in the order their shares are combined.
+  operators: Vector<3, Bytes<32>>;
+  // The random value; all zeros until fulfilled.
+  output: Bytes<32>;
+  // Per operator: the fee it is paid, and the collateral taken from its bond.
+  fee: Uint<128>;
+  collateral: Uint<128>;
+  // Where an unanswered operator's fee and collateral go if the request expires.
+  refundTo: UserAddress;
+}
+
+struct AlphaPreimage {
+  domain: Bytes<32>;
+  deployment: ContractAddress;
+  requester: Bytes<32>;
+  tag: Bytes<32>;
+  seed: Bytes<32>;
+}
+
+struct OutputPreimage {
+  domain: Bytes<32>;
+  gamma: JubjubPoint;
+}
+
+struct CombinePreimage {
+  domain: Bytes<32>;
+  id: Bytes<32>;
+  share0: Bytes<32>;
+  share1: Bytes<32>;
+  share2: Bytes<32>;
+}
+
+struct WordPreimage {
+  domain: Bytes<32>;
+  output: Bytes<32>;
+  index: Uint<32>;
+}
+
+// --------------------------------------------------------------- ledger
+
+// Registered operators by key id (keyIdOf their key). Never removed.
+export ledger operators: Map<Bytes<32>, Operator>;
+// Each operator's free bond, in slots of collateralPerRequest.
+export ledger bonds: Map<Bytes<32>, Counter>;
+// Operators ever registered (increment-only).
+export ledger operatorCount: Counter;
+// Requests by id. The id is also the VRF input (`alpha`).
+export ledger requests: Map<Bytes<32>, Request>;
+// Shares by shareKeyOf(request id, operator key id).
+export ledger shares: Map<Bytes<32>, Bytes<32>>;
+// Total requests ever made (increment-only).
+export ledger requestCount: Counter;
+// Allowed distance between "now" and a request's deadline, in seconds.
+export sealed ledger minWindow: Uint<64>;
+export sealed ledger maxWindow: Uint<64>;
+// What each request pays each of its three operators, in NIGHT atoms.
+export sealed ledger operatorFee: Uint<128>;
+// How much of each named operator's bond a request sets aside (one slot), in NIGHT atoms.
+export sealed ledger collateralPerRequest: Uint<128>;
+// The smallest bond, in slots, an operator can register with.
+export sealed ledger minBondSlots: Uint<16>;
+
+// -------------------------------------------------------------- witnesses
+
+// An operator's secret Jubjub scalar.
+witness oracleSecretKey(): Field;
+// A requester's secret; its commitment goes into the request id.
+witness requesterSecret(): Bytes<32>;
+
+// ----------------------------------------------------------- constructor
+
+constructor(minSecs: Uint<64>, maxSecs: Uint<64>, fee: Uint<128>, collateral: Uint<128>, minBond: Uint<16>) {
+  assert(minSecs >= 60, "minWindow must be at least 60 seconds");
+  assert(minSecs < maxSecs, "minWindow must be below maxWindow");
+  assert(maxSecs <= 2592000, "maxWindow must be at most 30 days");
+  minWindow = disclose(minSecs);
+  maxWindow = disclose(maxSecs);
+  operatorFee = disclose(fee);
+  collateralPerRequest = disclose(collateral);
+  minBondSlots = disclose(minBond);
+}
+
+// ------------------------------------------------------- pure functions
+
+// Request id and VRF input (the same construction as Nightcast v1).
+export pure circuit requestId(deployment: ContractAddress, requester: Bytes<32>, tag: Bytes<32>, seed: Bytes<32>): Bytes<32> {
+  return persistentHash<AlphaPreimage>(AlphaPreimage {
+    domain: pad(32, "nightcast:alpha:v0"),
+    deployment: deployment,
+    requester: requester,
+    tag: tag,
+    seed: seed
+  });
+}
+
+// The curve point a request is evaluated at.
+export pure circuit inputPoint(alpha: Bytes<32>): JubjubPoint {
+  return hashToCurve<[Bytes<32>, Bytes<32>]>([pad(32, "nightcast:h2c:v0"), alpha]);
+}
+
+// Public key for a secret scalar. Keys are Fields below the Jubjub order (as
+// Nightcast generates them), so the cast to JubjubScalar is exact and the key
+// and shares equal Nightcast v1's (compiled by 0.31.1) for the same secret.
+export pure circuit publicKey(sk: Field): JubjubPoint {
+  return ecMulGenerator(sk as JubjubScalar);
+}
+
+// One operator's share at a stored point (v1's VRF output for that key).
+export pure circuit evaluateAt(sk: Field, point: JubjubPoint): Bytes<32> {
+  return persistentHash<OutputPreimage>(OutputPreimage {
+    domain: pad(32, "nightcast:output:v0"),
+    gamma: ecMul(point, sk as JubjubScalar)
+  });
+}
+
+// One operator's share from the input.
+export pure circuit evaluate(sk: Field, alpha: Bytes<32>): Bytes<32> {
+  return evaluateAt(sk, inputPoint(alpha));
+}
+
+// The request's random value from its three shares, in the request's order.
+export pure circuit combine(id: Bytes<32>, share0: Bytes<32>, share1: Bytes<32>, share2: Bytes<32>): Bytes<32> {
+  return persistentHash<CombinePreimage>(CombinePreimage {
+    domain: pad(32, "nightcast:network:v1"),
+    id: id,
+    share0: share0,
+    share1: share1,
+    share2: share2
+  });
+}
+
+// Expands one output into as many independent 32-byte words as needed (as v1).
+export pure circuit randomWord(output: Bytes<32>, index: Uint<32>): Bytes<32> {
+  return persistentHash<WordPreimage>(WordPreimage {
+    domain: pad(32, "nightcast:word:v0"),
+    output: output,
+    index: index
+  });
+}
+
+// An operator's id: a hash of its public key.
+export pure circuit keyIdOf(key: JubjubPoint): Bytes<32> {
+  return persistentHash<[Bytes<32>, Field, Field]>([pad(32, "nightcast:operator-key:v1"), jubjubPointX(key), jubjubPointY(key)]);
+}
+
+// Where an operator's share for a request is stored.
+export pure circuit shareKeyOf(id: Bytes<32>, keyId: Bytes<32>): Bytes<32> {
+  return persistentHash<[Bytes<32>, Bytes<32>, Bytes<32>]>([pad(32, "nightcast:share:v1"), id, keyId]);
+}
+
+// Commitment that identifies a requester.
+export pure circuit requesterCommitmentOf(secret: Bytes<32>): Bytes<32> {
+  return persistentHash<[Bytes<32>, Bytes<32>]>([pad(32, "nightcast:requester:v0"), secret]);
+}
+
+pure circuit isIdentity(a: JubjubPoint): Boolean {
+  return jubjubPointX(a) == (0 as Field) && jubjubPointY(a) == (1 as Field);
+}
+
+pure circuit toUser(a: UserAddress): Either<ContractAddress, UserAddress> {
+  return right<ContractAddress, UserAddress>(a);
+}
+
+// NIGHT atoms in `n` slots of collateral (fails rather than wrapping).
+circuit slotsValue(n: Uint<64>): Uint<128> {
+  return ((n as Field) * (collateralPerRequest as Field)) as Uint<128>;
+}
+
+// The caller's operator id, from the secret key it proves it holds.
+circuit callerKeyId(): Bytes<32> {
+  const key = publicKey(oracleSecretKey());
+  return disclose(keyIdOf(key));
+}
+
+// ------------------------------------------------------------- operators
+
+// Join (or rejoin after leaving) as an operator, with a bond of `slots`
+// slots paid in by the caller. Proving the secret of the key rules out the
+// identity point, off-curve points and keys nobody can use.
+export circuit register(payout: UserAddress, slots: Uint<16>): [] {
+  const key = disclose(publicKey(oracleSecretKey()));
+  assert(!isIdentity(key), "identity key not allowed");
+  const id = keyIdOf(key);
+  const n = disclose(slots);
+  if (operators.member(id)) {
+    assert(!operators.lookup(id).active, "already registered");
+  } else {
+    assert(n >= minBondSlots, "the bond is below the minimum");
+    bonds.insertDefault(id);
+    operatorCount.increment(1);
+  }
+  operators.insert(id, Operator { key: key, payout: disclose(payout), active: true });
+  if (n > 0) {
+    assert(collateralPerRequest > 0, "this deployment takes no bond");
+    receiveUnshielded(nativeToken(), slotsValue(n));
+    bonds.lookup(id).increment(n);
+  }
+}
+
+// Add `slots` slots to an operator's bond. Anyone may; it's the operator's from then on.
+export circuit depositBond(keyId: Bytes<32>, slots: Uint<16>): [] {
+  const id = disclose(keyId);
+  assert(operators.member(id), "unknown operator");
+  assert(collateralPerRequest > 0, "this deployment takes no bond");
+  const n = disclose(slots);
+  assert(n > 0, "nothing to deposit");
+  receiveUnshielded(nativeToken(), slotsValue(n));
+  bonds.lookup(id).increment(n);
+}
+
+// An operator takes `slots` free slots back (to its payout), and with
+// `leave` stops being picked for new requests. Requests already made still
+// expect its share.
+export circuit withdrawBond(slots: Uint<16>, leave: Boolean): [] {
+  const id = callerKeyId();
+  assert(operators.member(id), "not a registered operator");
+  const op = operators.lookup(id);
+  if (disclose(leave)) {
+    operators.insert(id, Operator { ...op, active: false });
+  }
+  const n = disclose(slots);
+  if (n > 0) {
+    assert(!bonds.lookup(id).lessThan(n), "not that many free slots");
+    bonds.lookup(id).decrement(n);
+    sendUnshielded(nativeToken(), slotsValue(n), toUser(op.payout));
+  }
+}
+
+// --------------------------------------------------------------- requests
+
+// Ask for randomness from three named operators. The id depends on the
+// caller's requester secret, so nobody else can claim or burn your ids. The
+// deadline must leave more than `minWindow` and at most `maxWindow` seconds.
+// The caller pays 3 × operatorFee; one slot of each operator's bond is set
+// aside. Returns the request id.
+export circuit request(tag: Bytes<32>, seed: Bytes<32>, deadline: Uint<64>, refundTo: UserAddress, group: Vector<3, Bytes<32>>): Bytes<32> {
+  const d = disclose(deadline);
+  assert(d >= maxWindow, "deadline is out of range");
+  assert(blockTimeLt(d - minWindow), "deadline is too soon");
+  assert(blockTimeGte(d - maxWindow), "deadline is too far away");
+
+  const ops = disclose(group);
+  assert(ops[0] != ops[1] && ops[0] != ops[2] && ops[1] != ops[2], "the three operators must be different");
+  for (const k of ops) {
+    assert(operators.member(k), "unknown operator");
+    assert(operators.lookup(k).active, "that operator has left");
+    if (collateralPerRequest > 0) {
+      assert(!bonds.lookup(k).lessThan(1), "an operator's bond is too small for another request");
+      bonds.lookup(k).decrement(1);
+    }
+  }
+
+  const requester = disclose(requesterCommitmentOf(requesterSecret()));
+  const id = disclose(requestId(kernel.self(), requester, tag, seed));
+  assert(!requests.member(id), "request already exists");
+  if (operatorFee > 0) {
+    receiveUnshielded(nativeToken(), ((operatorFee as Field) * 3) as Uint<128>);
+  }
+  requests.insert(id, Request {
+    status: Status.pending,
+    requester: requester,
+    tag: disclose(tag),
+    point: inputPoint(id),
+    deadline: d,
+    operators: ops,
+    output: default<Bytes<32>>,
+    fee: operatorFee,
+    collateral: collateralPerRequest,
+    refundTo: disclose(refundTo)
+  });
+  requestCount.increment(1);
+  return id;
+}
+
+// One of the request's operators answers with its share. Only the holder of
+// that operator's key can produce a proof that passes, and the share is fixed
+// by the key and the stored point. The operator is paid its fee and gets its
+// slot back at once. Returns the share.
+export circuit answer(id: Bytes<32>): Bytes<32> {
+  const rid = disclose(id);
+  assert(requests.member(rid), "unknown request");
+  const r = requests.lookup(rid);
+  assert(r.status == Status.pending, "request is not pending");
+  assert(blockTimeLt(r.deadline), "request has expired");
+
+  const sk = oracleSecretKey();
+  const kid = disclose(keyIdOf(publicKey(sk)));
+  assert(kid == r.operators[0] || kid == r.operators[1] || kid == r.operators[2], "not one of this request's operators");
+  const sk2 = shareKeyOf(rid, kid);
+  assert(!shares.member(sk2), "already answered");
+
+  const share = disclose(evaluateAt(sk, r.point));
+  shares.insert(sk2, share);
+  if (r.collateral > 0) {
+    bonds.lookup(kid).increment(1);
+  }
+  if (r.fee > 0) {
+    sendUnshielded(nativeToken(), r.fee, toUser(operators.lookup(kid).payout));
+  }
+  return share;
+}
+
+// Once all three shares are in, anyone may record the request's random
+// value. Returns it.
+export circuit finalise(id: Bytes<32>): Bytes<32> {
+  const rid = disclose(id);
+  assert(requests.member(rid), "unknown request");
+  const r = requests.lookup(rid);
+  assert(r.status == Status.pending, "request is not pending");
+  const k0 = shareKeyOf(rid, r.operators[0]);
+  const k1 = shareKeyOf(rid, r.operators[1]);
+  const k2 = shareKeyOf(rid, r.operators[2]);
+  assert(shares.member(k0) && shares.member(k1) && shares.member(k2), "not every operator has answered");
+  const out = combine(rid, shares.lookup(k0), shares.lookup(k1), shares.lookup(k2));
+  requests.insert(rid, Request { ...r, status: Status.fulfilled, output: out });
+  return out;
+}
+
+// Mark a request void once its deadline has passed without all three
+// shares. Anyone may call this. The fee and collateral of each operator that
+// didn't answer go to the request's refund address.
+export circuit expire(id: Bytes<32>): [] {
+  const rid = disclose(id);
+  assert(requests.member(rid), "unknown request");
+  const r = requests.lookup(rid);
+  assert(r.status == Status.pending, "request is not pending");
+  assert(blockTimeGte(r.deadline), "deadline has not passed");
+  const a0 = shares.member(shareKeyOf(rid, r.operators[0]));
+  const a1 = shares.member(shareKeyOf(rid, r.operators[1]));
+  const a2 = shares.member(shareKeyOf(rid, r.operators[2]));
+  assert(!(a0 && a1 && a2), "every operator answered: finalise it instead");
+  requests.insert(rid, Request { ...r, status: Status.expired });
+  const each = (r.fee + r.collateral) as Uint<128>;
+  const missed = ((a0 ? 0 : 1) + (a1 ? 0 : 1) + (a2 ? 0 : 1)) as Uint<8>;
+  const owed = ((each as Field) * (missed as Field)) as Uint<128>;
+  if (owed > 0) {
+    sendUnshielded(nativeToken(), owed, toUser(r.refundTo));
+  }
+}

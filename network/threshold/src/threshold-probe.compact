@@ -1,0 +1,163 @@
+// Nightcast threshold probe (feasibility only, not for deployment): can a Midnight contract run a
+// t-of-n threshold VRF, so that ANY t of a committee's n operators give the SAME random value?
+//
+// A committee of N = 7 positions shares one group key without anyone holding it: each position
+// deals a random polynomial of degree T - 1 = 3 and posts its coefficients' commitments
+// (Feldman), the group key's commitments are their sums, and position i's secret share is the sum
+// of every dealer's polynomial at i (sent to it privately, checked against the commitments).
+//
+//   share key of position i   pk_i  = A0 + i·A1 + i²·A2 + i³·A3      (from the ledger alone)
+//   its answer to request H   Γ_i   = sk_i·H, proved in `answer` as Nightcast v1 proves its VRF
+//   the value, from any T     Γ*    = Σ c_i·Γ_i  with  c_i = D·Π_{j≠i} j/(j-i),  D = (N-1)! = 720
+//                             output = SHA-256("nightcast:threshold:v1" || Γ*)
+//
+// c_i is an integer for every subset (D clears every denominator), so Γ* = D·sk·H whichever T
+// answered: staying silent changes nothing while T others answer. Fewer than T can't compute it.
+// `finalise` takes |c_i| from a witness and checks |c_i|·|den| = D·num exactly (small integers);
+// a negative c_i is applied as (r - |c_i|), r the Jubjub group order.
+
+pragma language_version >= 0.28;
+
+import CompactStandardLibrary;
+
+struct OutputPreimage {
+  domain: Bytes<32>;
+  gamma: JubjubPoint;
+}
+
+// The group key's commitments A0..A3 (sums of every dealer's), and each dealer's own.
+export ledger aggregate: Map<Uint<8>, JubjubPoint>;
+export ledger dealt: Map<Uint<8>, Boolean>;
+export ledger dealerCommit: Map<Field, JubjubPoint>;
+// A dealer whose share for a position failed the check against its commitments.
+export ledger disqualified: Map<Uint<8>, Boolean>;
+// request id -> H; (request, position) -> Γ_i; request id -> output.
+export ledger requests: Map<Bytes<32>, JubjubPoint>;
+export ledger shares: Map<Bytes<32>, JubjubPoint>;
+export ledger outputs: Map<Bytes<32>, Bytes<32>>;
+
+witness shareSecret(): Field;
+// |c_i| for position i in a subset with the others a, b, c.
+witness coefficient(i: Uint<8>, a: Uint<8>, b: Uint<8>, c: Uint<8>): Uint<64>;
+
+// ---------------------------------------------------------------- pure helpers
+
+export pure circuit cell(d: Uint<8>, k: Uint<8>): Field {
+  return (d as Field) * 8 + (k as Field);
+}
+
+export pure circuit shareId(id: Bytes<32>, i: Uint<8>): Bytes<32> {
+  return persistentHash<[Bytes<32>, Bytes<32>, Field]>([pad(32, "nightcast:threshold-share:v1"), id, i as Field]);
+}
+
+export pure circuit requestIdOf(seed: Bytes<32>): Bytes<32> {
+  return persistentHash<[Bytes<32>, Bytes<32>]>([pad(32, "nightcast:threshold-request:v1"), seed]);
+}
+
+export pure circuit outputOf(gamma: JubjubPoint): Bytes<32> {
+  return persistentHash<OutputPreimage>(OutputPreimage { domain: pad(32, "nightcast:threshold:v1"), gamma: gamma });
+}
+
+pure circuit same(a: JubjubPoint, b: JubjubPoint): Boolean {
+  return jubjubPointX(a) == jubjubPointX(b) && jubjubPointY(a) == jubjubPointY(b);
+}
+
+pure circuit dist(a: Uint<8>, b: Uint<8>): Field {
+  return a > b ? (a - b) as Field : (b - a) as Field;
+}
+
+pure circuit small(i: Uint<8>): JubjubScalar {
+  return (i as Field) as JubjubScalar;
+}
+
+// Horner: c0 + i·c1 + i²·c2 + i³·c3, for commitments c0..c3.
+export pure circuit evalCommitments(c0: JubjubPoint, c1: JubjubPoint, c2: JubjubPoint, c3: JubjubPoint, i: Uint<8>): JubjubPoint {
+  const s = small(i);
+  return ecAdd(ecMul(ecAdd(ecMul(ecAdd(ecMul(c3, s), c2), s), c1), s), c0);
+}
+
+// ---------------------------------------------------------------- the ceremony
+
+// Dealer d (a position 1..7) posts its polynomial's commitments; they're added into the group's.
+export circuit deal(d: Uint<8>, c: Vector<4, JubjubPoint>): [] {
+  const dd = disclose(d);
+  const cc = disclose(c);
+  assert(dd >= 1 && dd <= 7, "a dealer is a position 1..7");
+  assert(!dealt.member(dd), "this position has dealt");
+  dealt.insert(dd, true);
+  for (const k of 0..4) {
+    const kk = k as Uint<8>;
+    dealerCommit.insert(cell(dd, kk), cc[k]);
+    if (aggregate.member(kk)) {
+      aggregate.insert(kk, ecAdd(aggregate.lookup(kk), cc[k]));
+    } else {
+      aggregate.insert(kk, cc[k]);
+    }
+  }
+}
+
+// A position shows the share dealer d sent it doesn't match d's commitments (revealing that
+// share): d is disqualified. A false complaint fails.
+export circuit complain(d: Uint<8>, i: Uint<8>, share: Field): [] {
+  const dd = disclose(d);
+  const ii = disclose(i);
+  assert(dealt.member(dd), "that dealer hasn't dealt");
+  const expected = evalCommitments(dealerCommit.lookup(cell(dd, 0)), dealerCommit.lookup(cell(dd, 1)), dealerCommit.lookup(cell(dd, 2)), dealerCommit.lookup(cell(dd, 3)), ii);
+  assert(!same(ecMulGenerator(disclose(share) as JubjubScalar), expected), "that share matches the commitments");
+  disqualified.insert(dd, true);
+}
+
+// Position i's share key, from the group's commitments.
+circuit keyOf(i: Uint<8>): JubjubPoint {
+  return evalCommitments(aggregate.lookup(0), aggregate.lookup(1), aggregate.lookup(2), aggregate.lookup(3), i);
+}
+
+export circuit shareKey(i: Uint<8>): JubjubPoint {
+  return keyOf(disclose(i));
+}
+
+// ---------------------------------------------------------------- requests
+
+export circuit request(seed: Bytes<32>): Bytes<32> {
+  const rid = requestIdOf(disclose(seed));
+  assert(!requests.member(rid), "already requested");
+  requests.insert(rid, hashToCurve<[Bytes<32>, Bytes<32>]>([pad(32, "nightcast:h2c:v0"), rid]));
+  return rid;
+}
+
+// Position i answers with Γ_i = sk_i·H, proving sk_i is its share (sk_i·G = pk_i).
+export circuit answer(id: Bytes<32>, i: Uint<8>): [] {
+  const rid = disclose(id);
+  const ii = disclose(i);
+  assert(requests.member(rid), "unknown request");
+  assert(ii >= 1 && ii <= 7, "a position is 1..7");
+  assert(!outputs.member(rid), "already finalised");
+  const sk = shareSecret();
+  assert(disclose(same(ecMulGenerator(sk as JubjubScalar), keyOf(ii))), "not this position's share");
+  shares.insert(shareId(rid, ii), disclose(ecMul(requests.lookup(rid), sk as JubjubScalar)));
+}
+
+// One term of the combination: ±|c_i|·Γ_i.
+circuit term(rid: Bytes<32>, i: Uint<8>, a: Uint<8>, b: Uint<8>, c: Uint<8>, negative: Boolean): JubjubPoint {
+  const sid = shareId(rid, i);
+  assert(shares.member(sid), "a share is missing");
+  const m = disclose(coefficient(i, a, b, c));
+  assert((m as Field) * dist(a, i) * dist(b, i) * dist(c, i) == (720 as Field) * (a as Field) * (b as Field) * (c as Field), "wrong coefficient");
+  const r = 6554484396890773809930967563523245729705921265872317281365359162392183254199 as Field;
+  const scalar = negative ? r - (m as Field) : (m as Field);
+  return ecMul(shares.lookup(sid), scalar as JubjubScalar);
+}
+
+// Anyone combines any 4 answers (positions in increasing order): the same value for every 4.
+export circuit finalise(id: Bytes<32>, s: Vector<4, Uint<8>>): Bytes<32> {
+  const rid = disclose(id);
+  const p = disclose(s);
+  assert(!outputs.member(rid), "already finalised");
+  assert(p[0] >= 1 && p[0] < p[1] && p[1] < p[2] && p[2] < p[3] && p[3] <= 7, "four different positions, in order");
+  // in increasing order, the k-th position has k others below it: c_i's sign is (-1)^k
+  const g = ecAdd(ecAdd(term(rid, p[0], p[1], p[2], p[3], false), term(rid, p[1], p[0], p[2], p[3], true)),
+                  ecAdd(term(rid, p[2], p[0], p[1], p[3], false), term(rid, p[3], p[0], p[1], p[2], true)));
+  const out = outputOf(g);
+  outputs.insert(rid, out);
+  return out;
+}

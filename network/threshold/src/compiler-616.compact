@@ -1,0 +1,29 @@
+// The two shapes that stopped Compact 0.36.0's key generation on 23 Nov 2026, with no workaround,
+// to see whether a newer compiler (0.36.1 fixes "issue #616: circuits using JubjubScalar or
+// JubjubPoint failed to generate keys") handles them. Not part of any contract.
+//   COMPACTC=/root/compactc-0.36.1/compactc bash network/threshold/check/run-616.sh
+
+pragma language_version >= 0.28;
+
+import CompactStandardLibrary;
+
+struct PadPreimage {
+  domain: Bytes<32>;
+  k: JubjubPoint;
+}
+
+export ledger keys: Map<Uint<8>, JubjubPoint>;
+export ledger pads: Map<Uint<8>, Field>;
+
+witness secret(): Field;
+
+// 0.36.0: "ZkStdLibArch must enable jubjub" (a point made only from a secret number).
+export circuit fromSecretOnly(i: Uint<8>): [] {
+  keys.insert(disclose(i), disclose(ecMulGenerator(secret() as JubjubScalar)));
+}
+
+// 0.36.0: "cannot convert JubjubPoint to Native" (transientHash over a struct holding a point).
+export circuit hashPoint(i: Uint<8>): [] {
+  const ii = disclose(i);
+  pads.insert(ii, disclose(transientHash<PadPreimage>(PadPreimage { domain: pad(32, "nightcast:616"), k: ecMul(keys.lookup(ii), secret() as JubjubScalar) })));
+}
