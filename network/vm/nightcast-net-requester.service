@@ -1,0 +1,16 @@
+# The Nightcast network test's requester: a request every 3 minutes to the next three operators in turn,
+# 120 in all (about 6 hours), finalised or expired, logged to /root/nightcast-net/requests.jsonl.
+# Started by `net.sh start`; not enabled at boot (it's a test).
+[Unit]
+Description=Nightcast network test: requester
+After=nightcast-net-operators.service network-online.target
+
+[Service]
+WorkingDirectory=/root/Nightcast-net
+Environment=HOME=/root
+Environment=NIGHTCAST_REGISTER_NEW_NIGHT=1
+ExecStart=/usr/bin/env node network/ops/requester.mjs run --wallet /root/nightcast-net/requester-wallet.secret --secret /root/nightcast-net/requester.secret --log /root/nightcast-net/requests.jsonl --every 180 --count 120 --window 600 --proof-server-port 6304 --poll 15
+# Exit code 75 = "restart me": the wallet stopped following the chain (ops/stall-watch.mjs).
+Restart=on-failure
+RestartSec=30
+TimeoutStopSec=60

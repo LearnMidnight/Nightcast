@@ -1,0 +1,23 @@
+# The Nightcast network test's own proof server (127.0.0.1:6304), so the test never slows LunaSpin's (6303).
+# Installed by network/vm/net.sh install.
+[Unit]
+Description=Nightcast network test: proof server (127.0.0.1:6304)
+After=docker.service network-online.target
+Wants=docker.service network-online.target
+
+[Service]
+WorkingDirectory=/root/Nightcast-net
+Environment=HOME=/root
+Environment=NIGHTCAST_PROOF_PORT=6304
+Environment=NIGHTCAST_PROOF_NAME=nightcast-net-proof
+# The threshold network's linkPool proof needs several GB: no idle-memory restarts, and a ceiling
+# of its own so that a proof too big for this machine ends this container only.
+Environment=NIGHTCAST_PROOF_MEMORY_MIB=0
+Environment=NIGHTCAST_PROOF_CONTAINER_MEMORY=11g
+ExecStart=/root/Nightcast-net/deploy/vm/proof-server.sh
+Restart=always
+RestartSec=15
+TimeoutStopSec=60
+
+[Install]
+WantedBy=multi-user.target

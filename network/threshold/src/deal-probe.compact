@@ -1,0 +1,122 @@
+// Nightcast deal probe (feasibility only, not for deployment): the ceremony without complaints.
+//
+// The first review (23 Nov 2026) found that a complaint phase lets anyone remove a dealer, and
+// that a dealer who needn't know its own secret numbers can choose them so it alone knows the
+// group key. The fix measured here: a dealer PROVES its deal as it posts it.
+//
+//   dealCommit   A_k = a_k·G for its polynomial's coefficients a_0..a_3: each posted A_k is
+//                proved equal to the secret number times G, so it knows them (no rogue key, no odd points)
+//   dealShare    for position i: its share s satisfies s·G = A0 + i·A1 + i²·A2 + i³·A3, and the
+//                posted parcel (R, c) is that share encrypted to i's key:
+//                R = e·G,  K = e·EK_i,  c = s + pad(K, dealer, i)
+//                Position i opens it with its secret: K = ek_i·R, s = c - pad(K, dealer, i).
+//
+// A bad share or a parcel nobody can open can't be posted at all, so nothing is left to complain
+// about. Two more circuits show how Compact treats numbers past the curve's order and points
+// handed in from outside.
+
+pragma language_version >= 0.28;
+
+import CompactStandardLibrary;
+
+struct Parcel {
+  r: JubjubPoint;
+  c: Field;
+}
+
+// (dealer, k) -> A_k;  position -> its encryption key;  (dealer, position) -> the parcel.
+export ledger commitments: Map<Field, JubjubPoint>;
+export ledger committed: Map<Uint<8>, Boolean>;
+export ledger encKeys: Map<Uint<8>, JubjubPoint>;
+export ledger parcels: Map<Field, Parcel>;
+// the edge circuits write here so that they are real (proved) circuits, not pure ones
+export ledger edges: Map<Field, JubjubPoint>;
+
+witness coefficients(): Vector<4, Field>;
+witness shareFor(i: Uint<8>): Field;
+witness ephemeral(i: Uint<8>): Field;
+witness encSecret(): Field;
+
+export pure circuit cell(d: Uint<8>, k: Uint<8>): Field {
+  return (d as Field) * 8 + (k as Field);
+}
+
+// The pad for dealer d's parcel to position i, from the shared point k. The point goes in by its
+// coordinates: Compact 0.36's circuit compiler can't hash a JubjubPoint with transientHash
+// ("cannot convert JubjubPoint to Native", found 23 Nov 2026). 1852400484 is this probe's tag.
+export pure circuit padOf(k: JubjubPoint, d: Uint<8>, i: Uint<8>): Field {
+  return transientHash<[Field, Field, Field, Field, Field]>([1852400484 as Field, jubjubPointX(k), jubjubPointY(k), d as Field, i as Field]);
+}
+
+pure circuit same(a: JubjubPoint, b: JubjubPoint): Boolean {
+  return jubjubPointX(a) == jubjubPointX(b) && jubjubPointY(a) == jubjubPointY(b);
+}
+
+pure circuit small(i: Uint<8>): JubjubScalar {
+  return (i as Field) as JubjubScalar;
+}
+
+// Compact 0.36's circuit compiler stops with "ZkStdLibArch must enable jubjub" on some circuits
+// here (found 23 Nov 2026; adding an ecAdd didn't help). The working guess: a circuit that makes
+// points only from secret numbers, with no point among its inputs. So each such circuit takes the
+// point it claims as an argument and proves it is the one its secret gives, which is also how a
+// real contract would be called. check/run-deal.sh says which circuit stops, if one still does.
+
+export pure circuit evalCommitments(c0: JubjubPoint, c1: JubjubPoint, c2: JubjubPoint, c3: JubjubPoint, i: Uint<8>): JubjubPoint {
+  const s = small(i);
+  return ecAdd(ecMul(ecAdd(ecMul(ecAdd(ecMul(c3, s), c2), s), c1), s), c0);
+}
+
+// Position i posts its encryption key, made in the circuit from its secret.
+export circuit registerKey(i: Uint<8>, key: JubjubPoint): [] {
+  const ii = disclose(i);
+  const kk = disclose(key);
+  assert(ii >= 1 && ii <= 7, "a position is 1..7");
+  assert(!encKeys.member(ii), "this position has a key");
+  assert(disclose(same(ecMulGenerator(encSecret() as JubjubScalar), kk)), "not this secret's key");
+  encKeys.insert(ii, kk);
+}
+
+// Dealer d posts its commitments, made in the circuit from its secret coefficients.
+export circuit dealCommit(d: Uint<8>, c: Vector<4, JubjubPoint>): [] {
+  const dd = disclose(d);
+  const cc = disclose(c);
+  assert(dd >= 1 && dd <= 7, "a dealer is a position 1..7");
+  assert(!committed.member(dd), "this position has dealt");
+  committed.insert(dd, true);
+  const a = coefficients();
+  for (const k of 0..4) {
+    assert(disclose(same(ecMulGenerator(a[k] as JubjubScalar), cc[k])), "not this coefficient's commitment");
+    commitments.insert(cell(dd, k as Uint<8>), cc[k]);
+  }
+}
+
+// Dealer d posts position i's share, encrypted to i, and proves it is the right share.
+export circuit dealShare(d: Uint<8>, i: Uint<8>): [] {
+  const dd = disclose(d);
+  const ii = disclose(i);
+  assert(committed.member(dd), "that dealer hasn't posted its commitments");
+  assert(encKeys.member(ii), "that position has no key");
+  assert(!parcels.member(cell(dd, ii)), "already sent");
+  const s = shareFor(ii);
+  const e = ephemeral(ii);
+  const expected = evalCommitments(commitments.lookup(cell(dd, 0)), commitments.lookup(cell(dd, 1)), commitments.lookup(cell(dd, 2)), commitments.lookup(cell(dd, 3)), ii);
+  assert(disclose(same(ecMulGenerator(s as JubjubScalar), expected)), "not this dealer's share for that position");
+  const k = ecMul(encKeys.lookup(ii), e as JubjubScalar);
+  parcels.insert(cell(dd, ii), Parcel { r: disclose(ecMulGenerator(e as JubjubScalar)), c: disclose(s + padOf(k, dd, ii)) });
+}
+
+// How Compact treats a number at or past the curve's order when it becomes a scalar.
+export circuit castEdge(x: Field, base: JubjubPoint): JubjubPoint {
+  const q = ecMul(disclose(base), disclose(x) as JubjubScalar);
+  edges.insert(1 as Field, q);
+  return q;
+}
+
+// How Compact treats a point handed in from outside (off the curve, or of small order).
+export circuit pointEdge(p: JubjubPoint): JubjubPoint {
+  const q = disclose(p);
+  const d = ecAdd(q, q);
+  edges.insert(2 as Field, d);
+  return d;
+}
