@@ -31,6 +31,7 @@ The contract is [`network/threshold/src/threshold-net.compact`](../network/thres
 | Purpose | Measuring real proofs, fees and transaction limits. Short epochs, small numbers, and **test pool keys** that we generated, not real stake pools. It will be replaced. |
 | Epoch 1 | 3 of 5: one independent operator and four house operators. Seated, dealt by all five, serving since 25 Nov 2026 08:35 UTC. |
 | First value | Request `5b2e35b1…ae770`, answered by all five, finalised from positions 1, 2 and 3: `b353bce170e69d9cb1ecfe1247748508485a3f22adcf751057d831c1fb42e5b5`. The test also computes the value off chain from the dealers' polynomials (which only a test holds together); the two match. |
+| First payment | After the deadline, `settle` shared the 0.5 tNIGHT fee: 0.1 to whoever finalised, 0.08 to each of the five members that answered in time, which each collected with `claim`. No bond touched, nothing forfeited. |
 
 ## How one random value is made
 
@@ -166,8 +167,10 @@ Real proofs on Preprod, 24 and 25 Nov 2026 (proof server 9.0.2 on an 8-vCPU VM, 
 | `request` | 20.8 s | 54 s | 17.1 KB | 0.74 DUST |
 | `answer` | 3.3 to 6.1 s | 29 to 34 s | 15.1 KB | 0.50 DUST |
 | `finalise` | 21.3 s | 47 s | 17.5 KB | 0.73 DUST |
+| `settle` (five paid) | 4 s | 27 s | 16.1 KB | 0.53 DUST |
+| `claim` | 5.1 to 7.8 s | 29 to 36 s | 16.4 to 28.4 KB | 0.72 to 1.12 DUST |
 
-A 3 of 5 ceremony is 37 calls and took about 25 minutes of calls from one wallet. One request with five answers and a finalise took 5 minutes.
+A 3 of 5 ceremony is 37 calls and took about 25 minutes of calls from one wallet. One request with five answers and a finalise took 5 minutes; settling it and five claims took 3 more. `settle` was the largest transaction so far, and no call has met Preprod's limit of 1,024 nodes a transaction.
 
 **Fee payment.** Ledger 9 allows a transaction 2 µs of checking per byte (at least 15 ms). Our transactions are paid with three DUST spends: `openEpoch` with one spend was refused (19.6 ms against 16.8 ms allowed at 8,415 bytes), even with the client versions that were meant to fix this ([midnight-ledger#838](https://github.com/midnightntwrk/midnight-ledger/issues/838)). Each extra spend adds about 3 KB, which raises the allowance by more than the spend costs.
 
@@ -203,7 +206,7 @@ Notes for that review:
 
 Still to do, in order:
 
-1. The remaining calls with real proofs: `settle`, `claim`, a second epoch, a request nobody answers.
+1. The remaining calls with real proofs: a second epoch (the first `openEpoch` that reviews a committee), a request nobody answers, `withdraw`, `topUp`, `standDown`, `recommend`.
 2. A contract stage for what Preprod shows (in-flight proofs made out of date by other dealers finishing, or by `finalise`), and the small items the last reviews listed.
 3. The `@nightcast/operator` package (npm and Docker), and a keeper that sends the transactions that move an epoch along.
 4. The real pool list and the first independent stake pool operator on Preprod.
