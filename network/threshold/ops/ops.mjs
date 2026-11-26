@@ -425,6 +425,11 @@ if (mode === 'status') {
           say(`FAIL ${what} (try ${i}; proof ${Math.round(proving / 1000)} s, ${Math.round((Date.now() - started) / 1000)} s in all${memory()}): ${text}${txText(lastTx)}`);
           // A proof server that failed is not asked again at once: it may have run out of memory. A
           // transaction over its time allowance would be built the same way again, and each try books DUST coins.
+          // A wallet behind the chain doesn't catch up by trying again: start the run again (the watchdog's code).
+          if (/Wallet\.Sync|DustTreesNotAtBlock|No Dust spend can be dated/i.test(text)) {
+            say('the wallet is behind the chain: stopping, to be started again with a fresh view of it');
+            process.exit(75);
+          }
           if (i >= 3 || /failed assert|assertion failed|Proof Server request failed|isn't sent|time to dismiss|Custom error: 231/i.test(text)) throw e;
           // Out of DUST: the next try waits until the wallet holds more than it was thought to need.
           if (/insufficient\s*funds|could not balance dust/i.test(text)) {
@@ -620,7 +625,10 @@ if (mode === 'status') {
         const due = Number(qb.deadline) * 1000 + 60_000;
         if (Date.now() < due) {
           say(`waiting for the request's answer deadline, ${clock(qb.deadline)} (${Math.ceil((due - Date.now()) / 60_000)} minutes)`);
-          while (Date.now() < due) { alive(); await sleep(Math.min(60_000, due - Date.now())); }
+          // Each minute, ask the wallet for its coins: an answer is a sign of life, so a wallet that has lost the
+          // network goes quiet and the watchdog starts the run again (26 Nov: a wallet that lost it here settled
+          // nearly an hour behind the chain and was refused).
+          while (Date.now() < due) { coinsNow().catch(() => {}); await sleep(Math.min(60_000, due - Date.now())); }
         }
         const seats = seatedIn(lb, qb.epoch).map((x) => ({ ...x, bond: lb.bonds.lookup(x.id).read(), answered: lb.timelyShares.member(T.pureCircuits.shareKey(qb.number, BigInt(x.position))) }));
         await call('settle', 'settle', async () => (await anyone()).callTx.settle(rid, { bytes: meBytes }));
