@@ -176,7 +176,11 @@ const status = (l) => {
   if (l.opened > 0n) {
     const c = l.committees.lookup(l.opened);
     say(`  epoch ${l.opened}: ${c.t} of ${c.n}, ${c.indepSeats} seats for independents; ${c.seated} seated, ${c.dealt} dealers finished${c.phase === T.Phase.serving ? `; serving since ${clock(c.since)}` : c.phase === T.Phase.failed ? '' : `; deadline ${clock(c.dealBy)}`}`);
-    for (let i = 1; i <= Number(c.seated); i++) say(`    position ${i}: ${short(l.members.lookup(seatKeyOf(l.opened, i)))}`);
+    for (let i = 1; i <= Number(c.seated); i++) {
+      const sk = seatKeyOf(l.opened, i);
+      const m = l.missed.member(sk) ? Number(l.missed.lookup(sk)) : 0;
+      say(`    position ${i}: ${short(l.members.lookup(sk))}${m ? `  missed ${m} answering time${m === 1 ? '' : 's'}` : ''}`);
+    }
   }
   say(`operators: ${l.houseActive} house active, ${l.independents} independent in the ring${l.independents > 0n ? ` (places ${[...l.ringOp].map(([p]) => p).sort((a, b) => (a < b ? -1 : 1)).join(', ')}; last seated ${l.cursor})` : ''}`);
   for (const [id, o] of l.operators) {
@@ -579,10 +583,32 @@ if (mode === 'status') {
         }
       } else if (verb === 'settle') {
         const rid = lastRequest();
+        const lb = await read();
+        const qb = lb.requests.lookup(rid);
+        if (qb.settled) { say('the request is settled already'); continue; }
+        // The contract refuses before the deadline by the block's clock: wait for it, and a minute more.
+        const due = Number(qb.deadline) * 1000 + 60_000;
+        if (Date.now() < due) {
+          say(`waiting for the request's answer deadline, ${clock(qb.deadline)} (${Math.ceil((due - Date.now()) / 60_000)} minutes)`);
+          while (Date.now() < due) { alive(); await sleep(Math.min(60_000, due - Date.now())); }
+        }
+        const seats = seatedIn(lb, qb.epoch).map((x) => ({ ...x, bond: lb.bonds.lookup(x.id).read(), answered: lb.timelyShares.member(T.pureCircuits.shareKey(qb.number, BigInt(x.position))) }));
         await call('settle', 'settle', async () => (await anyone()).callTx.settle(rid, { bytes: meBytes }));
         await shown((x) => x.requests.lookup(rid).settled, 'the request settled');
-        const q = (await read()).requests.lookup(rid);
-        say(q.voided ? 'the request is void: its fee went back' : 'the request is paid: its fee is shared by the seats that answered in time');
+        const la = await read();
+        const q = la.requests.lookup(rid);
+        const answered = seats.filter((x) => x.answered).length;
+        const c = la.committees.lookup(q.epoch);
+        say(q.voided
+          ? `the request is void: ${answered} of ${c.n} answered in time and ${c.t} are needed; its fee went back`
+          : `the request is paid: its fee is shared by the ${answered} seats that answered in time`);
+        for (const x of seats) {
+          const sk = seatKeyOf(q.epoch, x.position);
+          const m = la.missed.member(sk) ? Number(la.missed.lookup(sk)) : 0;
+          const bond = la.bonds.lookup(x.id).read();
+          say(`  position ${x.position} (${x.name ?? short(x.id)}): ${x.answered ? 'answered in time' : 'missed it'}; bond ${x.bond === bond ? `${bond} slots` : `${x.bond} -> ${bond} slots`}; missed ${m} answering time${m === 1 ? '' : 's'} in epoch ${q.epoch}`);
+        }
+        say(`forfeited bond, all told: ${la.forfeited} slots`);
       } else if (verb === 'claim') {
         const k = key(a);
         const owed = (await read()).earned;
