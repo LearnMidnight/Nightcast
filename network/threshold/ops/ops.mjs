@@ -29,6 +29,8 @@
  *         settle                      after the deadline: share out the fee, or void the request
  *         claim:<key>                 an operator collects what it earned
  *         topup:<key>:<slots>         add bond to an operator (anyone may; paid from the wallet)
+ *         standdown:<key>             stand down an active operator whose bond is below the minimum
+ *                                     (anyone may)
  *         withdraw:<key>:<slots>      an operator takes bond back to its payout address (all of it: all)
  *         recommend:<key>[:<address>] the operator's seat in the serving committee names a successor
  *                                     contract (a fixed test address by default): two-thirds of the
@@ -622,6 +624,17 @@ if (mode === 'status') {
         await call(`topUp: ${a} + ${n} slot${n === 1n ? '' : 's'} (${tn(n * l0.collateralPerSlot)})`, 'topUp', async () => (await anyone()).callTx.topUp(k.id, n));
         await shown((x) => x.bonds.lookup(k.id).read() === before + n, `${a}'s bond`);
         say(`  ${a}'s bond: ${before} -> ${before + n} slots`);
+      } else if (verb === 'standdown') {
+        const k = key(a);
+        const l = await read();
+        const o = l.operators.lookup(k.id);
+        if (!o.active) { say(`${a} isn't active`); continue; }
+        const bond = l.bonds.lookup(k.id).read();
+        if (bond >= l.minBondSlots) throw new Error(`${a}'s bond is ${bond} slots, not below the minimum of ${l.minBondSlots}`);
+        await call(`standDown: ${a} (bond ${bond} slots, below the minimum of ${l.minBondSlots})`, 'standDown', async () => (await anyone()).callTx.standDown(k.id, stamp(lead)));
+        await shown((x) => !x.operators.lookup(k.id).active, `${a} stood down`);
+        const la = await read();
+        say(`  ${a} is stood down: ${la.houseActive} house operator${la.houseActive === 1n ? '' : 's'} and ${la.independents} independent${la.independents === 1n ? '' : 's'} active`);
       } else if (verb === 'withdraw') {
         const k = key(a);
         const lb = await read();

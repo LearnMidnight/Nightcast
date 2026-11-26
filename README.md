@@ -53,7 +53,7 @@ b353bce170e69d9cb1ecfe1247748508485a3f22adcf751057d831c1fb42e5b5
 
 The test also works the value out off chain from the dealers' polynomials (which only a test holds together), and the two match. After the request's deadline the contract settled it and paid the five members that answered in time: 0.08 tNIGHT each from the 0.5 tNIGHT fee (0.1 went to whoever finalised), collected by each with its own `claim`. No bond was touched.
 
-**26 Nov 2026:** after its 10-hour epoch, the committee handed over to a new one with a fresh key, reviewed and opened by the contract itself. Then a request that only two of the five answered: after its deadline the contract voided it, returned the fee, and fined only the three silent seats, one slot of bond each. A late third answer still produced the request's one value, so staying silent bought nobody a different value.
+**26 Nov 2026:** after its 10-hour epoch, the committee handed over to a new one with a fresh key, reviewed and opened by the contract itself. Then a request that only two of the five answered: after its deadline the contract voided it, returned the fee, and fined only the three silent seats, one slot of bond each. A late third answer still produced the request's one value, so staying silent bought nobody a different value. Later the same day epoch 3 took over, operators topped up and withdrew bond, and two committees in a row recorded a recommended successor: **17 of the contract's 18 calls have now run with real proofs on Preprod.**
 
 Contract `46d0489c7df03401e7b737f8e8bfa4e9535c55a8994dcf26f217da4e999b1ead`; this deployment uses short epochs and test pool keys, and will be replaced.
 

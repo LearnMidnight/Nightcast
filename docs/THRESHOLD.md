@@ -33,6 +33,8 @@ The contract is [`network/threshold/src/threshold-net.compact`](../network/thres
 | First value | Request `5b2e35b1…ae770`, answered by all five, finalised from positions 1, 2 and 3: `b353bce170e69d9cb1ecfe1247748508485a3f22adcf751057d831c1fb42e5b5`. The test also computes the value off chain from the dealers' polynomials (which only a test holds together); the two match. |
 | Epoch 2 | After epoch 1's 10-hour length, `openEpoch` reviewed it (nobody stood down) and opened epoch 2: 3 of 5 again, a new ceremony by all five, serving since 25 Nov 2026 20:13 UTC. |
 | First fines | Request `63004469…364e1` was answered by only two of five before its deadline. `settle` voided it: the fee went back to the requester, and each of the three silent seats lost one slot of bond and had a miss recorded. The two that answered kept their full bond. A third member then answered late and the request was finalised from three shares: `18496162a0ca2c0de484cdccc772d27ac160c8a2c8d09be61b7d68390d8ae9ba`, the same value the test works out off chain. |
+| Epoch 3 and a successor | Bond topped up (anyone may) and withdrawn (an operator that had left took all of its bond; a serving one took everything above the minimum). Four of five seats of epoch 2 named a successor address, then epoch 3 opened, and four of five named it again, so the contract recorded it as the recommended successor (a test address at which no contract lives; nothing moves). |
+| Calls proved | 17 of 18 with real proofs. Only `standDown` is left, for an operator whose bond has fallen below the minimum. |
 | First payment | After the deadline, `settle` shared the 0.5 tNIGHT fee: 0.1 to whoever finalised, 0.08 to each of the five members that answered in time, which each collected with `claim`. No bond touched, nothing forfeited. |
 
 ## How one random value is made
@@ -171,6 +173,7 @@ Real proofs on Preprod, 24 and 25 Nov 2026 (proof server 9.0.2 on an 8-vCPU VM, 
 | `finalise` | 21.3 s | 47 s | 17.5 KB | 0.73 DUST |
 | `settle` (five paid) | 4 s | 27 s | 16.1 KB | 0.53 DUST |
 | `settle` (void, three fined) | 6.4 s | 33 s | 17.4 KB | 0.86 DUST |
+| `recommend` | 5.7 to 7.5 s | 28 to 34 s | 16.1 to 16.6 KB | 0.48 DUST |
 | `openEpoch` (reviewing a committee) | 11.9 s | 42 s | 29.1 KB | 1.10 DUST (7 spends, before the coin-order fix below) |
 | `claim` | 5.1 to 7.8 s | 29 to 36 s | 16.4 to 28.4 KB | 0.72 to 1.12 DUST |
 
@@ -212,7 +215,7 @@ Notes for that review:
 
 Still to do, in order:
 
-1. The remaining calls with real proofs: `withdraw`, `topUp`, `standDown`, `recommend`, and a seat stood down for missing too often.
+1. The last call with real proofs, `standDown`, and the first committee sized with a house seat missing; then a seat stood down for missing too often.
 2. A contract stage for what Preprod shows (in-flight proofs made out of date by other dealers finishing, or by `finalise`), and the small items the last reviews listed.
 3. The `@nightcast/operator` package (npm and Docker), and a keeper that sends the transactions that move an epoch along.
 4. The real pool list and the first independent stake pool operator on Preprod.
