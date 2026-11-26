@@ -28,6 +28,11 @@
  *         finalise                    combine the answers into the value (paid the bounty)
  *         settle                      after the deadline: share out the fee, or void the request
  *         claim:<key>                 an operator collects what it earned
+ *         topup:<key>:<slots>         add bond to an operator (anyone may; paid from the wallet)
+ *         withdraw:<key>:<slots>      an operator takes bond back to its payout address (all of it: all)
+ *         recommend:<key>[:<address>] the operator's seat in the serving committee names a successor
+ *                                     contract (a fixed test address by default): two-thirds of the
+ *                                     seats, in two epochs in a row, record it
  *         coins[:<n>]                 give the wallet n DUST coins to pay fees with (as many as
  *                                     --dust-spends by default): its NIGHT is split into n UTXOs
  *                                     (sent to its own address) and each is registered for DUST
@@ -57,7 +62,7 @@
  * for) and its price are reported and logged too.
  */
 import { execFile } from 'node:child_process';
-import { webcrypto } from 'node:crypto';
+import { createHash, webcrypto } from 'node:crypto';
 import { appendFileSync, existsSync, mkdirSync, readdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { parseArgs } from 'node:util';
@@ -188,6 +193,7 @@ const status = (l) => {
     say(`  ${short(id)}  ${o.active ? 'active' : 'left  '}  bond ${l.bonds.lookup(id).read()} slots  ${place}`);
   }
   say(`requests made: ${l.nextRequest}; forfeited bond: ${l.forfeited} slots`);
+  if (l.backedEpoch > 0n) say(`recommended successor: ${isZero(l.successor) ? 'none yet' : `${hex(l.successor)} (since epoch ${l.successorEpoch})`}; epoch ${l.backedEpoch} backs ${hex(l.backed).slice(0, 12)}`);
 };
 
 if (mode === 'status') {
@@ -609,6 +615,38 @@ if (mode === 'status') {
           say(`  position ${x.position} (${x.name ?? short(x.id)}): ${x.answered ? 'answered in time' : 'missed it'}; bond ${x.bond === bond ? `${bond} slots` : `${x.bond} -> ${bond} slots`}; missed ${m} answering time${m === 1 ? '' : 's'} in epoch ${q.epoch}`);
         }
         say(`forfeited bond, all told: ${la.forfeited} slots`);
+      } else if (verb === 'topup') {
+        const k = key(a);
+        const n = BigInt(b ?? 1);
+        const before = (await read()).bonds.lookup(k.id).read();
+        await call(`topUp: ${a} + ${n} slot${n === 1n ? '' : 's'} (${tn(n * l0.collateralPerSlot)})`, 'topUp', async () => (await anyone()).callTx.topUp(k.id, n));
+        await shown((x) => x.bonds.lookup(k.id).read() === before + n, `${a}'s bond`);
+        say(`  ${a}'s bond: ${before} -> ${before + n} slots`);
+      } else if (verb === 'withdraw') {
+        const k = key(a);
+        const lb = await read();
+        const before = lb.bonds.lookup(k.id).read();
+        const n = b === 'all' ? before : BigInt(b ?? 1);
+        if (n === 0n) { say(`${a} has no bond to withdraw`); continue; }
+        await call(`withdraw: ${a} takes ${n} slot${n === 1n ? '' : 's'} (${tn(n * lb.collateralPerSlot)})`, 'withdraw', async () => (await h(k)).callTx.withdraw(n));
+        await shown((x) => x.bonds.lookup(k.id).read() === before - n, `${a}'s bond`);
+        say(`  ${a}'s bond: ${before} -> ${before - n} slots, sent to its payout address`);
+      } else if (verb === 'recommend') {
+        const k = key(a);
+        const l = await read();
+        const e = l.current;
+        const i = positionOf(l, e, k.id);
+        if (!i) throw new Error(`${a} has no seat in the serving committee (epoch ${e})`);
+        if (l.ballots.member(seatKeyOf(e, i))) { say(`${a} (position ${i}) has named an address in epoch ${e} already`); continue; }
+        // A fixed address that is not a contract, so a test vote can never point anyone anywhere real.
+        const to = b ? Uint8Array.from(Buffer.from(b, 'hex')) : Uint8Array.from(createHash('sha256').update('nightcast:threshold:successor-test').digest());
+        if (to.length !== 32) throw new Error('the address is 32 bytes of hex');
+        await call(`recommend: ${a} (position ${i}) names ${hex(to).slice(0, 12)}`, 'recommend', async () => (await h(k)).callTx.recommend(BigInt(i), { bytes: to }));
+        await shown((x) => x.ballots.member(seatKeyOf(e, i)), `${a}'s vote`);
+        const la = await read();
+        const votes = la.votes.member(T.pureCircuits.voteKey(e, to)) ? la.votes.lookup(T.pureCircuits.voteKey(e, to)) : 0n;
+        const c = la.committees.lookup(e);
+        say(`  ${votes} of ${c.n} seats in epoch ${e} name it${hex(la.backed) === hex(to) && la.backedEpoch === e ? `: epoch ${e} backs it` : ''}${hex(la.successor) === hex(to) && la.successorEpoch === e ? `; two epochs in a row: it is the recommended successor` : ''}`);
       } else if (verb === 'claim') {
         const k = key(a);
         const owed = (await read()).earned;
