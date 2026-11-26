@@ -35,6 +35,7 @@
  *         recommend:<key>[:<address>] the operator's seat in the serving committee names a successor
  *                                     contract (a fixed test address by default): two-thirds of the
  *                                     seats, in two epochs in a row, record it
+ *         spends:<n>                  pay the fees of the calls after it with n DUST coins (1 to 4)
  *         coins[:<n>]                 give the wallet n DUST coins to pay fees with (as many as
  *                                     --dust-spends by default): its NIGHT is split into n UTXOs
  *                                     (sent to its own address) and each is registered for DUST
@@ -46,7 +47,8 @@
  * call with one DUST spend can come out over that (node error 1010, custom error 231: openEpoch
  * did on 24 Nov 2026, by 2.8 ms). Each further spend adds about 3 KB, so 6 ms of allowance, for
  * 2.7 ms of checking. The option is deploy/scripts/patch-dust-two-spends.mjs's; a call isn't
- * sent while the wallet has fewer coins free than that.
+ * sent while the wallet has fewer coins free than that. A transaction the node refuses is saved,
+ * serialized, as <dir>/refused-<circuit>-<time>.tx (hex), with what was reported about it.
  * DUST builds up from the wallet's NIGHT (5 DUST for each NIGHT over a week), and a run of calls
  * can spend it faster than that: a call waits (--dust-wait minutes at most, 120 by default) until
  * the wallet holds about what the last one paid. NIGHT that arrives meanwhile is registered.
@@ -222,8 +224,14 @@ if (mode === 'status') {
   const alive = () => { lastSign = Date.now(); };
   const stallMs = Math.max(3, Number(values.stall) || 10) * 60_000;
   // How many DUST coins pay each fee (the dust wallet reads this when it balances a transaction).
-  const wantSpends = Math.max(1, Math.min(4, Math.floor(Number(values['dust-spends'])) || 1));
-  if (wantSpends > 1) process.env.NIGHTCAST_DUST_MIN_SPENDS = String(wantSpends);
+  let wantSpends;
+  /** How many DUST coins pay the fees from here on (read by the patched dust wallet each time it balances). */
+  const setSpends = (n) => {
+    wantSpends = Math.max(1, Math.min(4, Math.floor(Number(n)) || 1));
+    if (wantSpends > 1) process.env.NIGHTCAST_DUST_MIN_SPENDS = String(wantSpends);
+    else delete process.env.NIGHTCAST_DUST_MIN_SPENDS;
+  };
+  setSpends(values['dust-spends']);
   try {
   await withChain({ network: values.network, proofServerPort: Number(values['proof-server-port']), walletFile: values.wallet, address }, async ({ session, wallet, providers, read: readChain, handle, me, meBytes }) => {
     // Watched from here on, with the wallet open (its first sync can take minutes and says so itself).
@@ -235,14 +243,14 @@ if (mode === 'status') {
     }, 30_000).unref();
     const read = async (...a) => { const l = await readChain(...a); alive(); return l; };
     // Look at each transaction as it is sent.
-    let lastTx;
+    let lastTx, lastHandle;
     const sender = providers.midnightProvider;
     providers.midnightProvider = new Proxy(sender, {
       get: (t, k) => {
         const v = t[k];
         if (typeof v !== 'function') return v;
         if (k !== 'submitTx') return v.bind(t);
-        return async (tx, ...rest) => { lastTx = describeTx(tx); alive(); try { return await v.call(t, tx, ...rest); } finally { alive(); } };
+        return async (tx, ...rest) => { lastHandle = tx; lastTx = describeTx(tx); alive(); try { return await v.call(t, tx, ...rest); } finally { alive(); } };
       },
     });
     const syncedState = () => firstValueFrom(wallet.wallet.state().pipe(filter((s) => s.isSynced)));
@@ -390,6 +398,7 @@ if (mode === 'status') {
         }, 5_000);
         const memory = () => (peak === undefined ? '' : `, proof server up to ${(peak / 1024).toFixed(1)} GiB`);
         lastTx = undefined;
+        lastHandle = undefined;
         try {
           await coinsReady(what);
           const r = succeeded(await f(), what);
@@ -402,10 +411,25 @@ if (mode === 'status') {
         } catch (e) {
           clearInterval(sampler);
           const text = errorText(e);
-          log({ time: new Date().toISOString(), what, circuit, ok: false, provingSeconds: Math.round(proving / 100) / 10, totalSeconds: Math.round((Date.now() - started) / 100) / 10, tries: i, peakProofServerMiB: peak, error: text, tx: lastTx });
+          // A transaction the node refused: keep it, for whoever looks into why.
+          let saved;
+          if (lastHandle && /1010|Invalid Transaction|time to dismiss|Custom error/i.test(text)) {
+            try {
+              saved = join(values.dir, `refused-${circuit}-${new Date().toISOString().replace(/[:.]/g, '-')}.tx`);
+              writeFileSync(saved, `${Buffer.from(lastHandle.serialize()).toString('hex')}\n`);
+              writeFileSync(`${saved}.json`, `${JSON.stringify({ what, circuit, error: text, tx: lastTx, dustSpendsWanted: wantSpends }, null, 2)}\n`);
+            } catch (err) { saved = undefined; say(`the refused transaction couldn't be saved: ${errorText(err).slice(0, 200)}`); }
+          }
+          log({ time: new Date().toISOString(), what, circuit, ok: false, provingSeconds: Math.round(proving / 100) / 10, totalSeconds: Math.round((Date.now() - started) / 100) / 10, tries: i, peakProofServerMiB: peak, error: text, tx: lastTx, saved });
+          if (saved) say(`the refused transaction is saved: ${saved} (and .json)`);
           say(`FAIL ${what} (try ${i}; proof ${Math.round(proving / 1000)} s, ${Math.round((Date.now() - started) / 1000)} s in all${memory()}): ${text}${txText(lastTx)}`);
           // A proof server that failed is not asked again at once: it may have run out of memory. A
           // transaction over its time allowance would be built the same way again, and each try books DUST coins.
+          // A wallet behind the chain doesn't catch up by trying again: start the run again (the watchdog's code).
+          if (/Wallet\.Sync|DustTreesNotAtBlock|No Dust spend can be dated/i.test(text)) {
+            say('the wallet is behind the chain: stopping, to be started again with a fresh view of it');
+            process.exit(75);
+          }
           if (i >= 3 || /failed assert|assertion failed|Proof Server request failed|isn't sent|time to dismiss|Custom error: 231/i.test(text)) throw e;
           // Out of DUST: the next try waits until the wallet holds more than it was thought to need.
           if (/insufficient\s*funds|could not balance dust/i.test(text)) {
@@ -420,7 +444,10 @@ if (mode === 'status') {
 
     for (const action of actions) {
       const [verb, a, b] = action.split(':');
-      if (verb === 'coins') {
+      if (verb === 'spends') {
+        setSpends(a);
+        say(`fees from here on: ${wantSpends === 1 ? 'one DUST coin' : `${wantSpends} DUST coins`}`);
+      } else if (verb === 'coins') {
         const n = Math.max(1, Math.min(4, Math.floor(Number(a ?? wantSpends)) || 1));
         let c = await coinsNow();
         if (c.dustCoins >= n) { say(`the wallet has ${c.dustCoins} DUST coins free: nothing to make`); continue; }
@@ -598,7 +625,10 @@ if (mode === 'status') {
         const due = Number(qb.deadline) * 1000 + 60_000;
         if (Date.now() < due) {
           say(`waiting for the request's answer deadline, ${clock(qb.deadline)} (${Math.ceil((due - Date.now()) / 60_000)} minutes)`);
-          while (Date.now() < due) { alive(); await sleep(Math.min(60_000, due - Date.now())); }
+          // Each minute, ask the wallet for its coins: an answer is a sign of life, so a wallet that has lost the
+          // network goes quiet and the watchdog starts the run again (26 Nov: a wallet that lost it here settled
+          // nearly an hour behind the chain and was refused).
+          while (Date.now() < due) { coinsNow().catch(() => {}); await sleep(Math.min(60_000, due - Date.now())); }
         }
         const seats = seatedIn(lb, qb.epoch).map((x) => ({ ...x, bond: lb.bonds.lookup(x.id).read(), answered: lb.timelyShares.member(T.pureCircuits.shareKey(qb.number, BigInt(x.position))) }));
         await call('settle', 'settle', async () => (await anyone()).callTx.settle(rid, { bytes: meBytes }));
