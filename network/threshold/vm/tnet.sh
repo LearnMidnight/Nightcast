@@ -17,6 +17,8 @@
 #   bash tnet.sh epoch                open the next epoch, seat it, run the whole ceremony for every seat (the keys
 #                                     are all here), and end it: for 3 of 5 that is 37 proofs, about half an hour
 #   bash tnet.sh ask [tag]            a request to the serving committee, every seat's answer, and the value
+#   bash tnet.sh void [tag]           a request only two seats answer: settled as void after its deadline (fines for
+#                                     the silent, the fee back), then a third answer and the same value all the same
 #   bash tnet.sh do <action> ...      any of the actions (see network/threshold/ops/ops.mjs)
 #   bash tnet.sh bg <command> ...     first, epoch, ask, do or coins in the background: it goes on if the window closes or the
 #                                     connection drops, and is started again if it stalls. Its output goes to $DATA/run.log
@@ -77,7 +79,7 @@ case "${1:-}" in
   status)
     NIGHTCAST_NODE_URL=blockfrost NIGHTCAST_NODE_WS=blockfrost node network/threshold/ops/ops.mjs status --proof-server-port "$PORT"
     ;;
-  first|do|epoch|ask|coins)
+  first|do|epoch|ask|void|coins)
     # One process per wallet: the old test's shared operators service uses the same one.
     if systemctl is-active -q nightcast-net-operators; then echo "the old test's operators service is running and uses this wallet: stop it first (bash network/vm/net.sh stop)" >&2; exit 1; fi
     curl -sf "http://127.0.0.1:$PORT/health" >/dev/null || { echo "the proof server on $PORT isn't answering: systemctl start nightcast-net-proof, wait a minute, and try again" >&2; exit 1; }
@@ -91,6 +93,9 @@ case "${1:-}" in
       first) set -- do load-pools register:house-1 register:house-2 register:house-3 register:house-4 register:op-1 link:op-1:pool-1 register:op-5 link:op-5:pool-5 leave:op-5 "${@:2}" ;;
       epoch) set -- do open seat deal finish "${@:2}" ;;
       ask) set -- do "request:${2:-test}" answer finalise ;;
+      # A request too few answer: two of five, then (after its deadline) settle, then a third answers late and it is
+      # finalised all the same. Silence costs the silent their bond and buys nobody a different value.
+      void) set -- do "request:${2:-void}" answer:op-1 answer:house-1 settle answer:house-2 finalise ;;
       coins) set -- do "coins:${2:-3}" ;;
     esac
     # NIGHT that comes back as change is registered for DUST when the wallet opens, so its coins keep generating. Fees
@@ -99,7 +104,7 @@ case "${1:-}" in
     NIGHTCAST_DUST_LARGEST_FIRST=1 NIGHTCAST_REGISTER_NEW_NIGHT=1 NIGHTCAST_NODE_URL=blockfrost NIGHTCAST_NODE_WS=blockfrost node network/threshold/ops/ops.mjs do --wallet "$OPW" --dir "$DATA" --log "$DATA/proofs.jsonl" --proof-server-port "$PORT" --proof-container nightcast-net-proof "${@:2}"
     ;;
   bg)
-    case "${2:-}" in first|do|epoch|ask|coins) ;; *) echo "bg takes one of: first, epoch, ask, do, coins" >&2; exit 2 ;; esac
+    case "${2:-}" in first|do|epoch|ask|void|coins) ;; *) echo "bg takes one of: first, epoch, ask, void, do, coins" >&2; exit 2 ;; esac
     if pgrep -f 'node network/threshold/ops/[o]ps.mjs' >/dev/null; then echo "a run is already going: bash network/threshold/vm/tnet.sh log" >&2; exit 1; fi
     echo "==== $(date -u '+%Y-%m-%d %H:%M:%S') UTC: tnet.sh ${*:2}" >> "$DATA/run.log"
     # A run that stalls (the wallet lost the network) ends with code 75: start it again, up to six times.
@@ -109,7 +114,7 @@ case "${1:-}" in
     tail -n 6 "$DATA/run.log"
     ;;
   stop)
-    pkill -f 'tnet[.]sh (first|do|epoch|ask|coins)' || true
+    pkill -f 'tnet[.]sh (first|do|epoch|ask|void|coins)' || true
     pkill -f "ops[.]mjs do --wallet $OPW" || true
     sleep 3
     if pgrep -f 'node network/threshold/ops/[o]ps.mjs' >/dev/null; then echo "still running: pgrep -af ops.mjs" >&2; exit 1; fi
@@ -119,5 +124,5 @@ case "${1:-}" in
     if pgrep -f 'node network/threshold/ops/[o]ps.mjs' >/dev/null; then say "A run is going"; else say "Nothing is running"; fi
     if [ -f "$DATA/run.log" ]; then tail -n "${2:-40}" "$DATA/run.log"; else echo "no background run has been started yet"; fi
     ;;
-  *) sed -n 2,28p "$0"; exit 2 ;;
+  *) sed -n 2,30p "$0"; exit 2 ;;
 esac
