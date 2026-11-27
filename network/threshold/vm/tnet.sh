@@ -160,7 +160,7 @@ case "${1:-}" in
       if [ -f "$TEAM/$m/.funded" ]; then echo "   funded already ($(cat "$TEAM/$m/.funded"))"; continue; fi
       sent=$(bash "$0" do "send:$addr:${2:-150}" 2>&1 || true)
       echo "$sent" | grep -E 'sent to|stopped|FAIL' || true
-      if echo "$sent" | grep -q 'sent to'; then echo "${2:-150} tNIGHT, $(date -u '+%Y-%m-%d %H:%M') UTC" > "$TEAM/$m/.funded"; else echo "sending to $m didn't go through: run team-setup again" >&2; exit 1; fi
+      if echo "$sent" | grep -q 'sent to'; then echo "${2:-150} tNIGHT, $(date -u '+%Y-%m-%d %H:%M') UTC" > "$TEAM/$m/.funded"; else echo "$sent" | grep -vE 'RPC-CORE' | tail -n 12 >&2; echo "sending to $m didn't go through (above: the end of what it said): run team-setup again" >&2; exit 1; fi
     done
     ;;
   team-start)
