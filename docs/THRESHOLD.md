@@ -34,7 +34,8 @@ The contract is [`network/threshold/src/threshold-net.compact`](../network/thres
 | Epoch 2 | After epoch 1's 10-hour length, `openEpoch` reviewed it (nobody stood down) and opened epoch 2: 3 of 5 again, a new ceremony by all five, serving since 25 Nov 2026 20:13 UTC. |
 | First fines | Request `63004469…364e1` was answered by only two of five before its deadline. `settle` voided it: the fee went back to the requester, and each of the three silent seats lost one slot of bond and had a miss recorded. The two that answered kept their full bond. A third member then answered late and the request was finalised from three shares: `18496162a0ca2c0de484cdccc772d27ac160c8a2c8d09be61b7d68390d8ae9ba`, the same value the test works out off chain. |
 | Epoch 3 and a successor | Bond topped up (anyone may) and withdrawn (an operator that had left took all of its bond; a serving one took everything above the minimum). Four of five seats of epoch 2 named a successor address, then epoch 3 opened, and four of five named it again, so the contract recorded it as the recommended successor (a test address at which no contract lives; nothing moves). |
-| Calls proved | 17 of 18 with real proofs. Only `standDown` is left, for an operator whose bond has fallen below the minimum. |
+| Stand-down and a smaller committee | A void request took one house operator's bond below the minimum, and `standDown` (anyone may send it) stood it down. Epoch 4 was then sized from one independent and three house operators: 3 of 4, seated, dealt and serving from 27 Nov 2026 00:27 UTC. The operator topped up and registered again (house operators don't sit out). |
+| Calls proved | All 18 with real proofs, by 27 Nov 2026. |
 | First payment | After the deadline, `settle` shared the 0.5 tNIGHT fee: 0.1 to whoever finalised, 0.08 to each of the five members that answered in time, which each collected with `claim`. No bond touched, nothing forfeited. |
 
 ## How one random value is made
@@ -174,12 +175,14 @@ Real proofs on Preprod, 24 and 25 Nov 2026 (proof server 9.0.2 on an 8-vCPU VM, 
 | `settle` (five paid) | 4 s | 27 s | 16.1 KB | 0.53 DUST |
 | `settle` (void, three fined) | 6.4 s | 33 s | 17.4 KB | 0.86 DUST |
 | `recommend` | 5.7 to 7.5 s | 28 to 34 s | 16.1 to 16.6 KB | 0.48 DUST |
+| `openEpoch` (reviewing two committees) | 15.6 to 16.5 s | 39 s | 11.7 KB (1 spend) to 17.8 KB (3) | 0.60 to 0.78 DUST |
+| `standDown` | 1.2 s | 23 s | 14.8 KB | 0.53 DUST |
 | `openEpoch` (reviewing a committee) | 11.9 s | 42 s | 29.1 KB | 1.10 DUST (7 spends, before the coin-order fix below) |
 | `claim` | 5.1 to 7.8 s | 29 to 36 s | 16.4 to 28.4 KB | 0.72 to 1.12 DUST |
 
 A 3 of 5 ceremony is 37 calls and took about 25 minutes of calls from one wallet. One request with five answers and a finalise took 5 minutes; settling it and five claims took 3 more. No call has met Preprod's limit of 1,024 nodes a transaction; the largest so far are a void `settle` (317 steps) and an `openEpoch` that reviews a committee (278).
 
-**Where a call's work is checked.** A call's on-chain work is checked either before its fee is taken, where it counts towards the time-to-dismiss allowance below, or after, where it doesn't. The client decides which. Every heavy call so far has gone after, and two of them (`openEpoch` with a review, and a void `settle`) would be over the allowance if they hadn't.
+**Where a call's work is checked.** A call's on-chain work is checked either before its fee is taken, where it counts towards the time-to-dismiss allowance below, or after, where it doesn't. The client decides which. Every heavy call so far has gone after, and several would be over the allowance if they hadn't: an `openEpoch` that reviews two committees is priced at about 77 to 82 ms against an allowance of 23 to 36 ms. Its 482 steps went after the fee even when paid with a single DUST spend.
 
 **Fee payment.** Ledger 9 allows a transaction 2 µs of checking per byte (at least 15 ms). Our transactions are paid with three DUST spends: `openEpoch` with one spend was refused (19.6 ms against 16.8 ms allowed at 8,415 bytes), even with the client versions that were meant to fix this ([midnight-ledger#838](https://github.com/midnightntwrk/midnight-ledger/issues/838)). Each extra spend adds about 3 KB, which raises the allowance by more than the spend costs. The wallet also has to be told to pay from its largest DUST coins first (`NIGHTCAST_DUST_LARGEST_FIRST=1`): by default it takes the smallest first, and an operator's wallet fills with small coins from the small payments it receives, so its fees doubled until this was set.
 
@@ -215,7 +218,7 @@ Notes for that review:
 
 Still to do, in order:
 
-1. The last call with real proofs, `standDown`, and the first committee sized with a house seat missing; then a seat stood down for missing too often.
+1. A seat stood down for missing too often (three missed answering windows in one epoch, then the next review).
 2. A contract stage for what Preprod shows (in-flight proofs made out of date by other dealers finishing, or by `finalise`), and the small items the last reviews listed.
 3. The `@nightcast/operator` package (npm and Docker), and a keeper that sends the transactions that move an epoch along.
 4. The real pool list and the first independent stake pool operator on Preprod.

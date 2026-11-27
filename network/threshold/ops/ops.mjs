@@ -55,7 +55,8 @@
  * A wallet that loses its connection to the network may never report itself in step again, and
  * whatever waits on it then waits for ever (twice on 24 Nov 2026). So a run that shows no sign
  * of life for --stall minutes (10 by default) ends with exit code 75, to be started again: it
- * goes on from what the chain shows. `tnet.sh bg` does that by itself.
+ * goes on from what the chain shows. `tnet.sh bg` does that by itself. A wallet that hasn't caught
+ * up with the chain within --open-wait minutes (30 by default) ends the run the same way.
  *
  * A circuit that takes the time is given "now" a little ahead (--lead 60 seconds; --lead-link 240
  * for linkPool, whose proof is the largest), because its proof has to be made before it is sent.
@@ -87,6 +88,7 @@ const { values, positionals } = parseArgs({
     wallet: { type: 'string' }, dir: { type: 'string' }, log: { type: 'string' }, network: { type: 'string', default: 'preprod' }, 'proof-server-port': { type: 'string', default: '6304' },
     lead: { type: 'string', default: '60' }, 'lead-link': { type: 'string', default: '240' }, 'proof-container': { type: 'string' },
     'dust-spends': { type: 'string', default: '3' }, 'dust-wait': { type: 'string', default: '120' }, stall: { type: 'string', default: '10' },
+    'open-wait': { type: 'string', default: '30' },
   },
 });
 const mode = positionals[0];
@@ -232,9 +234,17 @@ if (mode === 'status') {
     else delete process.env.NIGHTCAST_DUST_MIN_SPENDS;
   };
   setSpends(values['dust-spends']);
+  // The watchdog below starts once the wallet is open. Before that the wallet catches up with the chain, which can also
+  // stall for good after a lost connection (27 Nov, after ten idle hours): give that --open-wait minutes, then start again.
+  const openWaitMs = Math.max(5, Number(values['open-wait']) || 30) * 60_000;
+  const opening = setTimeout(() => {
+    say(`stalled: the wallet hasn't caught up with the chain in ${Math.round(openWaitMs / 60_000)} minutes. Stopping, to be started again`);
+    process.exit(75);
+  }, openWaitMs);
   try {
   await withChain({ network: values.network, proofServerPort: Number(values['proof-server-port']), walletFile: values.wallet, address }, async ({ session, wallet, providers, read: readChain, handle, me, meBytes }) => {
-    // Watched from here on, with the wallet open (its first sync can take minutes and says so itself).
+    // Watched from here on, with the wallet open.
+    clearTimeout(opening);
     alive();
     setInterval(() => {
       if (Date.now() - lastSign < stallMs) return;
@@ -707,6 +717,8 @@ if (mode === 'status') {
     // The failing call has said why already: one line here, not a stack trace.
     say(`stopped: ${errorText(e)}`);
     process.exitCode = 1;
+  } finally {
+    clearTimeout(opening);
   }
 } else {
   process.stderr.write('usage: node network/threshold/ops/ops.mjs status | do --wallet <file> --dir <keys dir> [--log <file>] <action> ...\n');
