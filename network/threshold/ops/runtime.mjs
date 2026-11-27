@@ -6,7 +6,7 @@
 // within `openWait` minutes), so whatever supervises it starts it again. Everything that uses it
 // re-reads the chain before acting, so starting again is always safe.
 import { execFile } from 'node:child_process';
-import { appendFileSync, mkdirSync, writeFileSync } from 'node:fs';
+import { appendFileSync, mkdirSync, readFileSync, statSync, unlinkSync, writeFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { indexerPublicDataProvider } from '@midnight-ntwrk/midnight-js-indexer-public-data-provider';
 import { ContractState, unshieldedToken } from '@midnight-ntwrk/midnight-js-protocol/v9';
@@ -36,12 +36,13 @@ const stop = (why) => { say(why); process.exit(STALLED); };
  * Open the wallet and run `f(rt)`. Options: network, proofServerPort, walletFile, address (the contract), log (a
  * JSON-lines file for every call), saveDir (where refused transactions are kept), dustSpends (3), dustWait (120
  * minutes), stall (10 minutes), openWait (30 minutes), lead (60 s), leadLink (240 s), proofContainer (a docker name,
- * for the proof server's memory), handlePrefix (private state ids).
+ * for the proof server's memory), handlePrefix (private state ids), proofLock (a file: several processes on one machine
+ * sharing one proof server make their proofs one at a time, as one proof can take 5 GB; NIGHTCAST_PROOF_LOCK).
  */
 export const openRuntime = async (opts, f) => {
   const {
     network = 'preprod', proofServerPort, walletFile, address, log: logFile, saveDir, dustSpends = 3, dustWait = 120, stall = 10,
-    openWait = 30, lead = 60, leadLink = 240, proofContainer, handlePrefix = 'tnet',
+    openWait = 30, lead = 60, leadLink = 240, proofContainer, handlePrefix = 'tnet', proofLock = process.env.NIGHTCAST_PROOF_LOCK,
   } = opts;
   const log = (row) => {
     if (!logFile) return;
@@ -132,6 +133,17 @@ export const openRuntime = async (opts, f) => {
         if (c.nightRegistered < c.nightUtxos) await registerNew();
         return coinsUntil((x) => x.dustCoins >= n, `the new DUST coins didn't show within 15 minutes`, 15 * 60_000);
       };
+      /** Send `amount` of NIGHT (in its millionths) to a wallet address (mn_addr_...). Returns the transaction id. */
+      const sendNight = async (toAddress, amount) => {
+        const w = wallet.wallet, ks = wallet.unshieldedKeystore, raw = unshieldedToken().raw;
+        let to;
+        try { to = MidnightBech32m.parse(toAddress).decode(UnshieldedAddress, session.config.walletNetworkId); } catch (e) { throw new Error(`${toAddress} isn't a wallet address on this network: ${errorText(e).slice(0, 200)}`); }
+        const recipe = await w.transferTransaction([{ type: 'unshielded', outputs: [{ amount, receiverAddress: to, type: raw }] }], { ttl: new Date(Date.now() + TX_TTL_SECONDS * 1000) });
+        const signed = await w.signRecipe(recipe, (payload) => ks.signDataAsync(payload));
+        const txId = await w.submitTransaction(await w.finalizeRecipe(signed));
+        alive();
+        return txId;
+      };
       // About what the next fee takes, in specks: a quarter more than the last one paid. Until one has been, 1.2 DUST.
       let needDust = 1_200_000_000_000_000n;
       const dustWaitMs = Math.max(1, Number(dustWait) || 120) * 60_000;
@@ -157,6 +169,27 @@ export const openRuntime = async (opts, f) => {
           await sleep(15_000);
         }
       };
+      /** One proof at a time among the processes sharing proofLock: taken by writing our pid; one left by a process that ended, or held over 15 minutes, is taken over. */
+      const lockedProof = async (f) => {
+        if (!proofLock) return f();
+        let told = false;
+        for (;;) {
+          try { writeFileSync(proofLock, `${process.pid}\n`, { flag: 'wx' }); break; } catch (e) {
+            if (e.code !== 'EEXIST') throw e;
+            let stale = false;
+            try {
+              const pid = Number(readFileSync(proofLock, 'utf8').trim());
+              try { process.kill(pid, 0); } catch { stale = true; }
+              if (Date.now() - statSync(proofLock).mtimeMs > 15 * 60_000) stale = true;
+            } catch { stale = true; }
+            if (stale) { try { unlinkSync(proofLock); } catch { /* taken meanwhile */ } continue; }
+            if (!told) { say('waiting for another operator\'s proof to finish (they share the proof server)'); told = true; }
+            alive();
+            await sleep(2_000);
+          }
+        }
+        try { return await f(); } finally { try { if (readFileSync(proofLock, 'utf8').trim() === String(process.pid)) unlinkSync(proofLock); } catch { /* gone */ } }
+      };
       // Time the proof server's part of each call.
       let proving = 0;
       const prover = providers.proofProvider;
@@ -164,7 +197,7 @@ export const openRuntime = async (opts, f) => {
         get: (t, k) => {
           const v = t[k];
           if (typeof v !== 'function') return v;
-          return async (...a) => { const s = Date.now(); alive(); try { return await v.apply(t, a); } finally { proving += Date.now() - s; alive(); } };
+          return (...a) => lockedProof(async () => { const s = Date.now(); alive(); try { return await v.apply(t, a); } finally { proving += Date.now() - s; alive(); } });
         },
       });
       const l0 = await read();
@@ -252,7 +285,7 @@ export const openRuntime = async (opts, f) => {
       };
       return await f({
         session, wallet, providers, handle, anyone, me, meBytes, l0, read, shown, waitUntil, call, stamp, lead, leadLink, alive,
-        coinsNow, coinsText, coinsUntil, makeCoins, registerNew,
+        coinsNow, coinsText, coinsUntil, makeCoins, registerNew, sendNight,
         setSpends, spends: () => wantSpends, address,
       });
     });

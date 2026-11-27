@@ -11,10 +11,18 @@
  *   ... link --pool-key <file>  a test stake pool's key signs for this operator, and the link is sent
  *   ... link --pool <key>       for a real pool: prints the 32 bytes its key is to sign (saved for the next step)
  *   ... link --signature <hex>  sends that link with the pool's signature (64 bytes)
+ *   ... send --to <address> --amount <tNIGHT>   send tNIGHT from this operator's wallet
  *   ... topup --slots <n>       add bond
  *   ... claim                   collect what the operator has earned (to its payout address: this wallet)
  *   ... withdraw --slots <n> | --all   take bond back to the payout address
  *   ... leave                   stop being seated in new committees (a seat held keeps its duties)
+ *   ... run [--no-keeper] [--every 60] [--claim-at 1]
+ *       Keep going, doing its duties as the chain shows them, until stopped: its own (answer
+ *       every request for its seats, deal in its ceremonies, claim what it earns once it is
+ *       --claim-at tNIGHT or more) and, unless --no-keeper, the ones anyone may send to keep the
+ *       network moving (open the next epoch, seat, finish, finalise, settle, stand down), each
+ *       after a random wait of up to 90 s so keepers seldom send the same one. Run it under
+ *       something that starts it again when it ends with code 75 (Docker's restart, systemd).
  *
  * Every command takes [--home <folder>] (NIGHTCAST_OPERATOR_HOME, else ~/.nightcast-operator).
  * init also takes [--network preprod] [--contract <address>] (the repository's deployment record
@@ -30,18 +38,19 @@
  */
 import './operator-env.mjs';
 import { execFileSync } from 'node:child_process';
-import { createPublicKey, verify, webcrypto } from 'node:crypto';
+import { createPublicKey, randomInt, verify, webcrypto } from 'node:crypto';
 import { existsSync, mkdirSync, readFileSync, unlinkSync, writeFileSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { parseArgs } from 'node:util';
-import { encodeContractAddress } from '@midnight-ntwrk/compact-runtime';
+import { ecMulGenerator, encodeContractAddress } from '@midnight-ntwrk/compact-runtime';
 import { walletAddressOf } from '@nightcast/deploy';
 import {
-  ROOT, T, ed25519Point, errorText, fromHex, hex, newOperatorFile, operatorFrom, poolIdOf, poolSign, poolSignatureFrom, readJson, readRecord, say, tn,
-  walletSeedFrom, writeSecret,
+  ROOT, T, ed25519Point, errorText, fromHex, hex, newOperatorFile, night, operatorFrom, poolIdOf, poolSign, poolSignatureFrom, readJson, readRecord, say, tn,
+  sleep, walletSeedFrom, writeSecret,
 } from './common.mjs';
-import { clock, phaseName, positionOf, priorOf, seatKeyOf, shareKeyOf, short } from './threshold.mjs';
+import { cellKeyOf, clock, phaseName, polynomialFor, positionOf, priorOf, seatKeyOf, shareKeyOf, shareOf, short } from './threshold.mjs';
+import { duties } from './duties.mjs';
 import { openRuntime, readContract } from './runtime.mjs';
 
 const { values, positionals } = parseArgs({
@@ -51,6 +60,8 @@ const { values, positionals } = parseArgs({
     key: { type: 'string' }, wallet: { type: 'string' }, slots: { type: 'string' }, all: { type: 'boolean' },
     pool: { type: 'string' }, 'pool-key': { type: 'string' }, signature: { type: 'string' }, 'valid-hours': { type: 'string', default: '24' },
     'dust-spends': { type: 'string', default: '3' }, 'dust-wait': { type: 'string', default: '120' },
+    to: { type: 'string' }, amount: { type: 'string' },
+    'no-keeper': { type: 'boolean' }, every: { type: 'string', default: '60' }, 'claim-at': { type: 'string', default: '1' },
   },
 });
 const command = positionals[0];
@@ -369,12 +380,129 @@ const leave = () => withOperator(async ({ op, mine, read, call, shown, stamp, co
   say(`its bond can be taken back from ${clock(nowSecs() + l.epochSecs)} (withdraw --all)`);
 });
 
+const send = () => withOperator(async ({ coinsNow, coinsText, coinsUntil, sendNight }) => {
+  const amount = night(values.amount ?? 0);
+  if (!values.to?.startsWith('mn_addr') || !(amount > 0n)) throw new Error('send takes --to <mn_addr_... address> --amount <tNIGHT>');
+  const before = await coinsNow();
+  if (before.night < amount) throw new Error(`the wallet has ${coinsText(before)}`);
+  say(`${tn(amount)} sent to ${values.to}, transaction ${await sendNight(values.to, amount)}`);
+  await coinsUntil((x) => x.night <= before.night - amount, 'the transfer didn\'t show within 10 minutes', 10 * 60_000);
+  say(`the wallet now: ${coinsText(await coinsNow())}`);
+});
+
 const wallet = () => withOperator(async ({ coinsNow, coinsText, spends }) => {
   say(`the wallet: ${coinsText(await coinsNow())}`);
   say(`each fee is paid with ${spends()} DUST coins (made when needed)`);
 });
 
-const commands = { init, status, wallet, register, link, topup, claim, withdraw, leave };
+// ------------------------------------------------------------------ run
+const run = () => withOperator(async ({ op, mine, anyone, handle, read, call, shown, stamp, l0, meBytes, coinsFirst }) => {
+  const id = op.key.id;
+  const keeper = !values['no-keeper'];
+  const every = Math.max(20, Number(values.every) || 60) * 1000;
+  const claimAt = night(values['claim-at']);
+  const options = () => ({ id, now: nowSecs(), claimAt, keeper });
+  /** A duty that failed isn't tried again for a while (one that would be refused again costs a proof each time). */
+  const notBefore = new Map();
+  const tag = `op-${short(id)}`;
+  for (const signal of ['SIGTERM', 'SIGINT']) process.on(signal, () => { say(`stopping (${signal})`); process.exit(0); });
+
+  const perform = async (d, l) => {
+    const e = d.epoch;
+    if (d.circuit === 'answer') {
+      const q = l.requests.lookup(d.rid);
+      const share = shareOf(l, q.epoch, d.position, op.key.secret);
+      const ha = await handle(`${tag}-answer-${q.epoch}`, { operatorSecret: op.key.secret, shareSecret: share, answerSecs: l0.answerSecs });
+      await call(d.what, 'answer', async () => ha.callTx.answer(d.rid, BigInt(d.position)));
+      await shown((x) => x.shares.member(shareKeyOf(q.number, d.position)), 'the answer');
+    } else if (d.circuit === 'dealCommit' || d.circuit === 'dealShare') {
+      // The polynomial is made once for the epoch and kept, so a process started again deals with the same one.
+      const poly = polynomialFor(home, 'operator', e, d.t);
+      const hd = await handle(`${tag}-deal-${e}`, { operatorSecret: op.key.secret, coefficients: poly, answerSecs: l0.answerSecs });
+      if (d.circuit === 'dealCommit') {
+        await call(d.what, 'dealCommit', async () => hd.callTx.dealCommit(e, BigInt(d.position), poly.map((x) => ecMulGenerator(x))));
+        await shown((x) => x.committed.member(seatKeyOf(e, d.position)), 'the commitments');
+      } else {
+        await call(d.what, 'dealShare', async () => hd.callTx.dealShare(e, BigInt(d.position), BigInt(d.to)));
+        await shown((x) => x.parcels.member(cellKeyOf(e, d.position, d.to)), 'the parcel');
+      }
+    } else if (d.circuit === 'claim') {
+      await call(`claim ${tn(d.amount)}`, 'claim', async () => (await mine()).callTx.claim());
+      await shown((x) => !x.earned.member(id) || x.earned.lookup(id) === 0n, 'the payment');
+    } else if (d.circuit === 'seat') {
+      const before = l.committees.lookup(e).seated;
+      await call(d.what, 'seat', async () => (await anyone()).callTx.seat(e, stamp()));
+      await shown((x) => x.committees.lookup(e).seated > before, 'the seat taken');
+    } else if (d.circuit === 'finish') {
+      await call(d.what, 'finish', async () => (await anyone()).callTx.finish(e, stamp()));
+      await shown((x) => [T.Phase.serving, T.Phase.failed].includes(x.committees.lookup(e).phase), 'the ceremony ended');
+      const c = (await read()).committees.lookup(e);
+      say(c.phase === T.Phase.serving ? `epoch ${e} serves: ${c.t} of ${c.n}` : `epoch ${e}'s ceremony failed: ${c.dealt} dealers finished, ${c.t} were needed`);
+    } else if (d.circuit === 'finalise') {
+      const positions = [...d.positions, 0, 0, 0, 0].slice(0, 4).map(BigInt);
+      await call(d.what, 'finalise', async () => (await anyone()).callTx.finalise(d.rid, positions, { bytes: meBytes }));
+      await shown((x) => x.requests.lookup(d.rid).status === T.Status.fulfilled, 'the value');
+      say(`  the value: ${hex((await read()).requests.lookup(d.rid).output)}`);
+    } else if (d.circuit === 'settle') {
+      await call(d.what, 'settle', async () => (await anyone()).callTx.settle(d.rid, { bytes: meBytes }));
+      await shown((x) => x.requests.lookup(d.rid).settled, 'the settling');
+      say(`  ${(await read()).requests.lookup(d.rid).voided ? 'void: too few answered in time, and its fee went back' : 'paid to the seats that answered in time'}`);
+    } else if (d.circuit === 'openEpoch') {
+      const before = l.opened;
+      const r = await call(d.what, 'openEpoch', async () => (await anyone()).callTx.openEpoch(stamp()));
+      if (r.private?.result === 0n) {
+        say('  no committee of an allowed size can be made yet: trying again in an hour');
+        notBefore.set(d.key, Date.now() + 3_600_000);
+        return;
+      }
+      await shown((x) => x.opened > before, 'the new epoch');
+      const la = await read();
+      const c = la.committees.lookup(la.opened);
+      say(`  epoch ${la.opened} is open: ${c.t} of ${c.n}, to be seated and dealt by ${clock(c.dealBy)}`);
+    } else if (d.circuit === 'standDown') {
+      await call(d.what, 'standDown', async () => (await anyone()).callTx.standDown(d.operator, stamp()));
+      await shown((x) => !x.operators.lookup(d.operator).active, 'the stand-down');
+    } else {
+      throw new Error(`no way to send ${d.circuit}`);
+    }
+  };
+
+  const l = await read();
+  if (!l.operators.member(id)) throw new Error('register first');
+  say(`running: its own duties${keeper ? ', and the keeper\'s (each after a random wait of up to 90 s)' : ''}; it looks at the chain every ${every / 1000} s. Stop it with Ctrl-C`);
+  await coinsFirst();
+  let quiet = 0;
+  for (;;) {
+    const ready = (x) => !(notBefore.get(x.key) > Date.now());
+    const lNow = await read();
+    let d = duties(lNow, options()).find(ready);
+    if (!d) {
+      // Something to say now and then, so the log shows it is alive.
+      if (Date.now() - quiet > 30 * 60_000) { say('nothing to do: watching the chain'); quiet = Date.now(); }
+      await sleep(every);
+      continue;
+    }
+    let l = lNow;
+    if (d.keeper) {
+      const wait = randomInt(0, 90_001);
+      await sleep(wait);
+      l = await read();
+      const again = duties(l, options()).find((x) => x.key === d.key && ready(x));
+      if (!again) continue; // another keeper sent it meanwhile, or it isn't needed any more
+      d = again;
+    }
+    try {
+      await perform(d, l);
+    } catch (e) {
+      const text = errorText(e);
+      // Another keeper's transaction landing first is the usual reason a keeper's call is refused.
+      say(`not done: ${d.what}: ${text.slice(0, 300)}${d.keeper ? ' (another keeper may have sent it first)' : ''}; not tried again for 10 minutes`);
+      notBefore.set(d.key, Date.now() + 10 * 60_000);
+    }
+  }
+});
+
+const commands = { init, status, wallet, register, link, topup, claim, withdraw, leave, send, run };
 if (!commands[command]) {
   process.stderr.write(`usage: node network/threshold/ops/operator.mjs ${Object.keys(commands).join(' | ')} [--home <folder>] ...\n(see the top of this file)\n`);
   process.exitCode = 2;

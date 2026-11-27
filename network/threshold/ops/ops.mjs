@@ -36,6 +36,7 @@
  *                                     contract (a fixed test address by default): two-thirds of the
  *                                     seats, in two epochs in a row, record it
  *         spends:<n>                  pay the fees of the calls after it with n DUST coins (1 to 4)
+ *         send:<address>:<tNIGHT>     send tNIGHT from the wallet to another (an operator's, to fund it)
  *         coins[:<n>]                 give the wallet n DUST coins to pay fees with (as many as
  *                                     --dust-spends by default): its NIGHT is split into n UTXOs
  *                                     (sent to its own address) and each is registered for DUST
@@ -75,7 +76,7 @@ import { ContractState } from '@midnight-ntwrk/midnight-js-protocol/v9';
 import { ecMul, ecMulGenerator, encodeContractAddress } from '@midnight-ntwrk/compact-runtime';
 import { blockfrostProjectId, connect } from '@nightcast/deploy';
 import {
-  R, T, ed25519Point, errorText, fromHex, hex, ledgerOf, operatorFrom, poolIdOf, poolList, poolSign, readJson, readRecord, say, tn,
+  R, T, ed25519Point, errorText, fromHex, hex, ledgerOf, night, operatorFrom, poolIdOf, poolList, poolSign, readJson, readRecord, say, tn,
 } from './common.mjs';
 import {
   cellKeyOf, clock, isZero, modn, phaseName, polynomialFile as polynomialFileIn, polynomialFor as polynomialForIn, positionOf, priorOf,
@@ -138,7 +139,7 @@ if (mode === 'status') {
     network: values.network, proofServerPort: Number(values['proof-server-port']), walletFile: values.wallet, address, log: values.log, saveDir: dir,
     dustSpends: values['dust-spends'], dustWait: values['dust-wait'], stall: values.stall, openWait: values['open-wait'],
     lead: Number(values.lead), leadLink: Number(values['lead-link']), proofContainer: values['proof-container'],
-  }, async ({ handle, anyone, me, meBytes, l0, read, shown, waitUntil, call, stamp, lead, leadLink, coinsNow, coinsText, makeCoins, setSpends, spends }) => {
+  }, async ({ handle, anyone, me, meBytes, l0, read, shown, waitUntil, call, stamp, lead, leadLink, coinsNow, coinsText, coinsUntil, makeCoins, sendNight, setSpends, spends }) => {
     say(`calling from ${me}; the contract's slack is ${l0.slack} s`);
     const c0 = await coinsNow();
     say(`the wallet: ${coinsText(c0)}; each fee is paid with ${spends() === 1 ? 'as few DUST coins as cover it' : `${spends()} DUST coins`}`);
@@ -174,6 +175,14 @@ if (mode === 'status') {
         const before = await coinsNow();
         if (before.dustCoins >= n) { say(`the wallet has ${before.dustCoins} DUST coins free: nothing to make`); continue; }
         say(`the wallet now: ${coinsText(await makeCoins(n))}`);
+      } else if (verb === 'send') {
+        const amount = night(b);
+        if (!a?.startsWith('mn_addr') || !(amount > 0n)) throw new Error('send:<mn_addr_... address>:<tNIGHT>');
+        const before = await coinsNow();
+        if (before.night < amount) throw new Error(`the wallet has ${tn(before.night)}`);
+        const txId = await sendNight(a, amount);
+        say(`${tn(amount)} sent to ${a}, transaction ${txId}`);
+        await coinsUntil((x) => x.night <= before.night - amount, 'the transfer didn\'t show within 10 minutes', 10 * 60_000);
       } else if (verb === 'load-pools') {
         const list = poolList(readJson(join(dir, 'pool-list.json')).pools.map((p) => p.public));
         if (hex(list.root) !== hex(l0.poolsRoot)) throw new Error(`${join(dir, 'pool-list.json')} is not the list this contract was deployed with`);
