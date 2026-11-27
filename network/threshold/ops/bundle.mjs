@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 /**
  * The compiled threshold contract an operator needs (its JavaScript, and the proving and verifier
- * keys: about 560 MB, too big for npm), as one file published with a GitHub release.
+ * keys: about 560 MB, 120 MB packed, too big for npm), as one file published with a GitHub release.
  *
  *   node network/threshold/ops/bundle.mjs pack --build <dir> --out <file.tar.gz> [--network preprod] [--contract <address>]
  *       Check the build's verifier keys against the contract on chain, then pack it. Prints the
@@ -46,6 +46,9 @@ export const readRelease = (network, file = releaseFile(network)) => {
 
 /** The verifier keys of the contract on chain, by circuit (SHA-256 of each). */
 export const chainFingerprints = async ({ network = 'preprod', contract, proofServerPort, proofServerUrl }) => {
+  // Reading the chain needs no proofs, but the connection asks after a proof server: given none, it would start one
+  // in Docker (27 Nov). The usual one (6300, or Docker's NIGHTCAST_PROOF_SERVER_URL) is named instead.
+  if (!proofServerPort && !proofServerUrl) proofServerUrl = process.env.NIGHTCAST_PROOF_SERVER_URL ?? 'http://127.0.0.1:6300';
   const session = await connect(network, { proofServerPort, proofServerUrl, projectId: blockfrostProjectId(network), waitForBlockfrost: true });
   try {
     const r = await indexerPublicDataProvider(session.config.indexer, session.config.indexerWS).queryContractState(contract);
@@ -64,8 +67,8 @@ export const checkAgainstChain = async (dir, opts) => {
   return Object.keys(onChain).length;
 };
 
-const pack = async ({ build, out, network, contract }) => {
-  const n = await checkAgainstChain(build, { network, contract });
+const pack = async ({ build, out, network, contract, ...prover }) => {
+  const n = await checkAgainstChain(build, { network, contract, ...prover });
   say(`all ${n} circuits' verifier keys are the ones on chain`);
   mkdirSync(dirname(resolve(out)), { recursive: true });
   // The contents only, with no owner or time that differs from one packing to the next.
@@ -124,19 +127,20 @@ const fetchBuild = async ({ into, release }) => {
 if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
   const { values, positionals } = parseArgs({
     allowPositionals: true,
-    options: { build: { type: 'string' }, out: { type: 'string' }, into: { type: 'string' }, release: { type: 'string' }, network: { type: 'string', default: 'preprod' }, contract: { type: 'string' } },
+    options: { build: { type: 'string' }, out: { type: 'string' }, into: { type: 'string' }, release: { type: 'string' }, network: { type: 'string', default: 'preprod' }, contract: { type: 'string' }, 'proof-server-port': { type: 'string' } },
   });
   const contractOf = () => values.contract ?? readRelease(values.network).contract;
+  const prover = values['proof-server-port'] ? { proofServerPort: Number(values['proof-server-port']) } : {};
   try {
     if (positionals[0] === 'pack') {
       if (!values.build || !values.out || !values.contract) throw new Error('pack takes --build <dir> --out <file.tar.gz> --contract <address>');
-      await pack({ build: values.build, out: values.out, network: values.network, contract: values.contract });
+      await pack({ build: values.build, out: values.out, network: values.network, contract: values.contract, ...prover });
     } else if (positionals[0] === 'fetch') {
       if (!values.into) throw new Error('fetch takes --into <dir>');
       await fetchBuild({ into: values.into, release: values.release ?? releaseFile(values.network) });
     } else if (positionals[0] === 'check') {
       if (!values.build) throw new Error('check takes --build <dir>');
-      say(`all ${await checkAgainstChain(values.build, { network: values.network, contract: contractOf() })} circuits' verifier keys are the ones on chain`);
+      say(`all ${await checkAgainstChain(values.build, { network: values.network, contract: contractOf(), ...prover })} circuits' verifier keys are the ones on chain`);
     } else {
       process.stderr.write('usage: node network/threshold/ops/bundle.mjs pack | fetch | check (see the top of this file)\n');
       process.exitCode = 2;

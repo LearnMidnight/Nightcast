@@ -45,7 +45,7 @@ Every command below is run from this `docker` folder. Everything your operator k
 docker compose run --rm operator keys
 ```
 
-This downloads the compiled contract and its proving keys (about 560 MB). It is refused unless it is exactly the file this repository names (its SHA-256 is in `network/threshold/releases/preprod.json`), and refused again unless every one of the contract's 18 circuits has the verifier key that is on chain. So a wrong or altered download can't be used.
+This downloads the compiled contract and its proving keys (about 120 MB; 560 MB unpacked). It is refused unless it is exactly the file this repository names (its SHA-256 is in `network/threshold/releases/preprod.json`), and refused again unless every one of the contract's 18 circuits has the verifier key that is on chain. So a wrong or altered download can't be used.
 
 ## 3. Make your operator
 

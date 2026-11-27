@@ -94,7 +94,7 @@ case "${1:-}" in
     ;;
   bundle)
     contract=$(node -e 'process.stdout.write(JSON.parse(require("fs").readFileSync(process.argv[1], "utf8")).contractAddress)' network/threshold/deployments/preprod.json)
-    NIGHTCAST_NODE_URL=blockfrost NIGHTCAST_NODE_WS=blockfrost node network/threshold/ops/bundle.mjs pack --build network/threshold/check/out-net --out /root/nightcast-net/threshold-net-build-preprod.tar.gz --contract "$contract" --network preprod
+    NIGHTCAST_NODE_URL=blockfrost NIGHTCAST_NODE_WS=blockfrost node network/threshold/ops/bundle.mjs pack --build network/threshold/check/out-net --out /root/nightcast-net/threshold-net-build-preprod.tar.gz --contract "$contract" --network preprod --proof-server-port "$PORT"
     ;;
   midnight)
     node network/threshold/ops/midnight-committee.mjs

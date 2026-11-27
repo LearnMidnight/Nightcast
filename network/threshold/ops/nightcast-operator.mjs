@@ -3,7 +3,7 @@
  * nightcast-operator: run an operator of the Nightcast threshold network.
  *
  *   nightcast-operator keys [--home <folder>] [--network preprod]
- *       Download the compiled contract and its proving keys (about 560 MB) into <folder>/build.
+ *       Download the compiled contract and its proving keys (about 120 MB) into <folder>/build.
  *       The download is refused unless its SHA-256 is the one in this repository
  *       (network/threshold/releases/<network>.json) and every circuit's verifier key is the one
  *       on chain. First, before anything else.

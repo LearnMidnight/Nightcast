@@ -1,0 +1,11 @@
+{
+  "network": "preprod",
+  "contract": "46d0489c7df03401e7b737f8e8bfa4e9535c55a8994dcf26f217da4e999b1ead",
+  "compiler": "0.36.1",
+  "circuits": 18,
+  "build": {
+    "url": "https://github.com/LearnMidnight/Nightcast/releases/download/threshold-net-preprod-46d0489c/threshold-net-build-preprod.tar.gz",
+    "sha256": "8451746f06b847f0decbe96ae6bb3b565d76fa42f7f09f0d0d13bb5de8d43e5f",
+    "bytes": 122088786
+  }
+}

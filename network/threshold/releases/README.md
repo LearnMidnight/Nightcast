@@ -1,6 +1,6 @@
 # Releases of the threshold network contract
 
-One file per network (`preprod.json`) names the deployed contract and the build an operator needs to make its proofs: the compiled contract and its proving keys, about 560 MB, published as a file of a GitHub release.
+One file per network (`preprod.json`) names the deployed contract and the build an operator needs to make its proofs: the compiled contract and its proving keys, about 120 MB packed, published as a file of a GitHub release.
 
 ```json
 {
