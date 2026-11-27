@@ -8,12 +8,25 @@
 import { execFile } from 'node:child_process';
 import { appendFileSync, mkdirSync, writeFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
-import { unshieldedToken } from '@midnight-ntwrk/midnight-js-protocol/v9';
+import { indexerPublicDataProvider } from '@midnight-ntwrk/midnight-js-indexer-public-data-provider';
+import { ContractState, unshieldedToken } from '@midnight-ntwrk/midnight-js-protocol/v9';
 import { MidnightBech32m, UnshieldedAddress } from '@midnightntwrk/wallet-sdk-address-format';
 import { filter, firstValueFrom } from 'rxjs';
-import { TX_TTL_SECONDS, walletBalances } from '@nightcast/deploy';
-import { errorText, say, sleep, succeeded, tn, withChain } from './common.mjs';
+import { TX_TTL_SECONDS, blockfrostProjectId, connect, walletBalances } from '@nightcast/deploy';
+import { errorText, ledgerOf, say, sleep, succeeded, tn, withChain } from './common.mjs';
 import { describeTx, dustText, txText } from './threshold.mjs';
+
+/** The contract's ledger as the indexer shows it now, without a wallet. */
+export const readContract = async ({ network = 'preprod', proofServerPort, address }) => {
+  const session = await connect(network, { proofServerPort, projectId: blockfrostProjectId(network), waitForBlockfrost: true });
+  try {
+    const r = await indexerPublicDataProvider(session.config.indexer, session.config.indexerWS).queryContractState(address);
+    if (!r) throw new Error(`the indexer shows no contract at ${address}`);
+    return ledgerOf((r.contractState ?? r).deserialize({ v9: ContractState }));
+  } finally {
+    await session.shutdown().catch(() => undefined);
+  }
+};
 
 /** The process's exit code for "stalled: start me again". */
 export const STALLED = 75;

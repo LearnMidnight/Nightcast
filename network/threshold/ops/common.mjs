@@ -119,7 +119,12 @@ export const poolSign = (file, message) => {
   const k = readJson(file);
   if (k.role !== 'test-pool') throw new Error(`${file} is not a test pool key`);
   const key = createPrivateKey({ format: 'jwk', key: { kty: 'OKP', crv: 'Ed25519', d: Buffer.from(k.secret, 'hex').toString('base64url'), x: Buffer.from(k.public, 'hex').toString('base64url') } });
-  const g = sign(null, Buffer.from(message), key);
+  return poolSignatureFrom(sign(null, Buffer.from(message), key));
+};
+/** A 64-byte Ed25519 signature (R then S, as RFC 8032 writes it) as the contract takes it. */
+export const poolSignatureFrom = (bytes) => {
+  const g = Buffer.from(bytes);
+  if (g.length !== 64) throw new Error(`an Ed25519 signature is 64 bytes, not ${g.length}`);
   return { r: ed25519Point(g.subarray(0, 32)), s: le(g.subarray(32)) };
 };
 const ZERO = new Uint8Array(32);
