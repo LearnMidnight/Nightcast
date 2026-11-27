@@ -170,10 +170,10 @@ export const readRecord = (network) => {
  * the indexer doesn't show it), `read(address)` its ledger, and `handle(id, privateState)` a
  * contract handle whose `callTx` sends transactions. The wallet is stopped afterwards.
  */
-export const withChain = async ({ network = 'preprod', proofServerPort, walletFile, address }, f) => {
+export const withChain = async ({ network = 'preprod', proofServerPort, proofServerUrl, walletFile, address }, f) => {
   // Preprod is served by Blockfrost: its project id as the CLI finds it (NIGHTCAST_BLOCKFROST_PROJECT_ID,
   // else ~/nightcast-secrets/blockfrost-<network>.secret).
-  const session = await connect(network, { proofServerPort, projectId: blockfrostProjectId(network), waitForBlockfrost: true });
+  const session = await connect(network, { proofServerPort, proofServerUrl, projectId: blockfrostProjectId(network), waitForBlockfrost: true });
   try {
     const wallet = await openWallet(session, { seed: walletSeedFrom(walletFile) });
     try {

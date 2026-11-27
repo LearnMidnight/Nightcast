@@ -36,27 +36,27 @@
  * is paid with 3 DUST coins, largest first, and a call waits for DUST rather than failing. A
  * process that loses the network ends with code 75, to be started again.
  */
-import './operator-env.mjs';
+import { homeOf } from './operator-env.mjs';
 import { execFileSync } from 'node:child_process';
 import { createPublicKey, randomInt, verify, webcrypto } from 'node:crypto';
 import { existsSync, mkdirSync, readFileSync, unlinkSync, writeFileSync } from 'node:fs';
-import { homedir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { parseArgs } from 'node:util';
 import { ecMulGenerator, encodeContractAddress } from '@midnight-ntwrk/compact-runtime';
 import { walletAddressOf } from '@nightcast/deploy';
 import {
-  ROOT, T, ed25519Point, errorText, fromHex, hex, newOperatorFile, night, operatorFrom, poolIdOf, poolSign, poolSignatureFrom, readJson, readRecord, say, tn,
+  BUILD, ROOT, T, ed25519Point, errorText, fromHex, hex, newOperatorFile, night, operatorFrom, poolIdOf, poolSign, poolSignatureFrom, readJson, readRecord, say, tn,
   sleep, walletSeedFrom, writeSecret,
 } from './common.mjs';
 import { cellKeyOf, clock, phaseName, polynomialFor, positionOf, priorOf, seatKeyOf, shareKeyOf, shareOf, short } from './threshold.mjs';
 import { duties } from './duties.mjs';
 import { openRuntime, readContract } from './runtime.mjs';
+import { checkAgainstChain, readRelease } from './bundle.mjs';
 
 const { values, positionals } = parseArgs({
   allowPositionals: true,
   options: {
-    home: { type: 'string' }, network: { type: 'string' }, contract: { type: 'string' }, 'proof-server-port': { type: 'string' },
+    home: { type: 'string' }, network: { type: 'string' }, contract: { type: 'string' }, 'proof-server-port': { type: 'string' }, 'proof-server-url': { type: 'string' },
     key: { type: 'string' }, wallet: { type: 'string' }, slots: { type: 'string' }, all: { type: 'boolean' },
     pool: { type: 'string' }, 'pool-key': { type: 'string' }, signature: { type: 'string' }, 'valid-hours': { type: 'string', default: '24' },
     'dust-spends': { type: 'string', default: '3' }, 'dust-wait': { type: 'string', default: '120' },
@@ -65,7 +65,7 @@ const { values, positionals } = parseArgs({
   },
 });
 const command = positionals[0];
-const home = resolve(values.home ?? process.env.NIGHTCAST_OPERATOR_HOME ?? join(homedir(), '.nightcast-operator'));
+const home = homeOf();
 const files = {
   key: join(home, 'operator.secret'), wallet: join(home, 'wallet.secret'), config: join(home, 'config.json'),
   lock: join(home, '.lock'), link: join(home, 'link-request.json'), log: join(home, 'calls.jsonl'),
@@ -78,6 +78,9 @@ const setUp = () => existsSync(files.key) && existsSync(files.wallet) && existsS
 const load = () => {
   if (!setUp()) throw new Error(`${home} isn't an operator's folder yet: run init first`);
   const config = readJson(files.config);
+  // The proof server: NIGHTCAST_PROOF_SERVER_URL (Docker's), else the settings' URL, else its port on this machine.
+  config.proofServerUrl = process.env.NIGHTCAST_PROOF_SERVER_URL ?? config.proofServerUrl;
+  if (config.proofServerUrl) delete config.proofServerPort;
   const key = operatorFrom(files.key);
   const seed = walletSeedFrom(files.wallet);
   return { config, key, seed, address: walletAddressOf(config.network, seed) };
@@ -121,9 +124,12 @@ const withOperator = async (f) => {
   lock();
   if (Number(values['dust-spends']) > 1) dustPatchInstalled();
   say(`operator ${hex(op.key.id)}, wallet ${op.address}`);
+  // Proofs made with keys that aren't the contract's would only be refused, each after its fee is booked.
+  const circuits = await checkAgainstChain(BUILD, { network: op.config.network, contract: op.config.contract, proofServerPort: op.config.proofServerPort, proofServerUrl: op.config.proofServerUrl });
+  say(`the compiled contract here is the one on chain (all ${circuits} circuits' verifier keys match)`);
   say('opening the wallet (the first time, catching up with the chain can take a while)');
   return openRuntime({
-    network: op.config.network, proofServerPort: op.config.proofServerPort, walletFile: files.wallet, address: op.config.contract, log: files.log, saveDir: home,
+    network: op.config.network, proofServerPort: op.config.proofServerPort, proofServerUrl: op.config.proofServerUrl, walletFile: files.wallet, address: op.config.contract, log: files.log, saveDir: home,
     dustSpends: values['dust-spends'], dustWait: values['dust-wait'], handlePrefix: `op-${short(op.key.id)}`,
   }, async (rt) => {
     const mine = () => rt.handle(`op-${short(op.key.id)}`, { operatorSecret: op.key.secret, answerSecs: rt.l0.answerSecs });
@@ -158,8 +164,11 @@ const init = () => {
   } else say(`there is a wallet already: ${files.wallet}`);
   if (!existsSync(files.config)) {
     const network = values.network ?? 'preprod';
-    const contract = values.contract ?? readRecord(network).contractAddress;
-    writeFileSync(files.config, `${JSON.stringify({ network, contract, proofServerPort: Number(values['proof-server-port'] ?? 6300) }, null, 2)}\n`);
+    // The contract: the one this repository's release names, else (where it was deployed from) the deployment record.
+    let contract = values.contract;
+    if (!contract) { try { contract = readRelease(network).contract; } catch { contract = readRecord(network).contractAddress; } }
+    const prover = values['proof-server-url'] ? { proofServerUrl: values['proof-server-url'] } : { proofServerPort: Number(values['proof-server-port'] ?? 6300) };
+    writeFileSync(files.config, `${JSON.stringify({ network, contract, ...prover }, null, 2)}\n`);
     say(`settings kept in ${files.config}`);
   } else say(`there are settings already: ${files.config}`);
   const op = load();
@@ -175,7 +184,7 @@ const init = () => {
 // ------------------------------------------------------------------ status
 const status = async () => {
   const op = load();
-  const l = await readContract({ network: op.config.network, proofServerPort: op.config.proofServerPort, address: op.config.contract });
+  const l = await readContract({ network: op.config.network, proofServerPort: op.config.proofServerPort, proofServerUrl: op.config.proofServerUrl, address: op.config.contract });
   const id = op.key.id;
   say(`contract ${op.config.contract} (${op.config.network})`);
   say(`operator ${hex(id)}${isHouse(l, id) ? ': one of the house\'s operators' : ''}`);
@@ -274,7 +283,7 @@ const link = async () => {
     const op = load();
     const pub = poolKeyOf(values.pool);
     const pid = poolIdOf(pub);
-    const l = await readContract({ network: op.config.network, proofServerPort: op.config.proofServerPort, address: op.config.contract });
+    const l = await readContract({ network: op.config.network, proofServerPort: op.config.proofServerPort, proofServerUrl: op.config.proofServerUrl, address: op.config.contract });
     const problem = linkProblem(l, op.key.id, pid);
     if (problem) throw new Error(problem);
     const count = l.poolLinks.member(pid) ? l.poolLinks.lookup(pid) : 0n;

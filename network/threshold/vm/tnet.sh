@@ -32,6 +32,8 @@
 #   bash tnet.sh log [lines]          whether a run is going, and the end of run.log
 #   bash tnet.sh midnight             read-only: who produces Midnight's blocks on Preprod (for the real pool list)
 #   bash tnet.sh proof-restart        install this checkout's proof server unit (its memory settings) and restart it
+#   bash tnet.sh bundle               check the compiled contract against the chain and pack it for a GitHub release
+#                                     (/root/nightcast-net/threshold-net-build-preprod.tar.gz); prints its SHA-256
 # The operator package's test: the house's four and op-1 as five operators, each its own process and wallet
 # (network/threshold/ops/operator.mjs run), keeping the network going with no epoch commands from here.
 #   bash tnet.sh team-setup [tNIGHT]  give each its folder in $TEAM (its key from $DATA, a new wallet) and send each
@@ -89,6 +91,10 @@ case "${1:-}" in
     curl -sf "http://127.0.0.1:$PORT/health" >/dev/null || { echo "the proof server on $PORT isn't answering after 90 s: journalctl -u nightcast-net-proof -n 20" >&2; exit 1; }
     say "Proof server answering on $PORT; its memory ceiling: $(docker inspect -f '{{.HostConfig.Memory}}' nightcast-net-proof | awk '{ printf "%.1f GiB", $1 / 1073741824 }'); log kept to $(docker inspect -f '{{index .HostConfig.LogConfig.Config "max-size"}}' nightcast-net-proof) x 2"
     free -m | sed -n 1,2p
+    ;;
+  bundle)
+    contract=$(node -e 'process.stdout.write(JSON.parse(require("fs").readFileSync(process.argv[1], "utf8")).contractAddress)' network/threshold/deployments/preprod.json)
+    NIGHTCAST_NODE_URL=blockfrost NIGHTCAST_NODE_WS=blockfrost node network/threshold/ops/bundle.mjs pack --build network/threshold/check/out-net --out /root/nightcast-net/threshold-net-build-preprod.tar.gz --contract "$contract" --network preprod
     ;;
   midnight)
     node network/threshold/ops/midnight-committee.mjs
@@ -192,5 +198,5 @@ case "${1:-}" in
   team-status)
     for m in $MEMBERS; do say "$m"; node network/threshold/ops/operator.mjs status --home "$TEAM/$m" | grep -vE '^\[|RPC-CORE|[0-9] (contract|wallet) ' || true; done
     ;;
-  *) sed -n 2,45p "$0"; exit 2 ;;
+  *) sed -n 2,47p "$0"; exit 2 ;;
 esac

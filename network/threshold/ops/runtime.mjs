@@ -17,8 +17,8 @@ import { errorText, ledgerOf, say, sleep, succeeded, tn, withChain } from './com
 import { describeTx, dustText, txText } from './threshold.mjs';
 
 /** The contract's ledger as the indexer shows it now, without a wallet. */
-export const readContract = async ({ network = 'preprod', proofServerPort, address }) => {
-  const session = await connect(network, { proofServerPort, projectId: blockfrostProjectId(network), waitForBlockfrost: true });
+export const readContract = async ({ network = 'preprod', proofServerPort, proofServerUrl, address }) => {
+  const session = await connect(network, { proofServerPort, proofServerUrl, projectId: blockfrostProjectId(network), waitForBlockfrost: true });
   try {
     const r = await indexerPublicDataProvider(session.config.indexer, session.config.indexerWS).queryContractState(address);
     if (!r) throw new Error(`the indexer shows no contract at ${address}`);
@@ -33,7 +33,7 @@ export const STALLED = 75;
 const stop = (why) => { say(why); process.exit(STALLED); };
 
 /**
- * Open the wallet and run `f(rt)`. Options: network, proofServerPort, walletFile, address (the contract), log (a
+ * Open the wallet and run `f(rt)`. Options: network, proofServerPort (or proofServerUrl), walletFile, address (the contract), log (a
  * JSON-lines file for every call), saveDir (where refused transactions are kept), dustSpends (3), dustWait (120
  * minutes), stall (10 minutes), openWait (30 minutes), lead (60 s), leadLink (240 s), proofContainer (a docker name,
  * for the proof server's memory), handlePrefix (private state ids), proofLock (a file: several processes on one machine
@@ -41,7 +41,7 @@ const stop = (why) => { say(why); process.exit(STALLED); };
  */
 export const openRuntime = async (opts, f) => {
   const {
-    network = 'preprod', proofServerPort, walletFile, address, log: logFile, saveDir, dustSpends = 3, dustWait = 120, stall = 10,
+    network = 'preprod', proofServerPort, proofServerUrl, walletFile, address, log: logFile, saveDir, dustSpends = 3, dustWait = 120, stall = 10,
     openWait = 30, lead = 60, leadLink = 240, proofContainer, handlePrefix = 'tnet', proofLock = process.env.NIGHTCAST_PROOF_LOCK,
   } = opts;
   const log = (row) => {
@@ -65,7 +65,7 @@ export const openRuntime = async (opts, f) => {
   const openWaitMs = Math.max(5, Number(openWait) || 30) * 60_000;
   const opening = setTimeout(() => stop(`stalled: the wallet hasn't caught up with the chain in ${Math.round(openWaitMs / 60_000)} minutes. Stopping, to be started again`), openWaitMs);
   try {
-    return await withChain({ network, proofServerPort, walletFile, address }, async ({ session, wallet, providers, read: readChain, handle, me, meBytes }) => {
+    return await withChain({ network, proofServerPort, proofServerUrl, walletFile, address }, async ({ session, wallet, providers, read: readChain, readState, handle, me, meBytes }) => {
       clearTimeout(opening);
       alive();
       const watchdog = setInterval(() => {
@@ -284,7 +284,7 @@ export const openRuntime = async (opts, f) => {
         }
       };
       return await f({
-        session, wallet, providers, handle, anyone, me, meBytes, l0, read, shown, waitUntil, call, stamp, lead, leadLink, alive,
+        session, wallet, providers, handle, anyone, readState, me, meBytes, l0, read, shown, waitUntil, call, stamp, lead, leadLink, alive,
         coinsNow, coinsText, coinsUntil, makeCoins, registerNew, sendNight,
         setSpends, spends: () => wantSpends, address,
       });

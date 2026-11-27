@@ -1,4 +1,19 @@
 // What an operator runs with unless told otherwise: imported first, before anything reads it.
+import { existsSync } from 'node:fs';
+import { homedir } from 'node:os';
+import { join, resolve } from 'node:path';
+
+/** The operator's folder: --home, else NIGHTCAST_OPERATOR_HOME, else ~/.nightcast-operator. */
+export const homeOf = (argv = process.argv) => {
+  const i = argv.findIndex((a) => a === '--home' || a.startsWith('--home='));
+  const given = i < 0 ? undefined : argv[i].includes('=') ? argv[i].slice('--home='.length) : argv[i + 1];
+  return resolve(given ?? process.env.NIGHTCAST_OPERATOR_HOME ?? join(homedir(), '.nightcast-operator'));
+};
+
+// The compiled contract: the one `keys` downloaded and checked into the folder, unless told otherwise
+// (or, in a checkout that compiled it, network/threshold/check/out-net).
+const build = join(homeOf(), 'build');
+if (!process.env.NIGHTCAST_TNET_BUILD && existsSync(join(build, '.checked.json'))) process.env.NIGHTCAST_TNET_BUILD = build;
 // Midnight's own Preprod node was retired on 24 Nov 2026, so the chain is reached through Blockfrost's.
 process.env.NIGHTCAST_NODE_URL ??= 'blockfrost';
 process.env.NIGHTCAST_NODE_WS ??= 'blockfrost';
