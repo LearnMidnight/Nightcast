@@ -120,16 +120,16 @@ One answer gives picks, shuffles, dice, weighted prizes and lottery numbers. See
 | [`contract/`](contract) | The v1 contract (`nightcast.compact`), key handling, an in-memory simulator, and `NightcastWords.compact` for expanding an answer in-circuit |
 | [`sdk/`](sdk) | `@nightcast/sdk`: the oracle service, chain adapters, and turning an answer into picks, shuffles, dice and lottery draws |
 | [`deploy/`](deploy) | The `./nightcast` command: deploy locked, verify, wallets, the oracle's bond, run the oracle, requests, checks, the MCP server |
-| [`network/threshold/`](network/threshold) | The threshold network: contract, in-memory checks, deploy and call tooling |
+| [`network/threshold/`](network/threshold) | The threshold network: contract, in-memory checks, deploy tooling, and the operator (`ops/nightcast-operator.mjs`, `docker/`) |
 | [`network/`](network) | The three-operator prototype the threshold network replaced |
 | [`deployments/`](deployments) | Published records of live deployments |
 | [`examples/raffle/`](examples/raffle) | A fair raffle using only the published packages |
-| [`docs/`](docs) | [SPEC](docs/SPEC.md) (v1), [THRESHOLD](docs/THRESHOLD.md), [GUIDE](docs/GUIDE.md), [MCP](docs/MCP.md), [RUN-V1](docs/RUN-V1.md), [Preprod guide](docs/preprod-guide.md) |
+| [`docs/`](docs) | [SPEC](docs/SPEC.md) (v1), [THRESHOLD](docs/THRESHOLD.md), [OPERATE](docs/OPERATE.md) (running an operator), [GUIDE](docs/GUIDE.md), [MCP](docs/MCP.md), [RUN-V1](docs/RUN-V1.md), [Preprod guide](docs/preprod-guide.md) |
 
 ## Roadmap
 
-1. **Threshold network on Preprod:** the remaining calls with real proofs, a second epoch, a request nobody answers. *(Now.)*
-2. **The operator package** (`@nightcast/operator`, npm and Docker) and a keeper anyone can run.
+1. ~~**Threshold network on Preprod:** every call with real proofs, handovers, fines, a void request.~~ Done, 24 to 27 Nov 2026.
+2. **The operator package:** one command, in Docker, that runs an operator and keeps the network moving by itself ([OPERATE.md](docs/OPERATE.md)). *(Now: built, being tested on Preprod.)*
 3. **The real pool list** and the first independent Cardano stake pool operators on Preprod.
 4. **An independent security audit** and a human cryptographer's review of the threshold design ([#15](https://github.com/LearnMidnight/Nightcast/issues/15)).
 5. **Mainnet**, deployed locked ([#16](https://github.com/LearnMidnight/Nightcast/issues/16)), and Lunardraw moved to the threshold network.

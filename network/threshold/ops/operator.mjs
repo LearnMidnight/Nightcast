@@ -39,7 +39,8 @@
 import { homeOf } from './operator-env.mjs';
 import { execFileSync } from 'node:child_process';
 import { createPublicKey, randomInt, verify, webcrypto } from 'node:crypto';
-import { existsSync, mkdirSync, readFileSync, unlinkSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, readFileSync, statSync, unlinkSync, utimesSync, writeFileSync } from 'node:fs';
+import { hostname } from 'node:os';
 import { join, resolve } from 'node:path';
 import { parseArgs } from 'node:util';
 import { ecMulGenerator, encodeContractAddress } from '@midnight-ntwrk/compact-runtime';
@@ -87,19 +88,27 @@ const load = () => {
 };
 const isHouse = (l, id) => [...l.house].some((x) => hex(x) === hex(id));
 
-/** One process at a time uses the folder (two would spend the same DUST coins). */
+/**
+ * One process at a time uses the folder (two would spend the same DUST coins). The lock names its process and
+ * machine (a container is a machine here: every one's process can be number 1) and is touched every 30 s, so one
+ * left by a process that has ended is known: same machine and the process is gone, or untouched for 3 minutes.
+ */
 const lock = () => {
+  const me = `${process.pid} ${hostname()}`;
   for (let i = 0; i < 2; i++) {
     try {
-      writeFileSync(files.lock, `${process.pid}\n`, { flag: 'wx' });
-      process.on('exit', () => { try { unlinkSync(files.lock); } catch { /* gone already */ } });
+      writeFileSync(files.lock, `${me}\n`, { flag: 'wx' });
+      const touch = setInterval(() => { try { const t = new Date(); utimesSync(files.lock, t, t); } catch { /* gone */ } }, 30_000);
+      touch.unref();
+      process.on('exit', () => { try { if (readFileSync(files.lock, 'utf8').trim() === me) unlinkSync(files.lock); } catch { /* gone already */ } });
       return;
     } catch (e) {
       if (e.code !== 'EEXIST') throw e;
-      const pid = Number(readFileSync(files.lock, 'utf8').trim());
-      let running = false;
-      try { process.kill(pid, 0); running = pid !== process.pid; } catch { /* not running */ }
-      if (running) throw new Error(`another process (${pid}) is using ${home}: wait for it to finish, or stop it`);
+      const [pid, host] = readFileSync(files.lock, 'utf8').trim().split(' ');
+      const fresh = Date.now() - statSync(files.lock).mtimeMs < 3 * 60_000;
+      let running = fresh;
+      if (fresh && host === hostname()) { try { process.kill(Number(pid), 0); running = Number(pid) !== process.pid; } catch { running = false; } }
+      if (running) throw new Error(`another process (${pid} on ${host}) is using ${home}: wait for it to finish, or stop it`);
       unlinkSync(files.lock); // left by a process that has ended
     }
   }
