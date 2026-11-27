@@ -386,7 +386,8 @@ const send = () => withOperator(async ({ coinsNow, coinsText, coinsUntil, sendNi
   const before = await coinsNow();
   if (before.night < amount) throw new Error(`the wallet has ${coinsText(before)}`);
   say(`${tn(amount)} sent to ${values.to}, transaction ${await sendNight(values.to, amount)}`);
-  await coinsUntil((x) => x.night <= before.night - amount, 'the transfer didn\'t show within 10 minutes', 10 * 60_000);
+  // Until it lands, the UTXO it spent is out of the wallet with all its change.
+  await coinsUntil((x) => x.night < before.night && x.night >= before.night - amount, 'the transfer and its change didn\'t show within 10 minutes', 10 * 60_000);
   say(`the wallet now: ${coinsText(await coinsNow())}`);
 });
 

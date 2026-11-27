@@ -182,7 +182,8 @@ if (mode === 'status') {
         if (before.night < amount) throw new Error(`the wallet has ${tn(before.night)}`);
         const txId = await sendNight(a, amount);
         say(`${tn(amount)} sent to ${a}, transaction ${txId}`);
-        await coinsUntil((x) => x.night <= before.night - amount, 'the transfer didn\'t show within 10 minutes', 10 * 60_000);
+        // Until it lands, the UTXO it spent is out of the wallet with all its change: wait for the change, so the next send has NIGHT to spend.
+        await coinsUntil((x) => x.night < before.night && x.night >= before.night - amount, 'the transfer and its change didn\'t show within 10 minutes', 10 * 60_000);
       } else if (verb === 'load-pools') {
         const list = poolList(readJson(join(dir, 'pool-list.json')).pools.map((p) => p.public));
         if (hex(list.root) !== hex(l0.poolsRoot)) throw new Error(`${join(dir, 'pool-list.json')} is not the list this contract was deployed with`);

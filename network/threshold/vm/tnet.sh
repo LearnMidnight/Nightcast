@@ -150,17 +150,18 @@ case "${1:-}" in
     ;;
   team-setup)
     mkdir -p "$TEAM" && chmod 700 "$TEAM"
-    sends=()
     for m in $MEMBERS; do
       say "$m"
       out=$(node network/threshold/ops/operator.mjs init --home "$TEAM/$m" --key "$DATA/$m.secret" --proof-server-port "$PORT")
       echo "$out" | grep -E 'operator id|wallet address'
       addr=$(echo "$out" | sed -nE 's/.*wallet address: +(mn_addr[a-z0-9_]+).*/\1/p')
       [ -n "$addr" ] || { echo "$out" >&2; echo "no wallet address for $m" >&2; exit 1; }
-      sends+=("send:$addr:${2:-150}")
+      # Each wallet is funded once: run again, this sends only to those it hasn't yet.
+      if [ -f "$TEAM/$m/.funded" ]; then echo "   funded already ($(cat "$TEAM/$m/.funded"))"; continue; fi
+      sent=$(bash "$0" do "send:$addr:${2:-150}" 2>&1 || true)
+      echo "$sent" | grep -E 'sent to|stopped|FAIL' || true
+      if echo "$sent" | grep -q 'sent to'; then echo "${2:-150} tNIGHT, $(date -u '+%Y-%m-%d %H:%M') UTC" > "$TEAM/$m/.funded"; else echo "sending to $m didn't go through: run team-setup again" >&2; exit 1; fi
     done
-    say "Sending ${2:-150} tNIGHT to each from the operators' wallet"
-    bash "$0" do "${sends[@]}"
     ;;
   team-start)
     if pgrep -f 'tnet-team-loop' >/dev/null; then echo "the team is running already: bash network/threshold/vm/tnet.sh team-log" >&2; exit 1; fi
