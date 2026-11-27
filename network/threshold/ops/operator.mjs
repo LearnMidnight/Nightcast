@@ -37,7 +37,7 @@
  * process that loses the network ends with code 75, to be started again.
  */
 import { homeOf } from './operator-env.mjs';
-import { execFileSync } from 'node:child_process';
+import { spawnSync } from 'node:child_process';
 import { createPublicKey, randomInt, verify, webcrypto } from 'node:crypto';
 import { existsSync, mkdirSync, readFileSync, statSync, unlinkSync, utimesSync, writeFileSync } from 'node:fs';
 import { hostname } from 'node:os';
@@ -115,16 +115,22 @@ const lock = () => {
   throw new Error(`couldn't take ${files.lock}`);
 };
 
-/** The several-DUST-spends option needs the patch npm ci adds to the dust wallet. */
+/**
+ * The several-DUST-spends option needs the patch npm ci adds to the dust wallet. The patch
+ * script reports on stderr, so both streams are read (reading only stdout saw nothing and
+ * refused a wallet that had the option: found when the team first ran on the VM, 27 Nov).
+ */
+export const dustPatchVerdict = (status, stdout, stderr) => {
+  const out = `${stdout ?? ''}${stderr ?? ''}`.trim();
+  if (status !== 0) return `the dust wallet installed here isn't the one Nightcast's fee option was written for: ${out}`;
+  if (!/already there|added to/.test(out)) return `the fee option isn't installed in the dust wallet (run npm ci at the top of the repository): ${out}`;
+  return null;
+};
 const dustPatchInstalled = () => {
   const repo = resolve(ROOT, '..', '..');
-  let out;
-  try {
-    out = execFileSync(process.execPath, [join(repo, 'deploy', 'scripts', 'patch-dust-two-spends.mjs'), '--check'], { cwd: repo, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] });
-  } catch (e) {
-    throw new Error(`the dust wallet installed here isn't the one Nightcast's fee option was written for: ${String(e.stdout ?? '') + String(e.stderr ?? '')}`.trim());
-  }
-  if (!/already there|added to/.test(out)) throw new Error(`the fee option isn't installed in the dust wallet (run npm ci at the top of the repository): ${out.trim()}`);
+  const r = spawnSync(process.execPath, [join(repo, 'deploy', 'scripts', 'patch-dust-two-spends.mjs'), '--check'], { cwd: repo, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] });
+  const problem = r.error ? `couldn't run the fee option's check: ${r.error.message}` : dustPatchVerdict(r.status, r.stdout, r.stderr);
+  if (problem) throw new Error(problem);
 };
 
 /** The wallet open, as runtime.mjs gives it, plus this operator's contract handle. */
