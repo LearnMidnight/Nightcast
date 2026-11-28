@@ -168,14 +168,15 @@ export const readRecord = (network) => {
  * A Preprod session and an open wallet (synced, with DUST), then `f({ session, wallet, providers,
  * read, readState, handle, me })`. `readState(address)` gives a contract's ledger 9 state (null if
  * the indexer doesn't show it), `read(address)` its ledger, and `handle(id, privateState)` a
- * contract handle whose `callTx` sends transactions. The wallet is stopped afterwards.
+ * contract handle whose `callTx` sends transactions. The wallet is stopped afterwards. `onWallet(wallet)`,
+ * if given, is called as soon as the wallet is built, before it syncs (to follow its progress).
  */
-export const withChain = async ({ network = 'preprod', proofServerPort, proofServerUrl, walletFile, address }, f) => {
+export const withChain = async ({ network = 'preprod', proofServerPort, proofServerUrl, walletFile, address, onWallet }, f) => {
   // Preprod is served by Blockfrost: its project id as the CLI finds it (NIGHTCAST_BLOCKFROST_PROJECT_ID,
   // else ~/nightcast-secrets/blockfrost-<network>.secret).
   const session = await connect(network, { proofServerPort, proofServerUrl, projectId: blockfrostProjectId(network), waitForBlockfrost: true });
   try {
-    const wallet = await openWallet(session, { seed: walletSeedFrom(walletFile) });
+    const wallet = await openWallet(session, { seed: walletSeedFrom(walletFile), onWallet });
     try {
       const providers = contractProviders(session, wallet, BUILD);
       const readState = async (a = address) => {

@@ -56,8 +56,8 @@
  * A wallet that loses its connection to the network may never report itself in step again, and
  * whatever waits on it then waits for ever (twice on 24 Nov 2026). So a run that shows no sign
  * of life for --stall minutes (10 by default) ends with exit code 75, to be started again: it
- * goes on from what the chain shows. `tnet.sh bg` does that by itself. A wallet that hasn't caught
- * up with the chain within --open-wait minutes (30 by default) ends the run the same way.
+ * goes on from what the chain shows. `tnet.sh bg` does that by itself. A wallet whose sync hasn't
+ * moved on for --open-wait minutes (30 by default) while it opens ends the run the same way.
  *
  * A circuit that takes the time is given "now" a little ahead (--lead 60 seconds; --lead-link 240
  * for linkPool, whose proof is the largest), because its proof has to be made before it is sent.
@@ -116,7 +116,7 @@ const status = (l) => {
     const place = l.poolOf.member(id) ? `pool place ${l.listed.lookup(l.poolOf.lookup(id))}` : o.house ? 'house' : 'no pool';
     say(`  ${short(id)}  ${o.active ? 'active' : 'left  '}  bond ${l.bonds.lookup(id).read()} slots  ${place}`);
   }
-  say(`requests made: ${l.nextRequest}; forfeited bond: ${l.forfeited} slots`);
+  say(`requests made: ${l.nextRequest}${l.nextRequest > 0n ? ` (numbered 0 to ${l.nextRequest - 1n})` : ''}; forfeited bond: ${l.forfeited} slots`);
   if (l.backedEpoch > 0n) say(`recommended successor: ${isZero(l.successor) ? 'none yet' : `${hex(l.successor)} (since epoch ${l.successorEpoch})`}; epoch ${l.backedEpoch} backs ${hex(l.backed).slice(0, 12)}`);
 };
 

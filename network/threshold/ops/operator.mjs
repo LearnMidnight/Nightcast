@@ -421,7 +421,7 @@ const wallet = () => withOperator(async ({ coinsNow, coinsText, spends }) => {
 });
 
 // ------------------------------------------------------------------ run
-const run = () => withOperator(async ({ op, mine, anyone, handle, read, call, shown, stamp, l0, meBytes, coinsFirst }) => {
+const run = () => withOperator(async ({ op, mine, anyone, handle, read, call, shown, stamp, l0, meBytes, coinsFirst, checkCoins }) => {
   const id = op.key.id;
   const keeper = !values['no-keeper'];
   const every = Math.max(20, Number(values.every) || 60) * 1000;
@@ -504,6 +504,8 @@ const run = () => withOperator(async ({ op, mine, anyone, handle, read, call, sh
     if (!d) {
       // Something to say now and then, so the log shows it is alive.
       if (Date.now() - quiet > 30 * 60_000) { say('nothing to do: watching the chain'); quiet = Date.now(); }
+      // DUST coins stuck as booked would leave it unable to pay for its next duty: free them now, not when it's due.
+      await checkCoins();
       await sleep(every);
       continue;
     }

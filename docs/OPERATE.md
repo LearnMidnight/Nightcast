@@ -141,6 +141,8 @@ After `leave`, keep the operator running until its last committee has finished: 
 ## If something goes wrong
 
 - **`stalled: ... Stopping, to be started again`** in the log: the wallet lost the network. Docker starts it again; nothing to do.
+- **`the wallet is behind the chain: waiting a minute`**: the wallet was a block or two behind when it paid a fee. It tries again by itself, and starts again if it's still behind.
+- **`DUST coins have been booked for over 4 hours ... stopping, to be started again`**: coins held by a transaction that can no longer land. Opening the wallet again frees them; Docker starts it again, nothing to do.
 - **`waiting for DUST`**: the wallet needs more DUST for the next fee. It builds up from the wallet's NIGHT; more NIGHT makes it faster.
 - **`402` or `Project Over Limit`**: your Blockfrost project has used its daily allowance (it resets at midnight UTC). Each operator should have its own project.
 - **`the compiled contract here isn't the one on chain`**: run `keys` again.

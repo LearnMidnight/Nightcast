@@ -39,7 +39,9 @@
 #   bash tnet.sh team-setup [tNIGHT]  give each its folder in $TEAM (its key from $DATA, a new wallet) and send each
 #                                     wallet tNIGHT from the operators' wallet (150 by default) to make DUST with
 #   bash tnet.sh team-start           start the five in the background (started again when they stall); they share
-#                                     the proof server one proof at a time
+#                                     the proof server one proof at a time. Any already running are left as they are
+#   bash tnet.sh team-restart <name>  stop one of them (house-1 .. house-4, op-1) and start it again, e.g. to open its
+#                                     wallet afresh. Best while its log says "nothing to do"
 #   bash tnet.sh team-stop            stop them (they go on from what the chain shows when started again)
 #   bash tnet.sh team-log [lines]     which are running, and the end of each one's log
 #   bash tnet.sh team-status          what the chain shows about each of the five (no wallets)
@@ -169,18 +171,35 @@ case "${1:-}" in
       if echo "$sent" | grep -q 'sent to'; then echo "${2:-150} tNIGHT, $(date -u '+%Y-%m-%d %H:%M') UTC" > "$TEAM/$m/.funded"; else echo "$sent" | grep -vE 'RPC-CORE' | tail -n 12 >&2; echo "sending to $m didn't go through (above: the end of what it said): run team-setup again" >&2; exit 1; fi
     done
     ;;
-  team-start)
-    if pgrep -f 'tnet-team-loop' >/dev/null; then echo "the team is running already: bash network/threshold/vm/tnet.sh team-log" >&2; exit 1; fi
+  team-start|team-restart)
     if pgrep -f 'node network/threshold/ops/[o]ps.mjs' >/dev/null; then echo "a tnet.sh run is going: it acts for the same seats. Wait for it (bash network/threshold/vm/tnet.sh log)" >&2; exit 1; fi
     curl -sf "http://127.0.0.1:$PORT/health" >/dev/null || { echo "the proof server on $PORT isn't answering: systemctl start nightcast-net-proof, wait a minute, and try again" >&2; exit 1; }
-    for m in $MEMBERS; do
+    if [ "$1" = team-restart ]; then
+      # One member, stopped and started again: its loop first (a stop ends it with code 0, which its loop takes as
+      # "stopped on purpose"), then the operator, which goes on from what the chain shows.
+      m="${2:-}"
+      case " $MEMBERS " in *" $m "*) ;; *) echo "team-restart takes one of: $MEMBERS" >&2; exit 2 ;; esac
+      pkill -f "tnet-team-loop $TEAM/$m\$" || true
+      pkill -f "operator[.]mjs run --home $TEAM/$m " || true
+      for _ in $(seq 1 20); do pgrep -f "operator[.]mjs run --home $TEAM/$m " >/dev/null || break; sleep 1; done
+      if pgrep -f "operator[.]mjs run --home $TEAM/$m " >/dev/null; then echo "$m is still running: pgrep -af operator.mjs" >&2; exit 1; fi
+      echo "==== $(date -u '+%Y-%m-%d %H:%M:%S') UTC: stopped by team-restart" >> "$TEAM/$m.log"
+      start="$m"
+    else
+      start="$MEMBERS"
+    fi
+    started=""
+    for m in $start; do
       [ -f "$TEAM/$m/config.json" ] || { echo "$m has no folder yet: bash network/threshold/vm/tnet.sh team-setup" >&2; exit 1; }
+      # One process per wallet: a member already running is left as it is.
+      if pgrep -f "tnet-team-loop $TEAM/$m\$" >/dev/null || pgrep -f "operator[.]mjs run --home $TEAM/$m " >/dev/null; then echo "$m is running already"; continue; fi
       echo "==== $(date -u '+%Y-%m-%d %H:%M:%S') UTC: started" >> "$TEAM/$m.log"
       # Started again whenever it ends other than when stopped: code 75 (it stalled) at once, anything else after a minute.
       NIGHTCAST_PROOF_LOCK="$TEAM/.proof.lock" nohup bash -c 'for n in $(seq 1 50); do node network/threshold/ops/operator.mjs run --home "$1" --every 120 --claim-at 0.05; code=$?; [ "$code" = 0 ] && exit 0; echo "== ended with code $code: starting again (start $((n + 1)) of 50)"; [ "$code" = 75 ] && sleep 20 || sleep 60; done' tnet-team-loop "$TEAM/$m" >> "$TEAM/$m.log" 2>&1 < /dev/null &
+      started="$started $m"
     done
     sleep 5
-    say "Started in the background: $MEMBERS. Look at them with: bash network/threshold/vm/tnet.sh team-log"
+    if [ -n "$started" ]; then say "Started in the background:$started. Look at them with: bash network/threshold/vm/tnet.sh team-log"; else say "Nothing to start: the team is running. Look at it with: bash network/threshold/vm/tnet.sh team-log"; fi
     ;;
   team-stop)
     pkill -f 'tnet-team-loop' || true
@@ -198,5 +217,5 @@ case "${1:-}" in
   team-status)
     for m in $MEMBERS; do say "$m"; node network/threshold/ops/operator.mjs status --home "$TEAM/$m" | grep -vE '^\[|RPC-CORE|[0-9] (contract|wallet) ' || true; done
     ;;
-  *) sed -n 2,47p "$0"; exit 2 ;;
+  *) sed -n 2,49p "$0"; exit 2 ;;
 esac
