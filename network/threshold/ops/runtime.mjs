@@ -2,8 +2,9 @@
 // (24 to 27 Nov 2026): fees paid with several DUST coins, largest first; a call waits for DUST
 // rather than failing; each proof and transaction is timed and reported; a transaction the node
 // refuses is saved; and a watchdog ends the process with code 75 when the wallet loses the network
-// (no sign of life for `stall` minutes, a wallet behind the chain, or one that hasn't caught up
-// within `openWait` minutes), so whatever supervises it starts it again. Everything that uses it
+// (no sign of life for `stall` minutes, a wallet still behind the chain after waiting a minute for it,
+// a sync that hasn't moved on for `openWait` minutes, or DUST coins booked for hours by transactions
+// that can no longer land), so whatever supervises it starts it again. Everything that uses it
 // re-reads the chain before acting, so starting again is always safe.
 import { execFile } from 'node:child_process';
 import { appendFileSync, mkdirSync, readFileSync, statSync, unlinkSync, writeFileSync } from 'node:fs';
@@ -12,9 +13,10 @@ import { indexerPublicDataProvider } from '@midnight-ntwrk/midnight-js-indexer-p
 import { ContractState, unshieldedToken } from '@midnight-ntwrk/midnight-js-protocol/v9';
 import { MidnightBech32m, UnshieldedAddress } from '@midnightntwrk/wallet-sdk-address-format';
 import { filter, firstValueFrom } from 'rxjs';
-import { TX_TTL_SECONDS, blockfrostProjectId, connect, walletBalances } from '@nightcast/deploy';
+import { STALE_DUST_BOOKING_MS, TX_TTL_SECONDS, blockfrostProjectId, connect, walletBalances } from '@nightcast/deploy';
 import { errorText, ledgerOf, say, sleep, succeeded, tn, withChain } from './common.mjs';
 import { describeTx, dustText, txText } from './threshold.mjs';
+import { bookingWatch, restartForBookings, syncMark } from './wallet-watch.mjs';
 
 /** The contract's ledger as the indexer shows it now, without a wallet. */
 export const readContract = async ({ network = 'preprod', proofServerPort, proofServerUrl, address }) => {
@@ -35,7 +37,7 @@ const stop = (why) => { say(why); process.exit(STALLED); };
 /**
  * Open the wallet and run `f(rt)`. Options: network, proofServerPort (or proofServerUrl), walletFile, address (the contract), log (a
  * JSON-lines file for every call), saveDir (where refused transactions are kept), dustSpends (3), dustWait (120
- * minutes), stall (10 minutes), openWait (30 minutes), lead (60 s), leadLink (240 s), proofContainer (a docker name,
+ * minutes), stall (10 minutes), openWait (30 minutes: the sync not moving on for that long while the wallet opens), lead (60 s), leadLink (240 s), proofContainer (a docker name,
  * for the proof server's memory), handlePrefix (private state ids), proofLock (a file: several processes on one machine
  * sharing one proof server make their proofs one at a time, as one proof can take 5 GB; NIGHTCAST_PROOF_LOCK).
  */
@@ -61,12 +63,25 @@ export const openRuntime = async (opts, f) => {
     else delete process.env.NIGHTCAST_DUST_MIN_SPENDS;
   };
   setSpends(dustSpends);
-  // Before the wallet is open it catches up with the chain, which can also stall for good after a lost connection.
+  // Before the wallet is open it catches up with the chain, which can also stall for good after a lost connection. A
+  // first sync can take over an hour (27 Nov 2026: about 75 minutes for each of the team's five), so what counts is
+  // whether it is still moving on, not how long it has taken.
   const openWaitMs = Math.max(5, Number(openWait) || 30) * 60_000;
-  const opening = setTimeout(() => stop(`stalled: the wallet hasn't caught up with the chain in ${Math.round(openWaitMs / 60_000)} minutes. Stopping, to be started again`), openWaitMs);
+  let moved = Date.now(), mark, following;
+  const opening = setInterval(() => {
+    if (Date.now() - moved < openWaitMs) return;
+    stop(`stalled: the wallet's sync hasn't moved on in ${Math.round(openWaitMs / 60_000)} minutes. Stopping, to be started again`);
+  }, 30_000);
+  const onWallet = (w) => {
+    following = w.wallet.state().subscribe((s) => {
+      const m = syncMark(s);
+      if (m !== mark) { mark = m; moved = Date.now(); }
+    });
+  };
+  const opened = () => { clearInterval(opening); following?.unsubscribe(); };
   try {
-    return await withChain({ network, proofServerPort, proofServerUrl, walletFile, address }, async ({ session, wallet, providers, read: readChain, readState, handle, me, meBytes }) => {
-      clearTimeout(opening);
+    return await withChain({ network, proofServerPort, proofServerUrl, walletFile, address, onWallet }, async ({ session, wallet, providers, read: readChain, readState, handle, me, meBytes }) => {
+      opened();
       alive();
       const watchdog = setInterval(() => {
         if (Date.now() - lastSign < stallMs) return;
@@ -86,11 +101,27 @@ export const openRuntime = async (opts, f) => {
         },
       });
       const syncedState = () => firstValueFrom(wallet.wallet.state().pipe(filter((s) => s.isSynced)));
+      // Coins booked by a transaction that can no longer land stay booked until the wallet is opened again (wallet-watch.mjs).
+      const bookings = bookingWatch(STALE_DUST_BOOKING_MS);
       /** The wallet's NIGHT UTXOs (and how many generate DUST) and its DUST coins: free to pay with, and booked by a transaction that hasn't landed. */
       const coinsNow = async () => {
-        const c = { ...(await walletBalances(wallet)), booked: (await syncedState()).dust.pendingCoins.length };
+        const pending = (await syncedState()).dust.pendingCoins ?? [];
+        bookings.note(pending);
+        const c = { ...(await walletBalances(wallet)), booked: pending.length };
         alive();
         return c;
+      };
+      /** Start again (code 75) when coins booked for hours are all that keep the wallet from paying a fee: opening it frees them. */
+      const freeStuckCoins = (c) => {
+        const stale = bookings.stale();
+        if (!restartForBookings(c, wantSpends, stale)) return;
+        stop(`${stale} DUST coin${stale === 1 ? ' has' : 's have'} been booked for over ${Math.round(STALE_DUST_BOOKING_MS / 3_600_000)} hours by transactions that can no longer land, and the wallet frees them when it opens: stopping, to be started again`);
+      };
+      /** Between duties: the same check, so stuck coins are freed before a fee is needed. A wallet not in step just now is
+       * left alone (looked at again on the next pass): waiting on it here would hold up reading the chain. */
+      const checkCoins = async () => {
+        const c = await Promise.race([coinsNow(), sleep(30_000).then(() => undefined)]).catch(() => undefined);
+        if (c) freeStuckCoins(c);
       };
       const coinsText = (c) => `${tn(c.night)} in ${c.nightUtxos} NIGHT UTXO${c.nightUtxos === 1 ? '' : 's'} (${c.nightRegistered} generating DUST); ${dustText(c.dust)} DUST in ${c.dustCoins} coin${c.dustCoins === 1 ? '' : 's'} free to pay with${c.booked ? `, ${c.booked} more booked by transactions that haven't landed` : ''}`;
       /** Register NIGHT that doesn't generate DUST yet (change, or NIGHT that has just arrived). */
@@ -155,6 +186,7 @@ export const openRuntime = async (opts, f) => {
           const c = await coinsNow();
           const enoughCoins = wantSpends < 2 || c.dustCoins >= wantSpends;
           if (enoughCoins && c.dust >= needDust) return;
+          if (!enoughCoins) freeStuckCoins(c);
           const waited = Date.now() - started;
           if (!enoughCoins && waited > 5 * 60_000) throw new Error(`${what} isn't sent: after 5 minutes the wallet still has fewer than ${wantSpends} DUST coins free (${coinsText(c)}). Make more with the coins action, or pay with fewer`);
           if (waited > dustWaitMs) throw new Error(`${what} isn't sent: after ${Math.round(dustWaitMs / 60_000)} minutes the wallet still has too little DUST (${coinsText(c)}; a fee takes about ${dustText(needDust)}). It needs more NIGHT, or more time`);
@@ -268,8 +300,14 @@ export const openRuntime = async (opts, f) => {
             log({ time: new Date().toISOString(), what, circuit, ok: false, provingSeconds: Math.round(proving / 100) / 10, totalSeconds: Math.round((Date.now() - started) / 100) / 10, tries: i, peakProofServerMiB: peak, error: text, tx: lastTx, saved });
             if (saved) say(`the refused transaction is saved: ${saved} (and .json)`);
             say(`FAIL ${what} (try ${i}; proof ${Math.round(proving / 1000)} s, ${Math.round((Date.now() - started) / 1000)} s in all${memory()}): ${text}${txText(lastTx)}`);
-            // A wallet behind the chain doesn't catch up by trying again: start again (the watchdog's code).
-            if (/Wallet\.Sync|DustTreesNotAtBlock|No Dust spend can be dated/i.test(text)) stop('the wallet is behind the chain: stopping, to be started again with a fresh view of it');
+            // A wallet a block or two behind the chain usually catches up within a minute (28 Nov 2026: each time a restart
+            // followed, the call went through just after it). Still behind after that: start again (the watchdog's code).
+            if (/Wallet\.Sync|DustTreesNotAtBlock|No Dust spend can be dated/i.test(text)) {
+              if (i >= 2) stop('the wallet is still behind the chain: stopping, to be started again with a fresh view of it');
+              say('the wallet is behind the chain: waiting a minute for it to catch up, then trying again');
+              await sleep(60_000);
+              continue;
+            }
             // A proof server that failed is not asked again at once: it may have run out of memory. A transaction
             // over its time allowance would be built the same way again, and each try books DUST coins.
             if (i >= 3 || /failed assert|assertion failed|Proof Server request failed|isn't sent|time to dismiss|Custom error: 231/i.test(text)) throw e;
@@ -285,11 +323,11 @@ export const openRuntime = async (opts, f) => {
       };
       return await f({
         session, wallet, providers, handle, anyone, readState, me, meBytes, l0, read, shown, waitUntil, call, stamp, lead, leadLink, alive,
-        coinsNow, coinsText, coinsUntil, makeCoins, registerNew, sendNight,
+        coinsNow, coinsText, coinsUntil, makeCoins, registerNew, sendNight, checkCoins,
         setSpends, spends: () => wantSpends, address,
       });
     });
   } finally {
-    clearTimeout(opening);
+    opened();
   }
 };
