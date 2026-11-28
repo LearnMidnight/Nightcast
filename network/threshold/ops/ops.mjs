@@ -36,6 +36,7 @@
  *                                     contract (a fixed test address by default): two-thirds of the
  *                                     seats, in two epochs in a row, record it
  *         spends:<n>                  pay the fees of the calls after it with n DUST coins (1 to 4)
+ *         send:<address>:<tNIGHT>     send tNIGHT from the wallet to another (an operator's, to fund it)
  *         coins[:<n>]                 give the wallet n DUST coins to pay fees with (as many as
  *                                     --dust-spends by default): its NIGHT is split into n UTXOs
  *                                     (sent to its own address) and each is registered for DUST
@@ -66,21 +67,22 @@
  * runs before taking the fee (the guaranteed part: that and the proofs are what the allowance is
  * for) and its price are reported and logged too.
  */
-import { execFile } from 'node:child_process';
 import { createHash, webcrypto } from 'node:crypto';
-import { appendFileSync, existsSync, mkdirSync, readdirSync, readFileSync, writeFileSync } from 'node:fs';
-import { dirname, join } from 'node:path';
+import { existsSync, readdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { join } from 'node:path';
 import { parseArgs } from 'node:util';
 import { indexerPublicDataProvider } from '@midnight-ntwrk/midnight-js-indexer-public-data-provider';
-import { ContractState, LedgerParameters, Transaction, unshieldedToken } from '@midnight-ntwrk/midnight-js-protocol/v9';
+import { ContractState } from '@midnight-ntwrk/midnight-js-protocol/v9';
 import { ecMul, ecMulGenerator, encodeContractAddress } from '@midnight-ntwrk/compact-runtime';
-import { MidnightBech32m, UnshieldedAddress } from '@midnightntwrk/wallet-sdk-address-format';
-import { filter, firstValueFrom } from 'rxjs';
-import { TX_TTL_SECONDS, blockfrostProjectId, connect, walletBalances } from '@nightcast/deploy';
+import { blockfrostProjectId, connect } from '@nightcast/deploy';
 import {
-  R, T, ed25519Point, errorText, fromHex, hex, ledgerOf, operatorFrom, poolIdOf, poolList, poolSign, randomScalar, readJson, readRecord, say, sleep, succeeded, tn,
-  withChain, writeSecret,
+  R, T, ed25519Point, errorText, fromHex, hex, ledgerOf, night, operatorFrom, poolIdOf, poolList, poolSign, readJson, readRecord, say, tn,
 } from './common.mjs';
+import {
+  cellKeyOf, clock, isZero, modn, phaseName, polynomialFile as polynomialFileIn, polynomialFor as polynomialForIn, positionOf, priorOf,
+  seatKeyOf, seatedIn as seatedInWith, shareOf, short,
+} from './threshold.mjs';
+import { openRuntime } from './runtime.mjs';
 
 const { values, positionals } = parseArgs({
   allowPositionals: true,
@@ -94,91 +96,7 @@ const { values, positionals } = parseArgs({
 const mode = positionals[0];
 const record = readRecord(values.network);
 const address = record.contractAddress;
-const short = (b) => hex(b).slice(0, 12);
-const isZero = (b) => /^0+$/.test(hex(b));
-/** The occupied place in the ring just before `place` (0: none). */
-const priorOf = (l, place) => { let best = 0n; for (const [p] of l.ringOp) if (p < place && p > best) best = p; return best; };
-const phaseName = (p) => Object.keys(T.Phase).find((k) => T.Phase[k] === p) ?? String(p);
-/** The proof system's field: a parcel's share and pad are added in it. */
-const FP = 52435875175126190479447740508185965837690552500527637822603658699938581184513n;
-const modn = (v, m) => ((v % m) + m) % m;
-const seatKeyOf = (e, i) => T.pureCircuits.seatKey(e, BigInt(i));
-const cellKeyOf = (e, d, i) => T.pureCircuits.cellKey(e, BigInt(d), BigInt(i));
-const clock = (seconds) => new Date(Number(seconds) * 1000).toISOString().slice(0, 19).replace('T', ' ') + ' UTC';
-const samePoint = (p, q) => p.x === q.x && p.y === q.y;
-/** Position i's share of epoch e's key: its parcels from the finished dealers, opened with its operator secret and added up; checked against its share key on chain. */
-const shareOf = (l, e, i, secret) => {
-  const c = l.committees.lookup(e);
-  let sk = 0n;
-  for (let d = 1; d <= Number(c.n); d++) {
-    if (!l.finished.member(seatKeyOf(e, d))) continue;
-    const parcel = l.parcels.lookup(cellKeyOf(e, d, i));
-    sk += modn(modn(parcel.c - T.pureCircuits.padOf(ecMul(parcel.r, secret), e, BigInt(d), BigInt(i)), FP), R);
-  }
-  sk = modn(sk, R);
-  const A = [0, 1, 2, 3].map((k) => l.aggregate.lookup(seatKeyOf(e, k)));
-  if (!samePoint(ecMulGenerator(sk), T.pureCircuits.evalCommitments(A[0], A[1], A[2], A[3], BigInt(i)))) throw new Error(`the share opened for position ${i} of epoch ${e} doesn't match its share key on chain`);
-  return sk;
-};
 
-/** Specks as DUST (10^15 specks each). */
-const dustText = (specks) => (Number(specks) / 1e15).toLocaleString('en', { maximumFractionDigits: 3 });
-/** Picoseconds (the ledger's unit of time) as milliseconds. */
-const msOf = (ps) => Math.round(Number(ps) / 1e6) / 1e3;
-const timeOf = (cost) => (cost.computeTime > cost.readTime ? cost.computeTime : cost.readTime);
-/**
- * What a transaction about to be sent looks like to the ledger's limits: its size, its DUST
- * spends, how many of the call's steps run before the fee is taken (guaranteed) and after
- * (fallible), and its price. Whatever can't be read is left out: this never stops a call.
- */
-const describeTx = (handle) => {
-  const d = {};
-  try { d.bytes = handle.serialize().length; } catch { /* left out */ }
-  // Midnight.js hands transactions on as their bytes: decode them with this ledger.
-  let tx = handle;
-  try { if (typeof handle.deserialize === 'function') tx = handle.deserialize({ v9: Transaction }); } catch { return d; }
-  try {
-    let spends = 0, g = 0, f = 0, gPs = 0n, fPs = 0n, fee = 0n;
-    if (!tx.intents) throw new Error('not a decoded transaction');
-    for (const intent of tx.intents.values()) {
-      spends += intent.dustActions?.spends?.length ?? 0;
-      for (const spend of intent.dustActions?.spends ?? []) fee += spend.vFee;
-      for (const action of intent.actions ?? []) {
-        const gt = action.guaranteedTranscript, ft = action.fallibleTranscript;
-        if (gt) { g += gt.program?.length ?? 0; if (gt.gas) gPs += timeOf(gt.gas); }
-        if (ft) { f += ft.program?.length ?? 0; if (ft.gas) fPs += timeOf(ft.gas); }
-      }
-    }
-    Object.assign(d, { dustSpends: spends, feeSpecks: fee.toString(), feeDust: Number(fee) / 1e15, guaranteedSteps: g, guaranteedMs: msOf(gPs), fallibleSteps: f, fallibleMs: msOf(fPs) });
-  } catch { /* left out */ }
-  const p = LedgerParameters.initialParameters();
-  try {
-    const c = tx.cost(p);
-    d.pricedMs = msOf(timeOf(c));
-    d.cost = { computeMs: msOf(c.computeTime), readMs: msOf(c.readTime), blockUsage: Number(c.blockUsage), bytesWritten: Number(c.bytesWritten), bytesChurned: Number(c.bytesChurned) };
-  } catch { /* left out */ }
-  if (d.bytes !== undefined) d.allowedMs = Math.max(15, Math.round(d.bytes * 2) / 1000);
-  // The ledger's own check, as the node makes it: it says by how much when it fails.
-  try { tx.cost(p, true); d.dismiss = 'ok'; } catch (e) {
-    const text = errorText(e);
-    const m = /would take ([\d.]+)\s*ms to dismiss/.exec(text);
-    d.dismiss = /dismiss/i.test(text) ? 'over' : 'unknown';
-    if (m) d.dismissMs = Number(m[1]);
-    if (!m) d.dismissError = text.slice(0, 200);
-  }
-  return d;
-};
-const txText = (d) => {
-  if (!d) return '';
-  const parts = [];
-  if (d.bytes !== undefined) parts.push(`${d.bytes.toLocaleString('en')} bytes`);
-  if (d.dustSpends !== undefined) parts.push(`${d.dustSpends} DUST spend${d.dustSpends === 1 ? '' : 's'}${d.feeDust ? ` paying ${dustText(d.feeSpecks)} DUST` : ''}`);
-  if (d.guaranteedSteps !== undefined) parts.push(`${d.guaranteedSteps} steps before the fee (${d.guaranteedMs} ms) and ${d.fallibleSteps} after (${d.fallibleMs} ms)`);
-  if (d.pricedMs !== undefined) parts.push(`priced at ${d.pricedMs} ms in all`);
-  if (d.dismiss === 'over') parts.push(`OVER its allowance: ${d.dismissMs ?? '?'} ms to dismiss, ${d.allowedMs} ms allowed`);
-  else if (d.allowedMs !== undefined) parts.push(`${d.allowedMs} ms allowed to dismiss${d.dismiss === 'ok' ? ': within it' : ''}`);
-  return parts.length ? `; the transaction: ${parts.join(', ')}` : '';
-};
 
 const status = (l) => {
   say(`contract ${address}`);
@@ -216,134 +134,19 @@ if (mode === 'status') {
   const actions = positionals.slice(1);
   if (!actions.length) throw new Error('no actions given');
   const dir = values.dir;
-  const log = (row) => {
-    if (!values.log) return;
-    mkdirSync(dirname(values.log), { recursive: true });
-    appendFileSync(values.log, JSON.stringify(row) + '\n');
-  };
-  // Signs of life: every look at the chain or the wallet that came back, and every proof asked for or made.
-  let lastSign = Date.now();
-  const alive = () => { lastSign = Date.now(); };
-  const stallMs = Math.max(3, Number(values.stall) || 10) * 60_000;
-  // How many DUST coins pay each fee (the dust wallet reads this when it balances a transaction).
-  let wantSpends;
-  /** How many DUST coins pay the fees from here on (read by the patched dust wallet each time it balances). */
-  const setSpends = (n) => {
-    wantSpends = Math.max(1, Math.min(4, Math.floor(Number(n)) || 1));
-    if (wantSpends > 1) process.env.NIGHTCAST_DUST_MIN_SPENDS = String(wantSpends);
-    else delete process.env.NIGHTCAST_DUST_MIN_SPENDS;
-  };
-  setSpends(values['dust-spends']);
-  // The watchdog below starts once the wallet is open. Before that the wallet catches up with the chain, which can also
-  // stall for good after a lost connection (27 Nov, after ten idle hours): give that --open-wait minutes, then start again.
-  const openWaitMs = Math.max(5, Number(values['open-wait']) || 30) * 60_000;
-  const opening = setTimeout(() => {
-    say(`stalled: the wallet hasn't caught up with the chain in ${Math.round(openWaitMs / 60_000)} minutes. Stopping, to be started again`);
-    process.exit(75);
-  }, openWaitMs);
   try {
-  await withChain({ network: values.network, proofServerPort: Number(values['proof-server-port']), walletFile: values.wallet, address }, async ({ session, wallet, providers, read: readChain, handle, me, meBytes }) => {
-    // Watched from here on, with the wallet open.
-    clearTimeout(opening);
-    alive();
-    setInterval(() => {
-      if (Date.now() - lastSign < stallMs) return;
-      say(`stalled: no sign of life for ${Math.round(stallMs / 60_000)} minutes (the wallet has probably lost the network). Stopping, to be started again: it goes on from what the chain shows`);
-      process.exit(75);
-    }, 30_000).unref();
-    const read = async (...a) => { const l = await readChain(...a); alive(); return l; };
-    // Look at each transaction as it is sent.
-    let lastTx, lastHandle;
-    const sender = providers.midnightProvider;
-    providers.midnightProvider = new Proxy(sender, {
-      get: (t, k) => {
-        const v = t[k];
-        if (typeof v !== 'function') return v;
-        if (k !== 'submitTx') return v.bind(t);
-        return async (tx, ...rest) => { lastHandle = tx; lastTx = describeTx(tx); alive(); try { return await v.call(t, tx, ...rest); } finally { alive(); } };
-      },
-    });
-    const syncedState = () => firstValueFrom(wallet.wallet.state().pipe(filter((s) => s.isSynced)));
-    /** The wallet's NIGHT UTXOs (and how many generate DUST) and its DUST coins: free to pay with, and booked by a transaction that hasn't landed. */
-    const coinsNow = async () => {
-      const c = { ...(await walletBalances(wallet)), booked: (await syncedState()).dust.pendingCoins.length };
-      alive();
-      return c;
-    };
-    const coinsText = (c) => `${tn(c.night)} in ${c.nightUtxos} NIGHT UTXO${c.nightUtxos === 1 ? '' : 's'} (${c.nightRegistered} generating DUST); ${dustText(c.dust)} DUST in ${c.dustCoins} coin${c.dustCoins === 1 ? '' : 's'} free to pay with${c.booked ? `, ${c.booked} more booked by transactions that haven't landed` : ''}`;
-    /** Register NIGHT that doesn't generate DUST yet (change, or NIGHT that has just arrived). */
-    const registerNew = async () => {
-      const raw = unshieldedToken().raw, ks = wallet.unshieldedKeystore;
-      const coins = (await syncedState()).unshielded.availableCoins.filter((x) => x.utxo.type === raw && x.meta.registeredForDustGeneration === false);
-      if (!coins.length) return;
-      const recipe = await wallet.wallet.registerNightUtxosForDustGeneration(coins, ks.getPublicKey(), (payload) => ks.signDataAsync(payload));
-      const txId = await wallet.wallet.submitTransaction(await wallet.wallet.finalizeRecipe(recipe));
-      say(`${coins.length} NIGHT UTXO${coins.length === 1 ? '' : 's'} registered to generate DUST, transaction ${txId}`);
-    };
-    /** Wait until `ok(coins)`, looking every 10 s. */
-    const coinsUntil = async (ok, what, ms) => {
-      const until = Date.now() + ms;
-      for (;;) {
-        const c = await coinsNow();
-        if (ok(c)) return c;
-        if (Date.now() > until) throw new Error(`${what} (the wallet: ${coinsText(c)})`);
-        await sleep(10_000);
-      }
-    };
-    /**
-     * About what the next fee takes, in specks: a quarter more than the last one paid. Until one has been, 1.2 DUST:
-     * a fee is mostly the transaction's size (10 DUST for a block's 200,000 bytes), and these are about 20,000 bytes.
-     */
-    let needDust = 1_200_000_000_000_000n;
-    const dustWaitMs = Math.max(1, Number(values['dust-wait']) || 120) * 60_000;
-    /**
-     * Before a call: the coins its fee is to be paid with are free (the last transaction's come back once the wallet
-     * has seen it land), and the wallet holds about a fee's worth of DUST. Waiting for DUST, it says so every 5 minutes.
-     */
-    const coinsReady = async (what) => {
-      const started = Date.now();
-      let told = 0, registered = 0;
-      for (;;) {
-        const c = await coinsNow();
-        const enoughCoins = wantSpends < 2 || c.dustCoins >= wantSpends;
-        if (enoughCoins && c.dust >= needDust) return;
-        const waited = Date.now() - started;
-        if (!enoughCoins && waited > 5 * 60_000) throw new Error(`${what} isn't sent: after 5 minutes the wallet still has fewer than ${wantSpends} DUST coins free (${coinsText(c)}). Make more with the coins action, or pass --dust-spends`);
-        if (waited > dustWaitMs) throw new Error(`${what} isn't sent: after ${Math.round(dustWaitMs / 60_000)} minutes the wallet still has too little DUST (${coinsText(c)}; a fee takes about ${dustText(needDust)}). It needs more NIGHT, or more time`);
-        if (enoughCoins && Date.now() - told > 5 * 60_000) {
-          say(`waiting for DUST before ${what}: the wallet has ${dustText(c.dust)} and a fee takes about ${dustText(needDust)} (DUST builds up from the wallet's ${tn(c.night)})`);
-          told = Date.now();
-        }
-        // NIGHT sent to the wallet meanwhile makes DUST only once it is registered.
-        if (c.nightRegistered < c.nightUtxos && Date.now() - registered > 5 * 60_000) {
-          registered = Date.now();
-          await registerNew().catch((e) => say(`registering new NIGHT for DUST failed (trying again later): ${errorText(e).slice(0, 200)}`));
-        }
-        await sleep(15_000);
-      }
-    };
-    // Time the proof server's part of each call.
-    let proving = 0;
-    const prover = providers.proofProvider;
-    providers.proofProvider = new Proxy(prover, {
-      get: (t, k) => {
-        const v = t[k];
-        if (typeof v !== 'function') return v;
-        return async (...a) => { const s = Date.now(); alive(); try { return await v.apply(t, a); } finally { proving += Date.now() - s; alive(); } };
-      },
-    });
-    const l0 = await read();
-    const stamp = (lead) => BigInt(Math.floor(Date.now() / 1000) + lead);
-    const lead = Number(values.lead), leadLink = Number(values['lead-link']);
-    if (BigInt(Math.max(lead, leadLink)) >= l0.slack) throw new Error(`a lead of ${Math.max(lead, leadLink)} s is not inside the contract's slack of ${l0.slack} s`);
+  await openRuntime({
+    network: values.network, proofServerPort: Number(values['proof-server-port']), walletFile: values.wallet, address, log: values.log, saveDir: dir,
+    dustSpends: values['dust-spends'], dustWait: values['dust-wait'], stall: values.stall, openWait: values['open-wait'],
+    lead: Number(values.lead), leadLink: Number(values['lead-link']), proofContainer: values['proof-container'],
+  }, async ({ handle, anyone, me, meBytes, l0, read, shown, waitUntil, call, stamp, lead, leadLink, coinsNow, coinsText, coinsUntil, makeCoins, sendNight, setSpends, spends }) => {
     say(`calling from ${me}; the contract's slack is ${l0.slack} s`);
     const c0 = await coinsNow();
-    say(`the wallet: ${coinsText(c0)}; each fee is paid with ${wantSpends === 1 ? 'as few DUST coins as cover it' : `${wantSpends} DUST coins`}`);
-    if (c0.dustCoins + c0.booked < wantSpends && !actions.some((x) => x.split(':')[0] === 'coins')) {
-      throw new Error(`the wallet has ${c0.dustCoins + c0.booked} DUST coin(s) and each fee is to be paid with ${wantSpends}: make them first with the coins action (bash network/threshold/vm/tnet.sh coins)`);
+    say(`the wallet: ${coinsText(c0)}; each fee is paid with ${spends() === 1 ? 'as few DUST coins as cover it' : `${spends()} DUST coins`}`);
+    if (c0.dustCoins + c0.booked < spends() && !actions.some((x) => x.split(':')[0] === 'coins')) {
+      throw new Error(`the wallet has ${c0.dustCoins + c0.booked} DUST coin(s) and each fee is to be paid with ${spends()}: make them first with the coins action (bash network/threshold/vm/tnet.sh coins)`);
     }
     const h = (k) => handle(`tnet-${k.name}`, { operatorSecret: k.secret, answerSecs: l0.answerSecs });
-    const anyone = () => handle('tnet-anyone', { answerSecs: l0.answerSecs });
     const key = (name) => ({ ...operatorFrom(join(dir, `${name}.secret`)), name });
     /** The operator keys kept in <dir>, by id: who is who on the chain. */
     const known = new Map();
@@ -353,132 +156,34 @@ if (mode === 'status') {
       known.set(hex(operatorFrom(join(dir, f)).id), name);
     }
     const newest = (l) => { if (l.opened === 0n) throw new Error('no epoch has been opened yet'); return l.opened; };
-    const seatedIn = (l, e) => Array.from({ length: Number(l.committees.lookup(e).seated) }, (_, k) => {
-      const id = l.members.lookup(seatKeyOf(e, k + 1));
-      return { position: k + 1, id, name: known.get(hex(id)) };
-    });
-    const positionOf = (l, e, id) => seatedIn(l, e).find((x) => hex(x.id) === hex(id))?.position ?? 0;
-    const polynomialFile = (name, e) => join(dir, `epoch-${e}-${name}.poly.secret`);
-    /** A dealer's polynomial for an epoch: made once and kept (mode 600), zeros past the threshold. */
-    const polynomialFor = (name, e, t) => {
-      const file = polynomialFile(name, e);
-      if (!existsSync(file)) {
-        writeSecret(file, { role: 'threshold-polynomial', operator: name, epoch: e.toString(), coefficients: Array.from({ length: 4 }, (_, k) => (k < t ? randomScalar() : 0n).toString(16).padStart(64, '0')) });
-      }
-      const p = readJson(file);
-      if (p.role !== 'threshold-polynomial') throw new Error(`${file} is not a polynomial file`);
-      return p.coefficients.map((c) => BigInt('0x' + c));
-    };
+    const seatedIn = (l, e) => seatedInWith(l, e, known);
+    const polynomialFile = (name, e) => polynomialFileIn(dir, name, e);
+    const polynomialFor = (name, e, t) => polynomialForIn(dir, name, e, t);
     const lastRequest = () => {
       const file = join(dir, 'last-request');
       if (!existsSync(file)) throw new Error('no request has been made from here yet (request first)');
       return fromHex(readFileSync(file, 'utf8').trim());
-    };
-    /** Wait until the indexer shows what the transaction did. */
-    const shown = async (ok, what, ms = 180_000) => {
-      const until = Date.now() + ms;
-      for (;;) {
-        if (ok(await read())) return;
-        if (Date.now() > until) throw new Error(`the chain did not show ${what} within ${ms / 1000} s`);
-        await sleep(5_000);
-      }
-    };
-    /** The proof server container's memory in MiB now ("6.2GiB / 23.4GiB" -> 6349), or undefined. */
-    const memoryNow = () => new Promise((done) => {
-      if (!values['proof-container']) return done(undefined);
-      execFile('docker', ['stats', '--no-stream', '--format', '{{.MemUsage}}', values['proof-container']], { timeout: 10_000 }, (err, out) => {
-        const m = /^\s*([\d.]+)\s*(KiB|MiB|GiB|B)/.exec(String(out ?? ''));
-        if (err || !m) return done(undefined);
-        done(Math.round(Number(m[1]) * { B: 1 / 1048576, KiB: 1 / 1024, MiB: 1, GiB: 1024 }[m[2]]));
-      });
-    });
-    /** One call: up to three tries when it fails for a reason that can pass; a contract assertion is final. */
-    const call = async (what, circuit, f) => {
-      for (let i = 1; ; i++) {
-        proving = 0;
-        const started = Date.now();
-        let peak;
-        let sampling = false;
-        const sampler = setInterval(async () => {
-          if (sampling) return;
-          sampling = true;
-          const m = await memoryNow();
-          if (m !== undefined && (peak === undefined || m > peak)) peak = m;
-          sampling = false;
-        }, 5_000);
-        const memory = () => (peak === undefined ? '' : `, proof server up to ${(peak / 1024).toFixed(1)} GiB`);
-        lastTx = undefined;
-        lastHandle = undefined;
-        try {
-          await coinsReady(what);
-          const r = succeeded(await f(), what);
-          clearInterval(sampler);
-          const row = { time: new Date().toISOString(), what, circuit, ok: true, provingSeconds: Math.round(proving / 100) / 10, totalSeconds: Math.round((Date.now() - started) / 100) / 10, tries: i, peakProofServerMiB: peak, txId: r.public?.txId, tx: lastTx };
-          log(row);
-          say(`ok   ${what}: proof ${row.provingSeconds} s, ${row.totalSeconds} s in all${memory()}${i > 1 ? ` (try ${i})` : ''}, transaction ${row.txId}${txText(lastTx)}`);
-          if (lastTx?.feeSpecks) needDust = (BigInt(lastTx.feeSpecks) * 5n) / 4n;
-          return r;
-        } catch (e) {
-          clearInterval(sampler);
-          const text = errorText(e);
-          // A transaction the node refused: keep it, for whoever looks into why.
-          let saved;
-          if (lastHandle && /1010|Invalid Transaction|time to dismiss|Custom error/i.test(text)) {
-            try {
-              saved = join(values.dir, `refused-${circuit}-${new Date().toISOString().replace(/[:.]/g, '-')}.tx`);
-              writeFileSync(saved, `${Buffer.from(lastHandle.serialize()).toString('hex')}\n`);
-              writeFileSync(`${saved}.json`, `${JSON.stringify({ what, circuit, error: text, tx: lastTx, dustSpendsWanted: wantSpends }, null, 2)}\n`);
-            } catch (err) { saved = undefined; say(`the refused transaction couldn't be saved: ${errorText(err).slice(0, 200)}`); }
-          }
-          log({ time: new Date().toISOString(), what, circuit, ok: false, provingSeconds: Math.round(proving / 100) / 10, totalSeconds: Math.round((Date.now() - started) / 100) / 10, tries: i, peakProofServerMiB: peak, error: text, tx: lastTx, saved });
-          if (saved) say(`the refused transaction is saved: ${saved} (and .json)`);
-          say(`FAIL ${what} (try ${i}; proof ${Math.round(proving / 1000)} s, ${Math.round((Date.now() - started) / 1000)} s in all${memory()}): ${text}${txText(lastTx)}`);
-          // A proof server that failed is not asked again at once: it may have run out of memory. A
-          // transaction over its time allowance would be built the same way again, and each try books DUST coins.
-          // A wallet behind the chain doesn't catch up by trying again: start the run again (the watchdog's code).
-          if (/Wallet\.Sync|DustTreesNotAtBlock|No Dust spend can be dated/i.test(text)) {
-            say('the wallet is behind the chain: stopping, to be started again with a fresh view of it');
-            process.exit(75);
-          }
-          if (i >= 3 || /failed assert|assertion failed|Proof Server request failed|isn't sent|time to dismiss|Custom error: 231/i.test(text)) throw e;
-          // Out of DUST: the next try waits until the wallet holds more than it was thought to need.
-          if (/insufficient\s*funds|could not balance dust/i.test(text)) {
-            const have = (await coinsNow()).dust;
-            const floor = needDust > have ? needDust : have;
-            needDust = (floor * 3n) / 2n;
-          }
-          await sleep(20_000);
-        }
-      }
     };
 
     for (const action of actions) {
       const [verb, a, b] = action.split(':');
       if (verb === 'spends') {
         setSpends(a);
-        say(`fees from here on: ${wantSpends === 1 ? 'one DUST coin' : `${wantSpends} DUST coins`}`);
+        say(`fees from here on: ${spends() === 1 ? 'one DUST coin' : `${spends()} DUST coins`}`);
       } else if (verb === 'coins') {
-        const n = Math.max(1, Math.min(4, Math.floor(Number(a ?? wantSpends)) || 1));
-        let c = await coinsNow();
-        if (c.dustCoins >= n) { say(`the wallet has ${c.dustCoins} DUST coins free: nothing to make`); continue; }
-        const w = wallet.wallet, ks = wallet.unshieldedKeystore, raw = unshieldedToken().raw;
-        // A registered NIGHT UTXO has one DUST coin. Coins booked by a transaction that didn't land can stay booked
-        // for hours, so UTXOs are made for n coins besides those.
-        const utxos = Math.min(8, n + c.booked);
-        if (c.nightUtxos < utxos) {
-          // One transfer to this wallet's own address: `make` new UTXOs of a share each, and the rest comes back as change.
-          const make = utxos - c.nightUtxos, each = c.night / BigInt(utxos);
-          if (each < 1_000_000n) throw new Error(`too little NIGHT to split into ${utxos}: ${tn(c.night)}`);
-          const to = MidnightBech32m.parse(me).decode(UnshieldedAddress, session.config.walletNetworkId);
-          const recipe = await w.transferTransaction([{ type: 'unshielded', outputs: Array.from({ length: make }, () => ({ amount: each, receiverAddress: to, type: raw })) }], { ttl: new Date(Date.now() + TX_TTL_SECONDS * 1000) });
-          const signed = await w.signRecipe(recipe, (payload) => ks.signDataAsync(payload));
-          const txId = await w.submitTransaction(await w.finalizeRecipe(signed));
-          say(`the wallet's NIGHT is being split: ${make} part${make === 1 ? '' : 's'} of ${tn(each)} sent to its own address, transaction ${txId}`);
-          c = await coinsUntil((x) => x.nightUtxos >= utxos, `the split didn't show within 10 minutes`, 10 * 60_000);
-        }
-        if (c.nightRegistered < c.nightUtxos) await registerNew();
-        c = await coinsUntil((x) => x.dustCoins >= n, `the new DUST coins didn't show within 15 minutes`, 15 * 60_000);
-        say(`the wallet now: ${coinsText(c)}`);
+        const n = Math.max(1, Math.min(4, Math.floor(Number(a ?? spends())) || 1));
+        const before = await coinsNow();
+        if (before.dustCoins >= n) { say(`the wallet has ${before.dustCoins} DUST coins free: nothing to make`); continue; }
+        say(`the wallet now: ${coinsText(await makeCoins(n))}`);
+      } else if (verb === 'send') {
+        const amount = night(b);
+        if (!a?.startsWith('mn_addr') || !(amount > 0n)) throw new Error('send:<mn_addr_... address>:<tNIGHT>');
+        const before = await coinsNow();
+        if (before.night < amount) throw new Error(`the wallet has ${tn(before.night)}`);
+        const txId = await sendNight(a, amount);
+        say(`${tn(amount)} sent to ${a}, transaction ${txId}`);
+        // Until it lands, the UTXO it spent is out of the wallet with all its change: wait for the change, so the next send has NIGHT to spend.
+        await coinsUntil((x) => x.night < before.night && x.night >= before.night - amount, 'the transfer and its change didn\'t show within 10 minutes', 10 * 60_000);
       } else if (verb === 'load-pools') {
         const list = poolList(readJson(join(dir, 'pool-list.json')).pools.map((p) => p.public));
         if (hex(list.root) !== hex(l0.poolsRoot)) throw new Error(`${join(dir, 'pool-list.json')} is not the list this contract was deployed with`);
@@ -638,7 +343,7 @@ if (mode === 'status') {
           // Each minute, ask the wallet for its coins: an answer is a sign of life, so a wallet that has lost the
           // network goes quiet and the watchdog starts the run again (26 Nov: a wallet that lost it here settled
           // nearly an hour behind the chain and was refused).
-          while (Date.now() < due) { coinsNow().catch(() => {}); await sleep(Math.min(60_000, due - Date.now())); }
+          await waitUntil(due);
         }
         const seats = seatedIn(lb, qb.epoch).map((x) => ({ ...x, bond: lb.bonds.lookup(x.id).read(), answered: lb.timelyShares.member(T.pureCircuits.shareKey(qb.number, BigInt(x.position))) }));
         await call('settle', 'settle', async () => (await anyone()).callTx.settle(rid, { bytes: meBytes }));
@@ -717,8 +422,6 @@ if (mode === 'status') {
     // The failing call has said why already: one line here, not a stack trace.
     say(`stopped: ${errorText(e)}`);
     process.exitCode = 1;
-  } finally {
-    clearTimeout(opening);
   }
 } else {
   process.stderr.write('usage: node network/threshold/ops/ops.mjs status | do --wallet <file> --dir <keys dir> [--log <file>] <action> ...\n');

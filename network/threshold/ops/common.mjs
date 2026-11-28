@@ -119,7 +119,12 @@ export const poolSign = (file, message) => {
   const k = readJson(file);
   if (k.role !== 'test-pool') throw new Error(`${file} is not a test pool key`);
   const key = createPrivateKey({ format: 'jwk', key: { kty: 'OKP', crv: 'Ed25519', d: Buffer.from(k.secret, 'hex').toString('base64url'), x: Buffer.from(k.public, 'hex').toString('base64url') } });
-  const g = sign(null, Buffer.from(message), key);
+  return poolSignatureFrom(sign(null, Buffer.from(message), key));
+};
+/** A 64-byte Ed25519 signature (R then S, as RFC 8032 writes it) as the contract takes it. */
+export const poolSignatureFrom = (bytes) => {
+  const g = Buffer.from(bytes);
+  if (g.length !== 64) throw new Error(`an Ed25519 signature is 64 bytes, not ${g.length}`);
   return { r: ed25519Point(g.subarray(0, 32)), s: le(g.subarray(32)) };
 };
 const ZERO = new Uint8Array(32);
@@ -165,10 +170,10 @@ export const readRecord = (network) => {
  * the indexer doesn't show it), `read(address)` its ledger, and `handle(id, privateState)` a
  * contract handle whose `callTx` sends transactions. The wallet is stopped afterwards.
  */
-export const withChain = async ({ network = 'preprod', proofServerPort, walletFile, address }, f) => {
+export const withChain = async ({ network = 'preprod', proofServerPort, proofServerUrl, walletFile, address }, f) => {
   // Preprod is served by Blockfrost: its project id as the CLI finds it (NIGHTCAST_BLOCKFROST_PROJECT_ID,
   // else ~/nightcast-secrets/blockfrost-<network>.secret).
-  const session = await connect(network, { proofServerPort, projectId: blockfrostProjectId(network), waitForBlockfrost: true });
+  const session = await connect(network, { proofServerPort, proofServerUrl, projectId: blockfrostProjectId(network), waitForBlockfrost: true });
   try {
     const wallet = await openWallet(session, { seed: walletSeedFrom(walletFile) });
     try {

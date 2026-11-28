@@ -32,6 +32,17 @@
 #   bash tnet.sh log [lines]          whether a run is going, and the end of run.log
 #   bash tnet.sh midnight             read-only: who produces Midnight's blocks on Preprod (for the real pool list)
 #   bash tnet.sh proof-restart        install this checkout's proof server unit (its memory settings) and restart it
+#   bash tnet.sh bundle               check the compiled contract against the chain and pack it for a GitHub release
+#                                     (/root/nightcast-net/threshold-net-build-preprod.tar.gz); prints its SHA-256
+# The operator package's test: the house's four and op-1 as five operators, each its own process and wallet
+# (network/threshold/ops/operator.mjs run), keeping the network going with no epoch commands from here.
+#   bash tnet.sh team-setup [tNIGHT]  give each its folder in $TEAM (its key from $DATA, a new wallet) and send each
+#                                     wallet tNIGHT from the operators' wallet (150 by default) to make DUST with
+#   bash tnet.sh team-start           start the five in the background (started again when they stall); they share
+#                                     the proof server one proof at a time
+#   bash tnet.sh team-stop            stop them (they go on from what the chain shows when started again)
+#   bash tnet.sh team-log [lines]     which are running, and the end of each one's log
+#   bash tnet.sh team-status          what the chain shows about each of the five (no wallets)
 # Settings: see the top of network/threshold/ops/deploy.mjs. Proof times, and each transaction's size and
 # price, are kept in $DATA/proofs.jsonl.
 set -euo pipefail
@@ -41,6 +52,8 @@ DATA=/root/nightcast-net/threshold
 REQW=/root/nightcast-net/requester-wallet.secret
 OPW=/root/nightcast-net/operators-wallet.secret
 PORT=6304
+TEAM=/root/nightcast-net/team
+MEMBERS="house-1 house-2 house-3 house-4 op-1"
 say() { echo "== $*"; }
 cd "$REPO"
 [ -f network/threshold/check/out-net/contract/index.js ] || { echo "no compiled contract: run bash network/threshold/check/run-net.sh first" >&2; exit 1; }
@@ -79,6 +92,10 @@ case "${1:-}" in
     say "Proof server answering on $PORT; its memory ceiling: $(docker inspect -f '{{.HostConfig.Memory}}' nightcast-net-proof | awk '{ printf "%.1f GiB", $1 / 1073741824 }'); log kept to $(docker inspect -f '{{index .HostConfig.LogConfig.Config "max-size"}}' nightcast-net-proof) x 2"
     free -m | sed -n 1,2p
     ;;
+  bundle)
+    contract=$(node -e 'process.stdout.write(JSON.parse(require("fs").readFileSync(process.argv[1], "utf8")).contractAddress)' network/threshold/deployments/preprod.json)
+    NIGHTCAST_NODE_URL=blockfrost NIGHTCAST_NODE_WS=blockfrost node network/threshold/ops/bundle.mjs pack --build network/threshold/check/out-net --out /root/nightcast-net/threshold-net-build-preprod.tar.gz --contract "$contract" --network preprod --proof-server-port "$PORT"
+    ;;
   midnight)
     node network/threshold/ops/midnight-committee.mjs
     ;;
@@ -86,6 +103,8 @@ case "${1:-}" in
     NIGHTCAST_NODE_URL=blockfrost NIGHTCAST_NODE_WS=blockfrost node network/threshold/ops/ops.mjs status --proof-server-port "$PORT"
     ;;
   first|do|epoch|ask|void|rare|down|coins)
+    # The team acts for the same seats: an epoch command from here as well would deal for them twice.
+    if pgrep -f 'tnet-team-loop' >/dev/null && [ "${TEAM_OK:-}" != 1 ]; then echo "the team's operators are running and act for the same seats: stop them first (bash network/threshold/vm/tnet.sh team-stop), or for a request alone: TEAM_OK=1 bash network/threshold/vm/tnet.sh do request:<tag>" >&2; exit 1; fi
     # One process per wallet: the old test's shared operators service uses the same one.
     if systemctl is-active -q nightcast-net-operators; then echo "the old test's operators service is running and uses this wallet: stop it first (bash network/vm/net.sh stop)" >&2; exit 1; fi
     curl -sf "http://127.0.0.1:$PORT/health" >/dev/null || { echo "the proof server on $PORT isn't answering: systemctl start nightcast-net-proof, wait a minute, and try again" >&2; exit 1; }
@@ -135,5 +154,49 @@ case "${1:-}" in
     if pgrep -f 'node network/threshold/ops/[o]ps.mjs' >/dev/null; then say "A run is going"; else say "Nothing is running"; fi
     if [ -f "$DATA/run.log" ]; then tail -n "${2:-40}" "$DATA/run.log"; else echo "no background run has been started yet"; fi
     ;;
-  *) sed -n 2,36p "$0"; exit 2 ;;
+  team-setup)
+    mkdir -p "$TEAM" && chmod 700 "$TEAM"
+    for m in $MEMBERS; do
+      say "$m"
+      out=$(node network/threshold/ops/operator.mjs init --home "$TEAM/$m" --key "$DATA/$m.secret" --proof-server-port "$PORT")
+      echo "$out" | grep -E 'operator id|wallet address'
+      addr=$(echo "$out" | sed -nE 's/.*wallet address: +(mn_addr[a-z0-9_]+).*/\1/p')
+      [ -n "$addr" ] || { echo "$out" >&2; echo "no wallet address for $m" >&2; exit 1; }
+      # Each wallet is funded once: run again, this sends only to those it hasn't yet.
+      if [ -f "$TEAM/$m/.funded" ]; then echo "   funded already ($(cat "$TEAM/$m/.funded"))"; continue; fi
+      sent=$(bash "$0" do "send:$addr:${2:-150}" 2>&1 || true)
+      echo "$sent" | grep -E 'sent to|stopped|FAIL' || true
+      if echo "$sent" | grep -q 'sent to'; then echo "${2:-150} tNIGHT, $(date -u '+%Y-%m-%d %H:%M') UTC" > "$TEAM/$m/.funded"; else echo "$sent" | grep -vE 'RPC-CORE' | tail -n 12 >&2; echo "sending to $m didn't go through (above: the end of what it said): run team-setup again" >&2; exit 1; fi
+    done
+    ;;
+  team-start)
+    if pgrep -f 'tnet-team-loop' >/dev/null; then echo "the team is running already: bash network/threshold/vm/tnet.sh team-log" >&2; exit 1; fi
+    if pgrep -f 'node network/threshold/ops/[o]ps.mjs' >/dev/null; then echo "a tnet.sh run is going: it acts for the same seats. Wait for it (bash network/threshold/vm/tnet.sh log)" >&2; exit 1; fi
+    curl -sf "http://127.0.0.1:$PORT/health" >/dev/null || { echo "the proof server on $PORT isn't answering: systemctl start nightcast-net-proof, wait a minute, and try again" >&2; exit 1; }
+    for m in $MEMBERS; do
+      [ -f "$TEAM/$m/config.json" ] || { echo "$m has no folder yet: bash network/threshold/vm/tnet.sh team-setup" >&2; exit 1; }
+      echo "==== $(date -u '+%Y-%m-%d %H:%M:%S') UTC: started" >> "$TEAM/$m.log"
+      # Started again whenever it ends other than when stopped: code 75 (it stalled) at once, anything else after a minute.
+      NIGHTCAST_PROOF_LOCK="$TEAM/.proof.lock" nohup bash -c 'for n in $(seq 1 50); do node network/threshold/ops/operator.mjs run --home "$1" --every 120 --claim-at 0.05; code=$?; [ "$code" = 0 ] && exit 0; echo "== ended with code $code: starting again (start $((n + 1)) of 50)"; [ "$code" = 75 ] && sleep 20 || sleep 60; done' tnet-team-loop "$TEAM/$m" >> "$TEAM/$m.log" 2>&1 < /dev/null &
+    done
+    sleep 5
+    say "Started in the background: $MEMBERS. Look at them with: bash network/threshold/vm/tnet.sh team-log"
+    ;;
+  team-stop)
+    pkill -f 'tnet-team-loop' || true
+    pkill -f "operator[.]mjs run --home $TEAM/" || true
+    sleep 3
+    if pgrep -f "operator[.]mjs run --home $TEAM/" >/dev/null; then echo "still running: pgrep -af operator.mjs" >&2; exit 1; fi
+    say "Stopped"
+    ;;
+  team-log)
+    for m in $MEMBERS; do
+      if pgrep -f "operator[.]mjs run --home $TEAM/$m\b" >/dev/null; then say "$m: running"; else say "$m: not running"; fi
+      [ -f "$TEAM/$m.log" ] && tail -n "${2:-8}" "$TEAM/$m.log"
+    done
+    ;;
+  team-status)
+    for m in $MEMBERS; do say "$m"; node network/threshold/ops/operator.mjs status --home "$TEAM/$m" | grep -vE '^\[|RPC-CORE|[0-9] (contract|wallet) ' || true; done
+    ;;
+  *) sed -n 2,47p "$0"; exit 2 ;;
 esac

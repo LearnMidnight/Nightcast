@@ -1,0 +1,50 @@
+# A Nightcast threshold-network operator and its own proof server. See docs/OPERATE.md.
+#
+#   cd network/threshold/docker
+#   cp env.example .env              (then put your Blockfrost project id in it)
+#   docker compose build
+#   docker compose run --rm operator keys
+#   docker compose run --rm operator init
+#   docker compose run --rm operator register
+#   docker compose up -d             (then: docker compose logs -f operator)
+services:
+  proof-server:
+    # The version Midnight's support matrix gives for ledger 9 (as deploy/docker/proof-server.yml).
+    image: midnightntwrk/proof-server:9.0.2
+    command: ['midnight-proof-server']
+    # Not published: only the operator, on this compose network, reaches it. Your operator's secrets
+    # pass through it.
+    restart: unless-stopped
+    # One proof can take 5 GB (linkPool's, once). A ceiling of its own, so a proof too big for the
+    # machine ends this container only (it is started again).
+    mem_limit: ${PROOF_SERVER_MEMORY:-10g}
+    healthcheck:
+      test: ['CMD', 'curl', '-f', 'http://localhost:6300/version']
+      interval: 10s
+      timeout: 5s
+      retries: 30
+      start_period: 10s
+    logging:
+      options: { max-size: '10m', max-file: '2' }
+
+  operator:
+    build:
+      context: ../../..
+      dockerfile: network/threshold/docker/Dockerfile
+    image: nightcast-operator
+    command: ['run']
+    env_file: .env
+    environment:
+      NIGHTCAST_PROOF_SERVER_URL: http://proof-server:6300
+    volumes:
+      # Back this folder up: data/operator/*.secret are your operator.
+      - ./data:/data
+    depends_on:
+      proof-server:
+        condition: service_healthy
+    # A run that loses the network ends with code 75 and is started again; it goes on from what the
+    # chain shows. Stopped with docker compose stop (or down), it stays stopped.
+    restart: unless-stopped
+    stop_grace_period: 30s
+    logging:
+      options: { max-size: '20m', max-file: '3' }

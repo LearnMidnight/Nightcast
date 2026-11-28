@@ -1,0 +1,13 @@
+# What the operator image is built without: installed packages (installed again inside), the
+# compiled threshold contract (downloaded and checked at run time), and anything private.
+.git
+**/node_modules
+**/dist
+contract/src/managed
+network/threshold/check/out*
+network/threshold/deployments
+network/threshold/docker/data
+network/threshold/docker/.env
+**/*.secret
+**/.env
+*.log
